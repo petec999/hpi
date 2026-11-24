@@ -123,10 +123,13 @@ class PR6IntegrationTests(unittest.TestCase):
                 mqtt.deliver("climate/haier/details/compinfo/state", "[60,40,4,230,40]")
             elif ticks[0] == 2:  # defrost OFF -> ON
                 mqtt.deliver("climate/haier/actual/defrost", "ON")
-            elif ticks[0] == 3:  # both ON -> OFF
+            elif ticks[0] == 3:  # keep both ON for another measurement interval
+                mqtt.deliver("climate/haier/details/compinfo/state", "[60,40,4,230,40]")
+                mqtt.deliver("climate/haier/actual/defrost", "ON")
+            elif ticks[0] == 4:  # both ON -> OFF
                 mqtt.deliver("climate/haier/details/compinfo/state", "[0,0,0,230,35]")
                 mqtt.deliver("climate/haier/actual/defrost", "OFF")
-            elif ticks[0] >= 4:
+            elif ticks[0] >= 5:
                 raise StopSimulation()
 
         class ClockDatetime:
