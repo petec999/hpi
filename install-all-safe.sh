@@ -144,6 +144,7 @@ install -d -o haier -g haier -m 750 "$STORE"
 for n in 6 7 8; do
     key="haierpi-pr$n"
     systemctl stop "$key.service" >/dev/null 2>&1 || true
+    rm -rf -- "/opt/$key"
     mkdir -p "/opt/$key"
     cp -a "$ROOT/diagnostics" "/opt/$key/"
     cp -a "$STAGING/venv" "/opt/$key/.venv"
