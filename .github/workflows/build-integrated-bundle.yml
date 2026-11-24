@@ -6,7 +6,28 @@ on:
   workflow_dispatch:
 
 jobs:
+  python39:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Validate runtime compatibility with installed HaierPi Python 3.9
+        run: |
+          python --version
+          python -m compileall -q diagnostics
+          python -m unittest discover -s tests -p 'test_cycle_counter_pr6.py' -v
+          python -m unittest discover -s tests -p 'test_pr6_runtime_simulation.py' -v
+          python -m unittest discover -s tests -p 'test_circuit_telemetry_pr7.py' -v
+          python -m unittest discover -s tests -p 'test_mqtt_circuit_bridge_pr7.py' -v
+          python -m unittest discover -s tests -p 'test_pr7_runtime_simulation.py' -v
+          python -m unittest discover -s tests -p 'test_history_pr8.py' -v
+          python -m unittest discover -s tests -p 'test_combined_diagnostics.py' -v
+          python -m unittest discover -s tests -p 'test_auto_mqtt_config.py' -v
+          python -m unittest discover -s tests -p 'test_install_verify.py' -v
   bundle:
+    needs: python39
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
