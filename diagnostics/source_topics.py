@@ -1,32 +1,15 @@
-"""Resolve HaierPi alpha13 MQTT Discovery references to live MQTT topics.
+"""Resolve MQTT Discovery references to the original state topics.
 
-Some installations retain legacy /haierunit/... discovery configs while the
-controller publishes fresh values under /details/... . Only confirmed HaierPi
-unique IDs with an observed detail-topic mapping are redirected.
+Live inspection of HaierPi on 2026-11-24 confirmed active fresh values on
+climate/haier/haierunit/... for all 11 required PR6/PR7 sensors.
+An earlier attempt to unconditionally redirect those topics to /details/...
+prevented both diagnostic bridges from seeing their input streams.
 
-Do NOT rewrite HaierPi_Defrost: the running alpha13 main.py specifies
-/haierunit/statuses/defrost/state, not /details/defrost/state.
+Use the retained Home Assistant MQTT Discovery topic as published, not a
+speculative equivalent. Do not change sensor state topics silently.
 """
-DETAILS = {
-    "HaierPi_Twi": "twitwo",
-    "HaierPi_Two": "twitwo",
-    "HaierPi_Tao": "tao",
-    "HaierPi_TSatPs_act": "tsatps",
-    "HaierPi_TSatPd_act": "tsatpd",
-    "HaierPi_Td": "tdts",
-    "HaierPi_Ps_act": "pdps",
-    "HaierPi_Pd_act": "pdps",
-    "HaierPi_Compfact": "compinfo",
-    "HaierPi_Compfset": "compinfo",
-}
 
 
 def live_state_topic(uid, discovery_topic, base):
-    """Keep working discovery links; redirect only known legacy mappings."""
-    if not isinstance(discovery_topic, str):
-        return discovery_topic
-    base = base.rstrip("/")
-    if (uid in DETAILS and
-            discovery_topic.startswith(base + "/haierunit/")):
-        return base + "/details/" + DETAILS[uid] + "/state"
+    """Return the actual state_topic advertised by HaierPi MQTT Discovery."""
     return discovery_topic
