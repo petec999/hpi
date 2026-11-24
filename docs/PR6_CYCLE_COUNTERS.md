@@ -1,49 +1,76 @@
-# PR #6 — compressor and defrost counters (work in progress)
+# PR #6 — compressor and defrost daily counters (MQTT integrated)
 
-This is an **offline, read-only counter module**, not yet wired into the
-HaierPi alpha13/Stable application's main.py, scheduler or MQTT Discovery.
-Do not install this branch as a drop-in replacement for a working controller.
+## Architecture
 
-## Signals needed
-- Actual compressor frequency in Hz from the correctly mapped R241 field.
-  Use PR #2's actual/target frequency correction before integration.
-- Explicit defrost flag from R141, not guessed from refrigerant temperatures.
-- Separate freshness checks for R141 and R241 (PR #4).
+A read-only, standalone sidecar at `diagnostics/mqtt_cycle_bridge.py`
+uses HaierPi's retained Home Assistant MQTT Discovery configuration to
+find **actual frequency** (`HaierPi_Compfact`) and the explicit
+**defrost** binary sensor (`HaierPi_Defrost`). MQTT source topics are
+learned from Discovery rather than hard-coded. The Hz sensor must have
+the correct compressor actual/target mapping (fix #2); R141/R241
+freshness requires fix #4.
 
-## Semantics
-- Count an OFF -> ON compressor transition only between consecutive fresh
-  samples, above the configured compressor Hz threshold.
-- Count defrost OFF -> ON based on the explicit flag.
-- Runtime is accumulated only when both ends of an interval indicate ON.
-  State transition instants are unknown, so runtime is deliberately conservative.
-- Never invent starts after service restart, missing data, nonmonotonic
-  timestamps or a gap beyond max_gap_seconds (default 180 seconds).
-- An active cycle interrupted by a telemetry gap cannot be measured in full.
-- Daily figures use the date of the timezone-aware timestamp supplied by the
-  host. The integrator must use a consistent timezone (Europe/Warsaw for the
-  target installation); DST transitions and midnight splits need integration tests.
+The sidecar subscribes to those source topics and three existing
+availability topics. It rejects cached retained source measurements;
+only new live messages are used. If input is missing or stale, its
+eight sensors become unavailable and the counter does not invent work
+or start events.
 
-## Persistence
-Versioned JSON written atomically after each observation. Default path is
-**not hard-coded**; the integrator must choose a location outside directories
-removed by the alpha13 installer, e.g. /var/lib/haierpi/cycle_counters.json,
-create it with suitable permissions and back it up. Only the current day's
-totals are persisted. Previous days are overwritten: longer history is PR #8.
-A restart loads totals but intentionally loses the previous active-cycle
-baseline. This may undercount runtime and completed-cycle lengths.
+## Eight Home Assistant sensors (automatically via MQTT Discovery)
 
-## Planned Home Assistant MQTT Discovery
-Proposed sensors: daily starts, daily compressor running seconds, completed
-cycles, last completed cycle seconds, daily defrost starts, defrost running
-seconds, completed defrosts and last defrost seconds. Units/state classes
-must be chosen to avoid duplicate energy/statistical claims. MQTT topics and
-discovery configuration are **not implemented yet**.
+- Compressor starts today
+- Compressor running seconds today
+- Completed compressor cycles today
+- Last completed compressor cycle duration (seconds)
+- Defrost starts today
+- Defrost running seconds today
+- Completed defrost cycles today
+- Last completed defrost duration (seconds)
 
-## Run unit tests
-python3 -m unittest discover -s tests -p 'test_cycle_counter_pr6.py' -v
+Discovery IDs use `HaierPi_PR6_`. The sidecar's telemetry is published
+under `<HPI_TOPIC>/diagnostics/counters/`, separate from native control topics.
+No user YAML is needed when MQTT Discovery is enabled.
 
-## Integration gate
-Before enabling this module in HaierPi verify alpha13 and Stable source layouts,
-actual refresh cadence, explicit defrost bit semantics, MQTT reconnect behavior,
-persistence and timezone handling on real hardware. No heating commands,
-Modbus layouts or existing MQTT entity IDs should be changed.
+## Persistence and restart
+
+Counters live in versioned atomic JSON under
+`/var/lib/haierpi/cycle_counters.json` by default, outside alpha13
+installation files. Daily counts survive process and device restarts
+as long as this data directory survives. A restart resets the
+current observed ON/OFF baseline (avoids false starts). Only the
+current day is retained in the JSON. Older historical readings
+can be preserved by PR #8's SQLite recorder.
+
+At midnight, a new daily set begins on the next observation. Intervals
+crossing midnight are not split and cannot be reconstructed. Time totals
+are conservatively estimated from confirmed consecutive ON readings;
+a transition interval itself is not credited. Samples missed during
+communication outages are not backfilled.
+
+## Running as a separate service
+
+The service template is `deployment/haierpi-pr6.service` and its
+environment configuration is `deployment/haierpi-pr6.env.example`.
+It needs Python 3.10+, `paho-mqtt`, a writable
+`/var/lib/haierpi` and MQTT access. It is **not** automatically
+installed by `alpha13.sh` and does **not** modify HaierPi or heat pump
+control logic. To enable, install the branch's `diagnostics/` folder
+and the service unit into a dedicated deployment directory, set the
+broker host/credentials and the actual MQTT topic prefix, then enable
+the service with systemd. Verify HaierPi Discovery topics on the
+real broker before enabling.
+
+## Validation
+
+```sh
+python3 -m unittest discover -s tests -p test_cycle_counter_pr6.py -v
+python3 -m unittest discover -s tests -p test_pr6_runtime_simulation.py -v
+```
+
+The simulated end-to-end test exercises MQTT Discovery, fresh and
+retained values, start/stop transitions, defrost, persistent JSON,
+and publication of eight Home Assistant MQTT sensors.
+
+Remaining before production deployment: real broker, actual alpha13
+sensor Discovery payload, true defrost semantics, on-device restart and
+file permissions test. This is not a verified heat-pump installation.
