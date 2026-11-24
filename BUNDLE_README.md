@@ -10,13 +10,25 @@ is published by GitHub Actions. These are **offline/synthetic** checks.
 There has been NO validation on the owner's actual pump, MQTT broker or
 Home Assistant. The bundled services are **not automatically enabled**.
 
-## IMPORTANT: DO NOT RUN alpha13.sh DIRECTLY ON THE WORKING PUMP
-The inherited alpha13 installer stops the running service and removes
-installed files before unpacking. The script also downloads the archive
-from the upstream main branch rather than using the included copy.
-Review and change this behavior before real deployment. This bundle
-is for inspection and staged deployment preparation, **not** a
-one-click production installer.
+## SAFE installation and rollback
+The raw `alpha13.sh` **is not the production entry point**: it stops the
+service and changes installed files. The included `install-safe.sh` wrapper:
+- verifies the local pinned `1.4.5_alpha13.tar.gz` before stopping service;
+- backs up the entire current app tree (including PyHaier), config and
+  service-unit text into a dated private snapshot in /var/backups/haierpi;
+- starts the bundled alpha13 installer with the pinned local archive;
+- checks the service is running after a configurable monitoring interval;
+- automatically stops and restores the full snapshot/config after failure,
+  then starts the previous service if it was previously running.
+A separate `rollback-safe.sh <snapshot-directory>` restores manually.
+Run `sudo bash install-safe.sh` from the extracted bundle **only after**
+verifying the service layout, permissions and MQTT dependencies. The defaults
+expect the same Linux paths as the existing HaierPi installation.
+
+The systemd sidecars for PR6–PR8 require a separate deployment/setup:
+the wrapper installs the core HaierPi and source fixes #1–#4, but **does not
+automatically deploy those three diagnostic services**. This is not a
+one-click fully integrated deployment. Verify first on staged hardware.
 
 ## Bundle structure
 - `1.4.5_alpha13.tar.gz`: original upstream alpha13 archive, unchanged
