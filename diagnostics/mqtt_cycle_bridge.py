@@ -82,6 +82,9 @@ class MQTTInput:
         self.base = os.environ.get("HPI_TOPIC", "climate/haier").rstrip("/")
         self.topics = {}
         self.values = {}
+        # Defrost is a retained MQTT status on live HaierPi. It may initialize
+        # our baseline but must not be counted as a new defrost transition.
+        self.retained_defrost_baseline = False
         self.health = {"r141": False, "r241": False, "connected": False}
 
     def discover(self, config):
@@ -97,10 +100,15 @@ class MQTTInput:
                             config.get("pl_on", config.get("payload_on", "ON")),
                             config.get("pl_off", config.get("payload_off", "OFF")))
         self.values.pop(key, None)
+        if key == "defrost":
+            self.retained_defrost_baseline = False
         return topic
 
     def update(self, topic, payload, *, retained=False, now=None):
-        if retained:  # retained source states are not fresh observations
+        # The compressor MUST arrive live. HaierPi's retained defrost status
+        # is usable only as an initial steady-state baseline when the separate
+        # connected/r141/r241 MQTT freshness gates are all online.
+        if retained and topic != self.topics.get("defrost", (None,))[0]:
             return
         if now is None:
             now = time.monotonic()
@@ -111,26 +119,35 @@ class MQTTInput:
                 item = extract(payload, template)
                 value = parse_actual_hz(item) if key == "comp" else parse_defrost(item, on, off)
                 self.values[key] = (value, now)
+                if key == "defrost":
+                    self.retained_defrost_baseline = bool(retained)
             except (ValueError, TypeError, IndexError, KeyError, json.JSONDecodeError):
                 self.values.pop(key, None)
+                if key == "defrost":
+                    self.retained_defrost_baseline = False
 
     def availability(self, kind, payload):
         state = payload.decode() if isinstance(payload, bytes) else str(payload)
         self.health[kind] = state.strip().lower() == "online"
         if not self.health[kind]:
             self.values.clear()
+            self.retained_defrost_baseline = False
 
     def current(self, now=None):
         now = time.monotonic() if now is None else now
         if (not all(self.health.values()) or set(self.topics) != set(SOURCE_IDS)
                 or set(self.values) != set(SOURCE_IDS)):
             return None
-        if any(not 0 <= now - observed <= self.ttl for _, observed in self.values.values()):
-            return None
+        for key, (_, observed) in self.values.items():
+            if key == "defrost" and self.retained_defrost_baseline:
+                continue  # retained status is a baseline, not a periodic telemetry sample
+            if not 0 <= now - observed <= self.ttl:
+                return None
         return self.values["comp"][0], self.values["defrost"][0]
 
     def reset(self):
         self.values.clear()
+        self.retained_defrost_baseline = False
         self.health = dict.fromkeys(self.health, False)
 
 
