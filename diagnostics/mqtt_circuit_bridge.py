@@ -110,7 +110,14 @@ class TelemetryState:
         if not isinstance(template, str):
             raise ValueError("Invalid source template")
         field = next(k for k, v in SOURCE_IDS.items() if v == unique)
-        self.mapping[field] = (topic, template)
+        unit = config.get("unit_of_measurement", config.get("unit_of_meas", ""))
+        if field in ("ps_actual", "pd_actual"):
+            unit = (unit or "").strip().lower().replace(" ", "")
+            if unit not in ("bar", "mpa", "kpa"):
+                raise ValueError("Unknown pressure unit for " + field + ": " + repr(unit))
+        else:
+            unit = ""
+        self.mapping[field] = (topic, template, unit)
         self.values.pop(field, None)
         return True
 
@@ -120,10 +127,14 @@ class TelemetryState:
             return
         if now is None:
             now = time.monotonic()
-        for field, (source_topic, value_template) in self.mapping.items():
+        for field, (source_topic, value_template, unit) in self.mapping.items():
             if source_topic == topic:
                 try:
-                    self.values[field] = (decode_value(payload, value_template), now)
+                    value = decode_value(payload, value_template)
+                    if field in ("ps_actual", "pd_actual"):
+                        # Normalize the unit advertised by MQTT Discovery.
+                        value *= {"bar": 0.1, "mpa": 1.0, "kpa": 0.001}[unit]
+                    self.values[field] = (value, now)
                 except (ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError):
                     self.values.pop(field, None)
 
@@ -202,7 +213,7 @@ def main():
         state.availability = dict.fromkeys(state.availability, False)
         client.subscribe(prefix + "/sensor/#", qos=1)
         client.subscribe(base + "/haierpi/+", qos=1)
-        for topic in set(topic for topic, _ in state.mapping.values()):
+        for topic in set(item[0] for item in state.mapping.values()):
             client.subscribe(topic, qos=1)
         publish_discovery()
         client.publish(online, "offline", qos=1, retain=True)
