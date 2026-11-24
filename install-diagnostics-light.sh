@@ -151,7 +151,7 @@ cp -a "$STAGE/code/diagnostics" "$APP/diagnostics"
 chown -R "$DIAG_USER:$DIAG_GROUP" "$APP"
 install -m 600 "$STAGE/mqtt.env" /etc/haierpi-diagnostics.env
 install -d -o "$DIAG_USER" -g "$DIAG_GROUP" -m 750 "$DATA"
-chown "$DIAG_USER:$DIAG_GROUP" "$DATA"
+chown -R "$DIAG_USER:$DIAG_GROUP" "$DATA"
 for n in 6 7 8; do
     unit="haierpi-pr$n"
     sed -e "s|^WorkingDirectory=.*|WorkingDirectory=$APP|" \
