@@ -32,6 +32,8 @@ jobs:
         run: |
           bash -n install-all-safe.sh
           python -m unittest discover -s tests -p 'test_install_verify.py' -v
+      - name: Simulated unified all-service install and rollback
+        run: sudo "$(command -v python)" -m unittest discover -s tests -p 'test_unified_installer.py' -v
       - name: Simulated SAFE install and rollback
         run: bash tests/test_safe_rollback.sh
       - name: Assemble portable release bundle
