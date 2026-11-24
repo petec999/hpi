@@ -1,37 +1,21 @@
-"""Optional MQTT sidecar for PR #6. Does not modify heat pump controls.
+"""PR6: read-only MQTT diagnostic sidecar, auto-discovers HaierPi source sensors.
 
-Requires paho-mqtt and freshness topics from upstream PR #4.
-Configure HA MQTT broker credentials via environment variables.
+Prerequisites: HaierPi MQTT discovery, R141/R241 availability (fix #4).
+Never publishes Haier control commands.
 """
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from pathlib import Path
 import json
+import math
 import os
+from pathlib import Path
+import re
 import time
 
-from diagnostics.cycle_counter import CycleCounter
-
-
-def parse_defrost(payload):
-    value = payload.strip().lower()
-    if value in ("on", "true", "1", "yes"):
-        return True
-    if value in ("off", "false", "0", "no"):
-        return False
-    raise ValueError("Unknown defrost state")
-
-
-def parse_actual_hz(payload):
-    values = json.loads(payload)
-    # PyHaier GetCompInfo order: fset, fact, current, voltage, temperature.
-    if not isinstance(values, list) or len(values) < 2:
-        raise ValueError("Invalid compressor data")
-    value = values[1]
-    if type(value) not in (int, float):
-        raise ValueError("Invalid Hz")
-    return float(value)
-
+try:
+    from .cycle_counter import CycleCounter
+except ImportError:
+    from cycle_counter import CycleCounter
 
 METRICS = {
     "compressor_starts": ("Compressor starts today", None),
@@ -43,6 +27,105 @@ METRICS = {
     "defrost_completed_cycles": ("Completed defrost cycles today", None),
     "defrost_last_cycle_seconds": ("Last defrost cycle", "s"),
 }
+SOURCE_IDS = {"comp": "HaierPi_Compfact", "defrost": "HaierPi_Defrost"}
+_INDEX = re.compile(r"value_json\s*\[\s*(\d+)\s*\]")
+_KEY = re.compile(r"value_json\s*\.\s*([A-Za-z_]\w*)")
+_NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+
+
+def extract(payload, template=""):
+    raw = payload.decode("utf-8") if isinstance(payload, bytes) else str(payload)
+    template = (template or "").strip()
+    if not template or template in ("{{ value }}", "{{value}}"):
+        return raw.strip()
+    indices, keys = _INDEX.findall(template), _KEY.findall(template)
+    if len(indices) + len(keys) != 1:
+        raise ValueError("Unsupported discovery template")
+    data = json.loads(raw)
+    if indices:
+        if not isinstance(data, list):
+            raise ValueError("Expected JSON list")
+        return data[int(indices[0])]
+    if not isinstance(data, dict):
+        raise ValueError("Expected JSON dict")
+    return data[keys[0]]
+
+
+def parse_defrost(value, payload_on="ON", payload_off="OFF"):
+    value = str(value).strip().lower()
+    if value in (str(payload_on).lower(), "true", "1", "on", "yes"):
+        return True
+    if value in (str(payload_off).lower(), "false", "0", "off", "no"):
+        return False
+    raise ValueError("Unknown defrost state")
+
+
+def parse_actual_hz(value):
+    if type(value) not in (int, float, str) or not _NUMBER.fullmatch(str(value).strip()):
+        raise ValueError("Invalid compressor frequency")
+    hz = float(value)
+    if not math.isfinite(hz) or not 0 <= hz <= 250:
+        raise ValueError("Out of range compressor Hz")
+    return hz
+
+
+class MQTTInput:
+    def __init__(self, ttl=120):
+        if not 0 < ttl <= 180:
+            raise ValueError("TTL must be within 0..180 seconds")
+        self.ttl = float(ttl)
+        self.topics = {}
+        self.values = {}
+        self.health = {"r141": False, "r241": False, "connected": False}
+
+    def discover(self, config):
+        uid = config.get("uniq_id", config.get("unique_id"))
+        key = next((k for k, v in SOURCE_IDS.items() if v == uid), None)
+        if key is None:
+            return None
+        topic = config.get("stat_t", config.get("state_topic"))
+        template = config.get("val_tpl", config.get("value_template", ""))
+        if not isinstance(topic, str) or not topic or not isinstance(template, str):
+            raise ValueError("Bad MQTT discovery configuration")
+        self.topics[key] = (topic, template,
+                            config.get("pl_on", config.get("payload_on", "ON")),
+                            config.get("pl_off", config.get("payload_off", "OFF")))
+        self.values.pop(key, None)
+        return topic
+
+    def update(self, topic, payload, *, retained=False, now=None):
+        if retained:  # retained source states are not fresh observations
+            return
+        if now is None:
+            now = time.monotonic()
+        for key, (src, template, on, off) in self.topics.items():
+            if src != topic:
+                continue
+            try:
+                item = extract(payload, template)
+                value = parse_actual_hz(item) if key == "comp" else parse_defrost(item, on, off)
+                self.values[key] = (value, now)
+            except (ValueError, TypeError, IndexError, KeyError, json.JSONDecodeError):
+                self.values.pop(key, None)
+
+    def availability(self, kind, payload):
+        state = payload.decode() if isinstance(payload, bytes) else str(payload)
+        self.health[kind] = state.strip().lower() == "online"
+        if not self.health[kind]:
+            self.values.clear()
+
+    def current(self, now=None):
+        now = time.monotonic() if now is None else now
+        if (not all(self.health.values()) or set(self.topics) != set(SOURCE_IDS)
+                or set(self.values) != set(SOURCE_IDS)):
+            return None
+        if any(not 0 <= now - observed <= self.ttl for _, observed in self.values.values()):
+            return None
+        return self.values["comp"][0], self.values["defrost"][0]
+
+    def reset(self):
+        self.values.clear()
+        self.health = dict.fromkeys(self.health, False)
 
 
 def main():
@@ -52,35 +135,22 @@ def main():
         raise SystemExit("Install paho-mqtt first") from exc
 
     base = os.environ.get("HPI_TOPIC", "climate/haier").rstrip("/")
-    host = os.environ.get("HPI_MQTT_HOST", "127.0.0.1")
-    port = int(os.environ.get("HPI_MQTT_PORT", "1883"))
-    comp_topic = os.environ.get("HPI_COMP_TOPIC", base + "/details/compinfo/state")
-    defrost_topic = os.environ.get("HPI_DEFROST_TOPIC", base + "/details/defrost/state")
-    tz = ZoneInfo(os.environ.get("HPI_TZ", "Europe/Warsaw"))
-    storage = Path(os.environ.get("HPI_COUNTER_FILE",
-                "/var/lib/haierpi/cycle_counters.json"))
-    counters = CycleCounter(storage)
-    sample = {"comp": None, "defrost": None,
-              "r141": False, "r241": False, "connected": False}
-    received_at = {"comp": 0.0, "defrost": 0.0}
-    last_tick = 0.0
-    discovery_prefix = os.environ.get("HPI_DISCOVERY_PREFIX", "homeassistant")
-    freshness_ttl = float(os.environ.get("HPI_SAMPLE_TTL", "120"))
-    if not 0 < freshness_ttl <= 180:
-        raise ValueError("HPI_SAMPLE_TTL must be within 0..180 seconds")
-
-    client = mqtt.Client(client_id="haierpi-pr6-counters")
-    username = os.environ.get("HPI_MQTT_USERNAME")
-    if username:
-        client.username_pw_set(username, os.environ.get("HPI_MQTT_PASSWORD"))
-    availability = base + "/diagnostics/counters/available"
-    topics = {
-        comp_topic: "comp",
-        defrost_topic: "defrost",
+    prefix = os.environ.get("HPI_DISCOVERY_PREFIX", "homeassistant").rstrip("/")
+    state = MQTTInput(float(os.environ.get("HPI_SAMPLE_TTL", "120")))
+    counters = CycleCounter(Path(os.environ.get(
+        "HPI_COUNTER_FILE", "/var/lib/haierpi/cycle_counters.json")))
+    zone = ZoneInfo(os.environ.get("HPI_TZ", "Europe/Warsaw"))
+    output = base + "/diagnostics/counters"
+    availability = output + "/available"
+    availability_topics = {
         base + "/haierpi/r141_fresh": "r141",
         base + "/haierpi/r241_fresh": "r241",
         base + "/haierpi/connected": "connected",
     }
+    client = mqtt.Client(client_id="haierpi-pr6-counters")
+    username = os.environ.get("HPI_MQTT_USERNAME")
+    if username:
+        client.username_pw_set(username, os.environ.get("HPI_MQTT_PASSWORD"))
     client.will_set(availability, "offline", qos=1, retain=True)
 
     def publish_discovery():
@@ -88,7 +158,7 @@ def main():
             cfg = {
                 "name": name,
                 "unique_id": "HaierPi_PR6_" + key,
-                "state_topic": base + "/diagnostics/counters/" + key,
+                "state_topic": output + "/" + key,
                 "availability_topic": availability,
                 "payload_available": "online",
                 "payload_not_available": "offline",
@@ -98,63 +168,59 @@ def main():
             }
             if unit:
                 cfg["unit_of_measurement"] = unit
-            client.publish(
-                discovery_prefix + "/sensor/haierpi_pr6/" + key + "/config",
-                json.dumps(cfg), qos=1, retain=True)
+            client.publish(prefix + "/sensor/haierpi_pr6/" + key + "/config",
+                           json.dumps(cfg), qos=1, retain=True)
 
     def on_connect(client, userdata, flags, rc):
         if rc != 0:
             return
-        # Reset availability: retained MQTT readings alone are not live data.
-        sample.update(comp=None, defrost=None, r141=False,
-                      r241=False, connected=False)
-        received_at.update(comp=0.0, defrost=0.0)
-        for topic in topics:
+        state.reset()
+        client.subscribe(prefix + "/sensor/#", qos=1)
+        client.subscribe(prefix + "/binary_sensor/#", qos=1)
+        for topic in availability_topics:
             client.subscribe(topic, qos=1)
+        for src, *_ in state.topics.values():
+            client.subscribe(src, qos=1)
         publish_discovery()
-        client.publish(availability, "online", qos=1, retain=True)
+        client.publish(availability, "offline", qos=1, retain=True)
 
     def on_disconnect(client, userdata, rc):
-        sample.update(r141=False, r241=False, connected=False)
+        state.reset()
 
     def on_message(client, userdata, msg):
-        key = topics.get(msg.topic)
-        if key is None:
-            return
-        try:
-            payload = msg.payload.decode("utf-8")
-            if key == "comp":
-                sample[key] = parse_actual_hz(payload)
-                received_at[key] = time.monotonic()
-            elif key == "defrost":
-                sample[key] = parse_defrost(payload)
-                received_at[key] = time.monotonic()
-            else:
-                sample[key] = payload.strip().lower() == "online"
-        except (UnicodeError, ValueError, TypeError, json.JSONDecodeError):
-            if key in ("comp", "defrost"):
-                sample[key] = None
+        if msg.topic in availability_topics:
+            state.availability(availability_topics[msg.topic], msg.payload)
+        elif msg.topic.startswith(prefix + "/") and msg.topic.endswith("/config"):
+            try:
+                cfg = json.loads(msg.payload)
+                if not isinstance(cfg, dict):
+                    return
+                topic = state.discover(cfg)
+                if topic:
+                    client.subscribe(topic, qos=1)
+            except (ValueError, TypeError, json.JSONDecodeError):
+                pass
+        else:
+            state.update(msg.topic, msg.payload, retained=bool(msg.retain))
 
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
     client.on_message = on_message
-    client.connect(host, port, keepalive=60)
+    client.connect(os.environ.get("HPI_MQTT_HOST", "127.0.0.1"),
+                   int(os.environ.get("HPI_MQTT_PORT", "1883")), keepalive=60)
     client.loop_start()
     try:
         while True:
-            now = time.monotonic()
-            if now - last_tick >= 30:
-                last_tick = now
-                fresh = (sample["connected"] and sample["r141"] and sample["r241"]
-                    and all(now - received_at[key] <= freshness_ttl
-                            for key in ("comp", "defrost")))
-                results = counters.observe(datetime.now(tz),
-                    compressor_hz=sample["comp"], defrost=sample["defrost"],
-                    r141_fresh=bool(fresh), r241_fresh=bool(fresh))
-                for key in METRICS:
-                    client.publish(base + "/diagnostics/counters/" + key,
-                                   str(results[key]), qos=1, retain=True)
-            time.sleep(1)
+            live = state.current()
+            result = counters.observe(
+                datetime.now(zone), compressor_hz=live[0] if live else None,
+                defrost=live[1] if live else None,
+                r141_fresh=live is not None, r241_fresh=live is not None)
+            for key in METRICS:
+                client.publish(output + "/" + key, str(result[key]), qos=1, retain=True)
+            client.publish(availability, "online" if live else "offline",
+                           qos=1, retain=True)
+            time.sleep(30)
     finally:
         client.publish(availability, "offline", qos=1, retain=True)
         client.loop_stop()
