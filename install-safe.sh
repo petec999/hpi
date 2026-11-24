@@ -77,17 +77,27 @@ restore() {
     RESTORING=1
     echo "INSTALL FAILED (exit $rc). Restoring snapshot $BACKUP" >&2
     systemctl stop "$SERVICE" || true
-    # Move failed install aside instead of deleting evidence.
+    # Never move /opt/haier to /var/backups: that crosses filesystems and
+    # previously filled the 246 MB overlay root during rollback.
+    local failed_app="$APP_PARENT/.$APP_NAME.failed-install-$"
     if [[ -e "$APP_DIR" ]]; then
-        mv "$APP_DIR" "$BACKUP/failed-app" || rm -rf -- "$APP_DIR"
+        if ! mv "$APP_DIR" "$failed_app"; then
+            echo "CRITICAL: could not rename failed app within its own filesystem; snapshot at $BACKUP" >&2
+            exit "$rc"
+        fi
     fi
     if tar -xpf "$BACKUP/app.tar" -C "$APP_PARENT" && cp -a "$BACKUP/config" "$CONFIG"; then
+        rm -rf -- "$failed_app"
         if [[ "$OLD_ACTIVE" == 1 ]]; then
             systemctl start "$SERVICE" || echo "WARNING: restored service could not start" >&2
         fi
         echo "Rollback completed. Snapshot: $BACKUP" >&2
     else
-        echo "CRITICAL: rollback failed; original snapshot remains at $BACKUP" >&2
+        echo "CRITICAL: rollback extraction failed; restoring prior app directory" >&2
+        rm -rf -- "$APP_DIR"
+        if [[ -e "$failed_app" ]]; then mv "$failed_app" "$APP_DIR" || true; fi
+        [[ "$OLD_ACTIVE" != 1 ]] || systemctl start "$SERVICE" || true
+        echo "Original snapshot retained at $BACKUP" >&2
     fi
     exit "$rc"
 }
