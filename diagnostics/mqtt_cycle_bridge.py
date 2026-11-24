@@ -1,3 +1,8 @@
+try:
+    from .source_topics import live_state_topic
+except ImportError:
+    from source_topics import live_state_topic
+
 """PR6: read-only MQTT diagnostic sidecar, auto-discovers HaierPi source sensors.
 
 Prerequisites: HaierPi MQTT discovery, R141/R241 availability (fix #4).
@@ -74,6 +79,7 @@ class MQTTInput:
         if not 0 < ttl <= 180:
             raise ValueError("TTL must be within 0..180 seconds")
         self.ttl = float(ttl)
+        self.base = os.environ.get("HPI_TOPIC", "climate/haier").rstrip("/")
         self.topics = {}
         self.values = {}
         self.health = {"r141": False, "r241": False, "connected": False}
@@ -83,7 +89,7 @@ class MQTTInput:
         key = next((k for k, v in SOURCE_IDS.items() if v == uid), None)
         if key is None:
             return None
-        topic = config.get("stat_t", config.get("state_topic"))
+        topic = live_state_topic(uid, config.get("stat_t", config.get("state_topic")), self.base)
         template = config.get("val_tpl", config.get("value_template", ""))
         if not isinstance(topic, str) or not topic or not isinstance(template, str):
             raise ValueError("Bad MQTT discovery configuration")
