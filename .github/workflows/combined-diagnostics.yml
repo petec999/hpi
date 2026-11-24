@@ -1,0 +1,42 @@
+name: HaierPi combined diagnostic integration
+on:
+  push:
+    branches:
+      - integration/alpha13-all-diagnostics
+  pull_request:
+    paths:
+      - 'alpha13.sh'
+      - 'diagnostics/**'
+      - 'tests/**'
+      - '.github/workflows/combined-diagnostics.yml'
+jobs:
+  integrated:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check combined installer shell syntax
+        run: bash -n alpha13.sh
+      - name: U2 temperature conversion
+        run: python -m unittest discover -s tests -p 'test_u2_temperature_decode.py' -v
+      - name: Compressor frequency and signed refrigerant values
+        run: python -m unittest discover -s tests -p 'test_compressor_refrigerant_metrics.py' -v
+      - name: MQTT legacy cleanup
+        run: python -m unittest discover -s tests -p 'test_legacy_mqtt_discovery_cleanup.py' -v
+      - name: RS485 MQTT freshness
+        run: python -m unittest discover -s tests -p 'test_alpha13_mqtt_freshness.py' -v
+      - name: PR6 counters and MQTT
+        run: |
+          python -m unittest discover -s tests -p 'test_cycle_counter_pr6.py' -v
+          python -m unittest discover -s tests -p 'test_pr6_runtime_simulation.py' -v
+      - name: PR7 circuit telemetry and MQTT
+        run: |
+          python -m unittest discover -s tests -p 'test_circuit_telemetry_pr7.py' -v
+          python -m unittest discover -s tests -p 'test_mqtt_circuit_bridge_pr7.py' -v
+          python -m unittest discover -s tests -p 'test_pr7_runtime_simulation.py' -v
+      - name: PR8 SQLite history and exports
+        run: python -m unittest discover -s tests -p 'test_history_pr8.py' -v
+      - name: All features together
+        run: python -m unittest discover -s tests -p 'test_combined_diagnostics.py' -v
