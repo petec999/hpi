@@ -3,7 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'sudo rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/archive"
 cat >"$TMP/bin/systemctl" <<'SH'
 #!/usr/bin/env bash
@@ -47,7 +47,7 @@ reset
 run_safe 0
 [[ "$(cat "$TMP/app/status")" == modified ]]
 [[ "$(cat "$TMP/config")" == modified ]]
-[[ -n "$(find "$TMP/backups" -name app.tar -print -quit)" ]]
+[[ -n "$(sudo find "$TMP/backups" -name app.tar -print -quit)" ]]
 
 reset
 if run_safe 1; then echo 'Expected installer failure' >&2; exit 1; fi
