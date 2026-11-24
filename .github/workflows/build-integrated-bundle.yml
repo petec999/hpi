@@ -26,6 +26,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_history_pr8.py' -v
           python -m unittest discover -s tests -p 'test_combined_diagnostics.py' -v
           python -m unittest discover -s tests -p 'test_auto_mqtt_config.py' -v
+          python -m unittest discover -s tests -p 'test_disk_safe_deployment.py' -v
           python -m unittest discover -s tests -p 'test_install_verify.py' -v
   bundle:
     needs: python39
@@ -54,8 +55,10 @@ jobs:
       - name: Validate unified installer and MQTT readiness tests
         run: |
           bash -n install-all-safe.sh
+          bash -n install-diagnostics-light.sh
           python -m unittest discover -s tests -p 'test_install_verify.py' -v
           python -m unittest discover -s tests -p 'test_auto_mqtt_config.py' -v
+          python -m unittest discover -s tests -p 'test_disk_safe_deployment.py' -v
       - name: Simulated unified all-service install and rollback
         run: sudo "$(command -v python)" -m unittest discover -s tests -p 'test_unified_installer.py' -v
       - name: Simulated SAFE install and rollback
@@ -64,7 +67,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/HaierPi-integrated-2026-11-24
-          cp alpha13.sh install-safe.sh rollback-safe.sh install-all-safe.sh 1.4.5_alpha13.tar.gz dist/HaierPi-integrated-2026-11-24/
+          cp alpha13.sh install-safe.sh rollback-safe.sh install-all-safe.sh install-diagnostics-light.sh 1.4.5_alpha13.tar.gz dist/HaierPi-integrated-2026-11-24/
           cp -r diagnostics tests tools deployment docs dist/HaierPi-integrated-2026-11-24/
           cp BUNDLE_README.md dist/HaierPi-integrated-2026-11-24/README.md
           python - <<'PY'
