@@ -35,6 +35,7 @@ jobs:
         run: |
           python -m unittest discover -s tests -p 'test_circuit_telemetry_pr7.py' -v
           python -m unittest discover -s tests -p 'test_mqtt_circuit_bridge_pr7.py' -v
+          python -m unittest discover -s tests -p 'test_live_topic_reconciliation.py' -v
           python -m unittest discover -s tests -p 'test_pr7_runtime_simulation.py' -v
       - name: PR8 SQLite history and exports
         run: python -m unittest discover -s tests -p 'test_history_pr8.py' -v
