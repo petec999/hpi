@@ -6,6 +6,7 @@ import csv
 import json
 import math
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -48,12 +49,15 @@ class HistoryStore:
     def __init__(self, filename):
         self.path = Path(filename)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path)
-        self.db.executescript(SCHEMA)
-        self.db.commit()
+        self._lock = threading.RLock()
+        self.db = sqlite3.connect(self.path, check_same_thread=False)
+        with self._lock:
+            self.db.executescript(SCHEMA)
+            self.db.commit()
 
     def close(self):
-        self.db.close()
+        with self._lock:
+            self.db.close()
 
     def sample(self, unique_id, value, unit=None, timestamp=None):
         timestamp = utc_now() if timestamp is None else timestamp
@@ -61,7 +65,7 @@ class HistoryStore:
             raise ValueError("Only HaierPi sensor IDs accepted")
         if type(value) not in (int, float) or not math.isfinite(value):
             raise ValueError("Nonfinite or nonnumeric measurement")
-        with self.db:
+        with self._lock, self.db:
             self.db.execute(
                 "INSERT OR IGNORE INTO samples(timestamp, unique_id, value, unit) VALUES (?,?,?,?)",
                 (iso_utc(timestamp), unique_id, float(value), unit))
@@ -104,16 +108,17 @@ class HistoryStore:
         sql += " ORDER BY timestamp, id"
         path = Path(destination)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", newline="", encoding="utf-8") as f:
+        with self._lock, path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(names)
             writer.writerows(self.db.execute(sql, params))
         return path
 
     def summary(self):
-        return {
+        with self._lock:
+            return {
             "sample_count": self.db.execute("SELECT count(*) FROM samples").fetchone()[0],
             "event_count": self.db.execute("SELECT count(*) FROM events").fetchone()[0],
             "first_sample": self.db.execute("SELECT min(timestamp) FROM samples").fetchone()[0],
             "last_sample": self.db.execute("SELECT max(timestamp) FROM samples").fetchone()[0],
-        }
+            }
