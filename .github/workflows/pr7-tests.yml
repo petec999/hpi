@@ -1,0 +1,22 @@
+name: PR7 unit tests
+on:
+  push:
+    branches:
+      - feature/alpha13-advanced-telemetry
+  pull_request:
+    paths:
+      - 'diagnostics/**'
+      - 'tests/test_*pr7.py'
+      - '.github/workflows/pr7-tests.yml'
+jobs:
+  diagnostics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Circuit telemetry tests
+        run: python -m unittest discover -s tests -p 'test_circuit_telemetry_pr7.py' -v
+      - name: MQTT adapter tests
+        run: python -m unittest discover -s tests -p 'test_mqtt_circuit_bridge_pr7.py' -v
