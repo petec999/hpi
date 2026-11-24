@@ -37,6 +37,15 @@ systemctl is-active --quiet "$SERVICE" || err "Core HaierPi not active; refusing
 grep -q 'r141_fresh' "$CORE/main.py" && grep -q 'r241_fresh' "$CORE/main.py" ||
   err "Core freshness signals #4 absent. Apply core fix separately, not using this light installer"
 
+# Check /tmp *before* generating the shared venv. On stock HaierPi /tmp
+# is a separate RAM-backed tmpfs. Refuse early instead of exhausting RAM.
+# A 48 MiB initial allowance and 12 MiB post-stage reserve are conservative
+# for the small Python 3.9 venv + one pinned paho-mqtt dependency.
+TMP_FREE_KB="$(available_kb /tmp)"
+(( TMP_FREE_KB >= 49152 )) ||
+    err "/tmp has ${TMP_FREE_KB}KB free; require at least 49152KB before staging. Nothing changed."
+echo "SPACE PREFLIGHT: /=$(available_kb /)KB, /opt=$(available_kb /opt)KB, /tmp=${TMP_FREE_KB}KB free"
+
 # First build the single shared venv in RAM-backed /tmp, before touching services.
 STAGE="$(mktemp -d /tmp/hpi-light.XXXXXXXX)"
 cleanup(){ [[ -z "$STAGE" ]] || rm -rf -- "$STAGE"; }
@@ -48,8 +57,8 @@ python3 -m venv "$STAGE/.venv"
 mkdir -p "$STAGE/code"
 cp -a "$ROOT/diagnostics" "$STAGE/code/"
 # Ensure the original stage is not mounted on an unexpectedly tiny filesystem.
-if (( $(available_kb "$STAGE") < 10000 )); then
-    err "Not enough temporary space"
+if (( $(available_kb "$STAGE") < 12288 )); then
+    err "/tmp has less than 12MiB remaining after staging; original controller unchanged"
 fi
 
 # Preflight using actual staged size, existing installations, and backup data size.
@@ -68,7 +77,13 @@ need_root=$((legacy_kb + data_kb + 30720))
     err "/opt needs at least ${need_opt} KB free for a staged shared Python environment; have $(available_kb /opt) KB"
 [[ $(available_kb /var/backups) -ge $need_root ]] ||
     err "System backup volume needs at least ${need_root} KB free; have $(available_kb /var/backups) KB"
-echo "SPACE OK: /opt needs ${need_opt} KB, backups need ${need_root} KB"
+echo "SPACE OK: /opt needs ${need_opt} KB, backups need ${need_root} KB, /tmp has $(available_kb "$STAGE") KB remaining"
+# Recheck each relevant mount immediately before taking a backup. The full
+# installer never runs in this mode; the existing core remains untouched.
+(( $(available_kb /opt) >= need_opt )) ||
+    err "/opt free space dropped during staging; refusing before service changes"
+(( $(available_kb "$BACKUPS") >= need_root )) ||
+    err "Backup volume free space dropped during staging; refusing before service changes"
 
 mkdir -p "$BACKUPS"
 exec 8>"$BACKUPS/.diagnostics-light.lock"
