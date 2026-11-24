@@ -80,7 +80,8 @@ class FakeClient:
         # Retained MQTT Discovery config is expected and safe.
         for field, uid in SOURCE_IDS.items():
             topic, template = TOPICS[field]
-            cfg = {"uniq_id": uid, "stat_t": topic, "val_tpl": template}
+            cfg = {"uniq_id": uid, "stat_t": topic, "val_tpl": template,
+                   "unit_of_measurement": "MPa" if field in ("ps_actual", "pd_actual") else ""}
             self.on_message(self, None, FakeMessage(
                 "homeassistant/sensor/example/config", json.dumps(cfg), True))
         for kind in ("r141", "r241"):
