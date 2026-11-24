@@ -10,6 +10,22 @@ is published by GitHub Actions. These are **offline/synthetic** checks.
 There has been NO validation on the owner's actual pump, MQTT broker or
 Home Assistant. The bundled services are **not automatically enabled**.
 
+## Unified automatic deployment
+**Use `install-all-safe.sh` as the primary entrypoint.** It snapshots
+the existing core installation, configuration, diagnostic services and
+persistent data; installs the pinned alpha13 #1–#4 fixes and all three
+PR6/PR7/PR8 systemd services; checks whether they remain active; and
+attempts a combined rollback if a stage fails. It needs an existing
+`/etc/haierpi-diagnostics.env` containing MQTT broker details with
+permissions 600. Create it from
+`deployment/haierpi-diagnostics.env.example` first.
+See `docs/UNIFIED_SAFE_INSTALL.md` for prerequisites and limitations.
+
+**Run `sudo bash install-all-safe.sh`, not `alpha13.sh`.**
+
+The narrower `install-safe.sh` script remains available for a core-only
+upgrade but does not deploy diagnostic services.
+
 ## SAFE installation and rollback
 The raw `alpha13.sh` **is not the production entry point**: it stops the
 service and changes installed files. The included `install-safe.sh` wrapper:
@@ -25,10 +41,8 @@ Run `sudo bash install-safe.sh` from the extracted bundle **only after**
 verifying the service layout, permissions and MQTT dependencies. The defaults
 expect the same Linux paths as the existing HaierPi installation.
 
-The systemd sidecars for PR6–PR8 require a separate deployment/setup:
-the wrapper installs the core HaierPi and source fixes #1–#4, but **does not
-automatically deploy those three diagnostic services**. This is not a
-one-click fully integrated deployment. Verify first on staged hardware.
+The all-in-one wrapper installs PR6–PR8 together with the core. The older
+install-safe.sh only handles the core. Verify on staged hardware first.
 
 ## Bundle structure
 - `1.4.5_alpha13.tar.gz`: original upstream alpha13 archive, unchanged
