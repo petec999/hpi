@@ -105,6 +105,28 @@ class PR6IntegrationTests(unittest.TestCase):
         state.availability("r241", "offline")
         self.assertIsNone(state.current(now=105))
 
+    def test_retained_defrost_is_baseline_not_fresh_compressor(self):
+        state = MQTTInput(ttl=10)
+        state.discover({"uniq_id": "HaierPi_Compfact",
+                        "stat_t": "sample/comp",
+                        "val_tpl": "{{ value_json[1] | float }}"})
+        state.discover({"uniq_id": "HaierPi_Defrost",
+                        "stat_t": "sample/defrost"})
+        for name in ("r141", "r241", "connected"):
+            state.availability(name, "online")
+        state.update("sample/defrost", "off", retained=True, now=100)
+        self.assertIsNone(state.current(now=101))  # no live compressor yet
+        state.update("sample/comp", "[40,40]", retained=True, now=100)
+        self.assertIsNone(state.current(now=101))
+        state.update("sample/comp", "[40,40]", now=105)
+        self.assertEqual(state.current(now=106), (40.0, False))
+        state.update("sample/comp", "[40,40]", now=130)
+        self.assertEqual(state.current(now=131), (40.0, False))
+        state.availability("r141", "offline")
+        self.assertIsNone(state.current(now=132))
+        state.availability("r141", "online")
+        self.assertIsNone(state.current(now=133))  # baseline invalidated
+
     def test_simulated_runtime_mqtt_ha_and_restart(self):
         fake_paho = types.ModuleType("paho")
         mqtt_pkg = types.ModuleType("paho.mqtt")
