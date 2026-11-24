@@ -7,7 +7,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE="${HPI_SERVICE:-haier}"
 STORE="${HPI_DATA_DIR:-/var/lib/haierpi}"
 BACKUP_ROOT="${HPI_BACKUP_ROOT:-/var/backups/haierpi}"
-MQTT_ENV="${HPI_DIAGNOSTICS_ENV:-/etc/haierpi-diagnostics.env}"
+MQTT_ENV="${HPI_DIAGNOSTICS_ENV:-}"
+HPI_EXISTING_CONFIG="${HPI_CONFIG:-/opt/config.ini}"
 PYTHON="${HPI_PYTHON:-python3}"
 CHECK_SECONDS="${HPI_CHECK_SECONDS:-15}"
 CORE_SCRIPT="$ROOT/install-safe.sh"
@@ -18,8 +19,12 @@ CORE_DONE=0
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 [[ "$EUID" == 0 ]] || fail "Run with sudo/root"
-[[ -f "$MQTT_ENV" && -s "$MQTT_ENV" ]] || fail "Create MQTT config $MQTT_ENV first (see README)"
-[[ "$(stat -c '%a' "$MQTT_ENV")" == 600 ]] || fail "MQTT env must have permissions 600"
+# MQTT broker settings are discovered automatically from existing HaierPi.
+# An explicit HPI_DIAGNOSTICS_ENV remains an optional override.
+if [[ -n "$MQTT_ENV" ]]; then
+    [[ -f "$MQTT_ENV" && -s "$MQTT_ENV" ]] || fail "Explicit MQTT env file is missing"
+    [[ "$(stat -c '%a' "$MQTT_ENV")" == 600 ]] || fail "Explicit MQTT env must have permissions 600"
+fi
 [[ "$CHECK_SECONDS" =~ ^[0-9]+$ ]] || fail "Bad check time"
 for bin in systemctl tar "$PYTHON" cp mv sed flock stat; do command -v "$bin" >/dev/null || fail "Missing $bin"; done
 if id haier >/dev/null 2>&1; then
@@ -41,8 +46,9 @@ done
 import sys, venv
 assert sys.version_info >= (3,10), 'Python 3.10+ is required for diagnostics'
 PY
-set -a
-# Validate env using a strict key-value parser; do not source executable shell input.
+# Optional override config is checked before touching the controller.
+# Do not source secrets into the installer's own shell.
+if [[ -n "$MQTT_ENV" && -f "$MQTT_ENV" ]]; then
 "$PYTHON" - "$MQTT_ENV" <<'PY'
 import sys, re
 keys={"HPI_MQTT_HOST","HPI_MQTT_PORT","HPI_MQTT_USERNAME",
@@ -57,16 +63,23 @@ for line in open(sys.argv[1],encoding="utf-8"):
     if not re.fullmatch(r"[A-Z_0-9]+",k) or k not in keys:
         raise SystemExit("Unsupported MQTT env key: "+k)
     if "\n" in v or "\r" in v: raise SystemExit("Bad value")
-    data[k]=v
+    data[k]=v.strip().strip('"')
 if not data.get("HPI_MQTT_HOST"): raise SystemExit("Set HPI_MQTT_HOST")
 if not data.get("HPI_TOPIC"): raise SystemExit("Set HPI_TOPIC")
 PY
-set +a
+fi
 
 # All dependencies prepared in staging first. Failure here leaves original untouched.
 STAGING="$(mktemp -d /tmp/haierpi-stage.XXXXXXXX)"
 cleanup_stage(){ rm -rf -- "$STAGING"; }
 trap cleanup_stage EXIT
+if [[ -z "$MQTT_ENV" ]]; then
+    MQTT_ENV="$STAGING/diagnostics.env"
+    "$PYTHON" "$ROOT/diagnostics/derive_mqtt_env.py" \
+        --config "$HPI_EXISTING_CONFIG" --output "$MQTT_ENV" ||
+        fail "Cannot automatically read existing MQTT settings; original installation unchanged"
+fi
+[[ "$(stat -c '%a' "$MQTT_ENV")" == 600 ]] || fail "MQTT config must have permissions 600"
 "$PYTHON" -m venv "$STAGING/venv"
 "$STAGING/venv/bin/python" -m pip install --disable-pip-version-check 'paho-mqtt>=1.6,<3'
 "$STAGING/venv/bin/python" -c 'import paho.mqtt.client' || fail "paho-mqtt unavailable"
