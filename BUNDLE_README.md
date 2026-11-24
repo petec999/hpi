@@ -8,10 +8,32 @@ SQLite history/CSV export (#8). No upstream project modifications.
 All branch CI tests and simulated runtime tests must pass before this ZIP
 is published by GitHub Actions. These are **offline/synthetic** checks.
 There has been NO validation on the owner's actual pump, MQTT broker or
-Home Assistant. The bundled services are **not automatically enabled**.
+Home Assistant. The bundled services are only enabled when a deployment installer is explicitly run.
 
-## Unified automatic deployment
-**Use `install-all-safe.sh` as the primary entrypoint.** It snapshots
+## Low-space HaierPi: diagnostics-only one-command deployment (recommended)
+
+The real device has a **246 MB overlay root** and a separate /opt (only 43 MB
+free on the last inspection). An earlier full installer filled overlayfs-root
+with 150 MB + 96 MB backup snapshots, and rollback failed; it has been
+restored manually and its critical rescue backup must NOT be deleted.
+
+**Run `bash install-diagnostics-light.sh` from a pinned extracted bundle.**
+This mode:
+- installs PR6, PR7, PR8 only; **does not patch or reinstall core fixes #1–#4**;
+- refuses to proceed unless the current HaierPi is active and already
+  publishes freshness signals required by PR6/PR7;
+- uses ONE shared /opt/haierpi-diagnostics/.venv rather than three venvs;
+- checks free space on both filesystems before changing any service;
+- backs up only pre-existing diagnostic files, data and systemd units;
+- derives broker settings automatically from /opt/config.ini;
+- verifies MQTT online and SQLite with automatic diagnostics-only rollback;
+- preserves the independent /opt/haier application and config unchanged.
+
+Do NOT delete /opt/haierpi-rescue or the original backups to run this.
+
+## Full core + diagnostics deployment — fail-closed low-space guard
+
+**Use `install-all-safe.sh` only on hosts with sufficient filesystem capacity.** It snapshots
 the existing core installation, configuration, diagnostic services and
 persistent data; installs the pinned alpha13 #1–#4 fixes and all three
 PR6/PR7/PR8 systemd services; checks whether they remain active; and
@@ -23,7 +45,7 @@ enabled with non-TLS transport. It refuses disabled MQTT/Discovery or
 unsupported TLS rather than changing the controller settings.
 See `docs/UNIFIED_SAFE_INSTALL.md` for prerequisites and limitations.
 
-**Run `sudo bash install-all-safe.sh`, not `alpha13.sh`.**
+**On this small HaierPi use the light installer, not the full one.** The full installer now checks space BEFORE changing the core and refuses unsafe upgrades.
 
 An optional explicit `HPI_DIAGNOSTICS_ENV` can override autodetection,
 but the default is zero additional MQTT configuration.
@@ -59,7 +81,7 @@ install-safe.sh only handles the core. Verify on staged hardware first.
 - `docs/`: source-level explanations and individual feature requirements
 
 ## Sidecar services
-Each service needs Python 3.10+, `paho-mqtt`, a working Mosquitto broker,
+Each service needs Python 3.9+, `paho-mqtt`, a working Mosquitto broker,
 retained MQTT Discovery source definitions and valid MQTT credentials.
 The unified installer reads real topic prefixes and broker credentials
 from existing HaierPi config. Standalone manual deployment instead requires
