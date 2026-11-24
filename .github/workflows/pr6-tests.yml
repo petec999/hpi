@@ -1,0 +1,23 @@
+name: PR6 compressor and defrost tests
+on:
+  push:
+    branches:
+      - feature/alpha13-cycle-counters
+  pull_request:
+    paths:
+      - 'diagnostics/**'
+      - 'tests/test_*pr6.py'
+      - 'tests/test_pr6_runtime_simulation.py'
+      - '.github/workflows/pr6-tests.yml'
+jobs:
+  counters:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Counter persistence and transition tests
+        run: python -m unittest discover -s tests -p 'test_cycle_counter_pr6.py' -v
+      - name: Simulated MQTT end-to-end test
+        run: python -m unittest discover -s tests -p 'test_pr6_runtime_simulation.py' -v
