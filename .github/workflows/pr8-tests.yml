@@ -1,0 +1,20 @@
+name: PR8 history tests
+on:
+  push:
+    branches:
+      - feature/alpha13-history-reports
+  pull_request:
+    paths:
+      - 'diagnostics/**'
+      - 'tests/test_history_pr8.py'
+      - '.github/workflows/pr8-tests.yml'
+jobs:
+  history:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: SQLite historian tests
+        run: python -m unittest discover -s tests -p 'test_history_pr8.py' -v
