@@ -47,6 +47,36 @@ class LiveTopicReconciliationTests(unittest.TestCase):
         s.update_state(BASE + "/details/twitwo/state", "[50.6,51.0]", now=100)
         self.assertEqual(s.values["twi"][0], 50.6)
 
+    def test_pr7_all_ten_sensors_using_actual_haierpi_trace(self):
+        s = TelemetryState()
+        rows = [
+            ("HaierPi_Tao", "tao", "", "12.8"),
+            ("HaierPi_Twi", "twitwo", "{{ value_json[0] | float }}", "[50.6,51.0]"),
+            ("HaierPi_Two", "twitwo", "{{ value_json[1] | float }}", "[50.6,51.0]"),
+            ("HaierPi_Compfact", "compinfo", "{{ value_json[1] | float }}", "[0,0,0.0,320,25.0]"),
+            ("HaierPi_Compfset", "compinfo", "{{ value_json[0] | float }}", "[0,0,0.0,320,25.0]"),
+            ("HaierPi_Td", "tdts", "{{ value_json[0] | float }}", "[57.0,16.0]"),
+            ("HaierPi_Pd_act", "pdps", "{{ value_json[1] | float }}", "[23.8,10.6,8.6,10.8]"),
+            ("HaierPi_Ps_act", "pdps", "{{ value_json[3] | float }}", "[23.8,10.6,8.6,10.8]"),
+            ("HaierPi_TSatPd_act", "tsatpd", "{{ value_json[1] | float }}", "[40.0,11.7]"),
+            ("HaierPi_TSatPs_act", "tsatps", "{{ value_json[1] | float }}", "[5.6,11.9]"),
+        ]
+        for uid, suffix, template, payload in rows:
+            self.assertTrue(s.configure({
+                "unique_id": uid,
+                "state_topic": BASE + "/haierunit/legacy/" + suffix + "/state",
+                "value_template": template,
+                "unit_of_measurement": "bar" if uid in ("HaierPi_Pd_act", "HaierPi_Ps_act") else ""}))
+        for key in ("r141", "r241", "bridge"):
+            s.set_availability(key, "online")
+        for uid, suffix, template, payload in rows:
+            s.update_state(BASE + "/details/" + suffix + "/state", payload, now=100)
+        result = s.calculate(now=101)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["water_delta_t"], 0.4)
+        self.assertEqual(result["pressure_delta_mpa"], -0.02)
+        self.assertEqual(result["compressor_frequency_error_hz"], 0.0)
+
     def test_pr8_records_live_details_using_legacy_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = HistoryStore(Path(tmp) / "history.sqlite")
