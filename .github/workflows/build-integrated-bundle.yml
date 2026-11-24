@@ -28,7 +28,9 @@ jobs:
           python -m unittest discover -s tests -p 'test_pr7_runtime_simulation.py' -v
           python -m unittest discover -s tests -p 'test_history_pr8.py' -v
           python -m unittest discover -s tests -p 'test_combined_diagnostics.py' -v
-      - name: Simulated SAFE install and rollback\n        run: bash tests/test_safe_rollback.sh\n      - name: Assemble portable release bundle
+      - name: Simulated SAFE install and rollback
+        run: bash tests/test_safe_rollback.sh
+      - name: Assemble portable release bundle
         run: |
           set -euo pipefail
           mkdir -p dist/HaierPi-integrated-2026-11-24
