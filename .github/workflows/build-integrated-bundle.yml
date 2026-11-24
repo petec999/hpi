@@ -28,8 +28,10 @@ jobs:
           python -m unittest discover -s tests -p 'test_pr7_runtime_simulation.py' -v
           python -m unittest discover -s tests -p 'test_history_pr8.py' -v
           python -m unittest discover -s tests -p 'test_combined_diagnostics.py' -v
-      - name: Validate unified installer syntax
-        run: bash -n install-all-safe.sh
+      - name: Validate unified installer and MQTT readiness tests
+        run: |
+          bash -n install-all-safe.sh
+          python -m unittest discover -s tests -p 'test_install_verify.py' -v
       - name: Simulated SAFE install and rollback
         run: bash tests/test_safe_rollback.sh
       - name: Assemble portable release bundle
