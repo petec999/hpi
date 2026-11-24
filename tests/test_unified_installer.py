@@ -31,6 +31,8 @@ class UnifiedInstallerTests(unittest.TestCase):
             (pkg / "mock-verify.py").write_text("pass\n")
             (t / "core-status").write_text("old\n")
             (t / "opt").mkdir()
+            (t / "opt" / "haier").mkdir()
+            (t / "opt" / "haier" / "main.py").write_text("# simulated core\n")
             (t / "etc" / "systemd" / "system").mkdir(parents=True)
             (t / "state").mkdir()
             (t / "state" / "haier.active").touch()
@@ -91,6 +93,7 @@ esac
                 "HPI_TEST_FAIL": str(int(fail)),
                 "HPI_SERVICE": "haier",
                 "HPI_BACKUP_ROOT": str(t / "backups"),
+                "HPI_APP_DIR": str(t / "opt" / "haier"),
                 "HPI_DATA_DIR": str(t / "data"),
                 "HPI_DIAGNOSTICS_ENV": str(env_file),
                 "HPI_PYTHON": str(py),
@@ -103,10 +106,10 @@ esac
                              result.stdout + result.stderr)
             if fail:
                 self.assertEqual((t / "core-status").read_text().strip(), "old")
-                self.assertFalse(any((t / "opt").iterdir()))
+                self.assertFalse(any(p.name.startswith("haierpi-pr") for p in (t / "opt").iterdir()))
             else:
                 self.assertEqual((t / "core-status").read_text().strip(), "new")
-                self.assertEqual(len(list((t / "opt").iterdir())), 3)
+                self.assertEqual(len(list((t / "opt").iterdir())), 4)
 
     @unittest.skipUnless(os.geteuid() == 0, "requires root")
     def test_success(self):
