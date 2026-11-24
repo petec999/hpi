@@ -13,7 +13,9 @@ systemctl stop "$SERVICE"
 rm -rf "$BASE_DIR/static" "$BASE_DIR/templates" "$BASE_DIR/main.py"
 cd "$BASE_DIR"
 
-curl -sL https://github.com/kamilostatek/hpi/raw/refs/heads/main/1.4.5_alpha13.tar.gz | tar -xz
+: "${HPI_ARCHIVE:?Set HPI_ARCHIVE to the local validated alpha13 archive}"
+[[ -f "$HPI_ARCHIVE" ]] || { echo "Missing local archive: $HPI_ARCHIVE" >&2; exit 1; }
+tar -xzf "$HPI_ARCHIVE"
 
 # -------------------------------------------------
 # Signed 12-bit U2 temperatures (Haier RS485 / PyHaier)
