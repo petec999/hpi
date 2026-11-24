@@ -102,6 +102,21 @@ rollback(){
     trap - ERR INT TERM EXIT
     if [[ $READY == 1 ]]; then cleanup; exit "$status"; fi
     if [[ $CHANGED == 1 ]]; then
+        # Capture evidence before disabling/removing the failed service units.
+        # A volatile journal disappears on reboot on stock HaierPi devices.
+        {
+            echo "Diagnostic failure at $(date -u -Is), exit=$status"
+            for unit in "${UNITS[@]}"; do
+                echo "=== $unit STATUS ==="
+                systemctl status "$unit.service" --no-pager -l 2>&1 || true
+                echo "=== $unit JOURNAL ==="
+                journalctl -b -u "$unit.service" --no-pager -l -n 150 2>&1 || true
+            done
+            echo "=== STORAGE ==="
+            df -h / /opt
+        } > "$SNAP/failure-diagnostics.log" 2>&1 || true
+        chmod 600 "$SNAP/failure-diagnostics.log" 2>/dev/null || true
+        echo "Failure evidence saved: $SNAP/failure-diagnostics.log" >&2
         echo "DIAGNOSTICS FAILED: restoring only PR6/PR7/PR8; original HaierPi untouched" >&2
         for unit in "${UNITS[@]}"; do
             systemctl stop "$unit.service" >/dev/null 2>&1 || true
