@@ -1,8 +1,11 @@
 """Resolve HaierPi alpha13 MQTT Discovery references to live MQTT topics.
 
 Some installations retain legacy /haierunit/... discovery configs while the
-controller publishes fresh values under /details/... . Only known HaierPi
+controller publishes fresh values under /details/... . Only confirmed HaierPi
 unique IDs with an observed detail-topic mapping are redirected.
+
+Do NOT rewrite HaierPi_Defrost: the running alpha13 main.py specifies
+/haierunit/statuses/defrost/state, not /details/defrost/state.
 """
 DETAILS = {
     "HaierPi_Twi": "twitwo",
@@ -15,7 +18,6 @@ DETAILS = {
     "HaierPi_Pd_act": "pdps",
     "HaierPi_Compfact": "compinfo",
     "HaierPi_Compfset": "compinfo",
-    "HaierPi_Defrost": "defrost",
 }
 
 
