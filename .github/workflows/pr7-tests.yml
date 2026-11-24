@@ -20,3 +20,6 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_circuit_telemetry_pr7.py' -v
       - name: MQTT adapter tests
         run: python -m unittest discover -s tests -p 'test_mqtt_circuit_bridge_pr7.py' -v
+
+      - name: Simulated MQTT end-to-end service
+        run: python -m unittest discover -s tests -p 'test_pr7_runtime_simulation.py' -v
