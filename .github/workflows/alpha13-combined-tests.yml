@@ -1,0 +1,28 @@
+name: Alpha13 combined fixes checks
+on:
+  push:
+    branches:
+      - integration/alpha13-fixes-1-4
+  pull_request:
+    paths:
+      - 'alpha13.sh'
+      - 'tools/**'
+      - 'tests/**'
+jobs:
+  alpha13:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check combined installer syntax
+        run: bash -n alpha13.sh
+      - name: U2 decoder tests
+        run: python -m unittest discover -s tests -p 'test_u2_temperature_decode.py' -v
+      - name: Compressor and refrigerant metric tests
+        run: python -m unittest discover -s tests -p 'test_compressor_refrigerant_metrics.py' -v
+      - name: Legacy MQTT cleanup tests
+        run: python -m unittest discover -s tests -p 'test_legacy_mqtt_discovery_cleanup.py' -v
+      - name: Freshness tests
+        run: python -m unittest discover -s tests -p 'test_alpha13_mqtt_freshness.py' -v
