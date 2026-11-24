@@ -169,6 +169,11 @@ systemctl is-active --quiet "$SERVICE" || fail "Core HaierPi is not active"
 for n in 6 7 8; do
     systemctl is-active --quiet "haierpi-pr$n.service" || fail "PR$n failed health check"
 done
+# Systemd active is not sufficient. Require actual MQTT Discovery health from
+# PR6/PR7 and SQLite initialization in PR8, or roll back this deployment.
+"$STAGING/venv/bin/python" "$ROOT/diagnostics/install_verify.py" \
+    --env "$MQTT_ENV" --timeout "${HPI_VERIFY_SECONDS:-180}" || \
+    fail "Integrated MQTT/SQLite check failed"
 DONE=1
 echo "SUCCESS: Core + PR6 + PR7 + PR8 active. Backup: $SNAP"
 echo "Note: active processes are not proof of live MQTT sensor values; verify HA availability."
