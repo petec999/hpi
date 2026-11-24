@@ -31,7 +31,8 @@ def ready():
     for field, uid in SOURCE_IDS.items():
         topic, template = TOPICS[field]
         assert s.configure({"uniq_id": uid, "stat_t": topic,
-                            "val_tpl": template})
+                            "val_tpl": template,
+                            "unit_of_measurement": "MPa" if field in ("ps_actual", "pd_actual") else ""})
     for key in ("r141", "r241", "bridge"):
         s.set_availability(key, "online")
     return s
@@ -56,6 +57,28 @@ class MQTTBridgeTests(unittest.TestCase):
         self.assertEqual(values["discharge_condensing_gap"], 14.5)
         self.assertEqual(values["pressure_delta_mpa"], 1.6)
         self.assertEqual(values["compressor_frequency_error_hz"], 15)
+
+    def test_bar_pressure_units_are_converted_to_mpa(self):
+        s = TelemetryState()
+        for field, uid in SOURCE_IDS.items():
+            topic, template = TOPICS[field]
+            self.assertTrue(s.configure({
+                "uniq_id": uid, "stat_t": topic, "val_tpl": template,
+                "unit_of_measurement": "bar" if field in ("ps_actual", "pd_actual") else ""}))
+        for key in ("r141", "r241", "bridge"):
+            s.set_availability(key, "online")
+        for topic, value in MESSAGES.items():
+            s.update_state(topic, value, now=100)
+        self.assertAlmostEqual(s.values["pd_actual"][0], 0.22)
+        self.assertAlmostEqual(s.values["ps_actual"][0], 0.06)
+        self.assertAlmostEqual(s.calculate(now=101)["pressure_delta_mpa"], 0.16)
+
+    def test_unrecognized_pressure_units_are_rejected(self):
+        s = TelemetryState()
+        with self.assertRaises(ValueError):
+            s.configure({"uniq_id": "HaierPi_Pd_act",
+                         "stat_t": "x/pressure",
+                         "unit_of_measurement": "not_a_unit"})
 
     def test_retained_telemetry_is_not_assumed_current(self):
         s = ready()
