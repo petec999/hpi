@@ -1,5 +1,6 @@
 """Read-only PR8 SQLite historian regression suite."""
 import csv
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
@@ -87,6 +88,33 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(self.store.summary()["sample_count"], 0)
         with self.assertRaises(ValueError):
             parse_numeric("21", "{{ 2 + 2 }}")
+
+    def test_mqtt_thread_and_maintenance_thread_share_sqlite_safely(self):
+        errors = []
+        def write_mqtt_values():
+            try:
+                for i in range(40):
+                    self.store.sample("HaierPi_Twi", 25 + i / 10,
+                        timestamp=DAY + timedelta(seconds=i))
+            except Exception as exc:
+                errors.append(exc)
+
+        def prune_and_read():
+            try:
+                for _ in range(10):
+                    self.store.prune(90, now=DAY)
+                    self.store.summary()
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=write_mqtt_values),
+                   threading.Thread(target=prune_and_read)]
+        for worker in threads:
+            worker.start()
+        for worker in threads:
+            worker.join()
+        self.assertFalse(errors, errors)
+        self.assertEqual(self.store.summary()["sample_count"], 40)
 
     def test_query_export_allowlist(self):
         with self.assertRaises(ValueError):
