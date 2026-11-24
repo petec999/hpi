@@ -15,13 +15,18 @@ Home Assistant. The bundled services are **not automatically enabled**.
 the existing core installation, configuration, diagnostic services and
 persistent data; installs the pinned alpha13 #1–#4 fixes and all three
 PR6/PR7/PR8 systemd services; checks whether they remain active; and
-attempts a combined rollback if a stage fails. It needs an existing
-`/etc/haierpi-diagnostics.env` containing MQTT broker details with
-permissions 600. Create it from
-`deployment/haierpi-diagnostics.env.example` first.
+attempts a combined rollback if a stage fails. It automatically reads MQTT broker settings and credentials from the
+existing `/opt/config.ini`, and writes a protected (0600) temporary
+configuration for all three diagnostic services. No separate manual
+MQTT setup is needed when HaierPi already has MQTT and MQTT Discovery
+enabled with non-TLS transport. It refuses disabled MQTT/Discovery or
+unsupported TLS rather than changing the controller settings.
 See `docs/UNIFIED_SAFE_INSTALL.md` for prerequisites and limitations.
 
 **Run `sudo bash install-all-safe.sh`, not `alpha13.sh`.**
+
+An optional explicit `HPI_DIAGNOSTICS_ENV` can override autodetection,
+but the default is zero additional MQTT configuration.
 
 The narrower `install-safe.sh` script remains available for a core-only
 upgrade but does not deploy diagnostic services.
@@ -56,8 +61,9 @@ install-safe.sh only handles the core. Verify on staged hardware first.
 ## Sidecar services
 Each service needs Python 3.10+, `paho-mqtt`, a working Mosquitto broker,
 retained MQTT Discovery source definitions and valid MQTT credentials.
-Set real topic prefixes before starting. Copy sources into a dedicated
-directory and configure the service users/permissions for your system.
+The unified installer reads real topic prefixes and broker credentials
+from existing HaierPi config. Standalone manual deployment instead requires
+configuration of the respective env files.
 
 - PR6: `python -m diagnostics.mqtt_cycle_bridge`
 - PR7: `python -m diagnostics.mqtt_circuit_bridge`
