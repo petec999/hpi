@@ -74,7 +74,7 @@ class HistoryStore:
         timestamp = utc_now() if timestamp is None else timestamp
         if not kind or not source:
             raise ValueError("Event kind and source required")
-        with self.db:
+        with self._lock, self.db:
             self.db.execute(
                 "INSERT INTO events(timestamp, event_type, source, old_value, new_value) VALUES (?,?,?,?,?)",
                 (iso_utc(timestamp), str(kind), str(source),
@@ -86,7 +86,7 @@ class HistoryStore:
             raise ValueError("Retention must be between 1 and 3650 days")
         now = utc_now() if now is None else now
         cutoff = iso_utc(now - timedelta(days=days))
-        with self.db:
+        with self._lock, self.db:
             n_samples = self.db.execute("DELETE FROM samples WHERE timestamp < ?", (cutoff,)).rowcount
             n_events = self.db.execute("DELETE FROM events WHERE timestamp < ?", (cutoff,)).rowcount
         return n_samples, n_events
