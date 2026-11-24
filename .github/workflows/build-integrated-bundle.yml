@@ -1,0 +1,57 @@
+name: Build HaierPi integrated diagnostics ZIP
+on:
+  push:
+    branches:
+      - integration/alpha13-all-diagnostics
+  workflow_dispatch:
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate full integrated test suite
+        run: |
+          set -e
+          bash -n alpha13.sh
+          python -m unittest discover -s tests -p 'test_u2_temperature_decode.py' -v
+          python -m unittest discover -s tests -p 'test_compressor_refrigerant_metrics.py' -v
+          python -m unittest discover -s tests -p 'test_legacy_mqtt_discovery_cleanup.py' -v
+          python -m unittest discover -s tests -p 'test_alpha13_mqtt_freshness.py' -v
+          python -m unittest discover -s tests -p 'test_cycle_counter_pr6.py' -v
+          python -m unittest discover -s tests -p 'test_pr6_runtime_simulation.py' -v
+          python -m unittest discover -s tests -p 'test_circuit_telemetry_pr7.py' -v
+          python -m unittest discover -s tests -p 'test_mqtt_circuit_bridge_pr7.py' -v
+          python -m unittest discover -s tests -p 'test_pr7_runtime_simulation.py' -v
+          python -m unittest discover -s tests -p 'test_history_pr8.py' -v
+          python -m unittest discover -s tests -p 'test_combined_diagnostics.py' -v
+      - name: Assemble portable release bundle
+        run: |
+          set -euo pipefail
+          mkdir -p dist/HaierPi-integrated-2026-11-24
+          cp alpha13.sh 1.4.5_alpha13.tar.gz dist/HaierPi-integrated-2026-11-24/
+          cp -r diagnostics tests tools deployment docs dist/HaierPi-integrated-2026-11-24/
+          cp BUNDLE_README.md dist/HaierPi-integrated-2026-11-24/README.md
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          root = Path('dist')
+          target = root / 'HaierPi-integrated-2026-11-24.zip'
+          with zipfile.ZipFile(target, 'w', compression=zipfile.ZIP_DEFLATED) as z:
+              for f in sorted((root / 'HaierPi-integrated-2026-11-24').rglob('*')):
+                  if f.is_file() and '__pycache__' not in f.parts:
+                      z.write(f, f.relative_to(root))
+          print(f'{target}: {target.stat().st_size} bytes')
+          PY
+          sha256sum dist/HaierPi-integrated-2026-11-24.zip > dist/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HaierPi-integrated-2026-11-24
+          path: |
+            dist/HaierPi-integrated-2026-11-24.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
