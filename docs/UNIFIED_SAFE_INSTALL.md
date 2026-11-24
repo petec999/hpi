@@ -13,9 +13,13 @@ source patches #1–#4, and the diagnostic modules only read MQTT.
   systemd, network access to install paho-mqtt and an MQTT broker.
 - Retained Home Assistant MQTT Discovery configurations from HaierPi.
 - MQTT broker host/credentials and HaierPi topic prefix must be known.
-- Copy `deployment/haierpi-diagnostics.env.example` to
-  `/etc/haierpi-diagnostics.env` and fill actual values; run
-  `sudo chmod 600 /etc/haierpi-diagnostics.env`.
+- MQTT credentials, port and topic prefix are **automatically read** from
+  existing `/opt/config.ini` (sections `[MQTT]` and `[HOMEASSISTANT]`).
+  No new MQTT configuration file is required.
+- Existing HaierPi must already have MQTT and HA MQTT Discovery enabled.
+  The installer will not enable either automatically or guess credentials.
+  MQTT over TLS is not supported by these sidecars; installation safely
+  stops before changing the running controller in that case.
 - Confirm enough free disk for backup of entire /opt/haier tree and
   existing /var/lib/haierpi history database.
 
@@ -28,7 +32,7 @@ sudo bash install-all-safe.sh
 
 Do not invoke `alpha13.sh` directly; it has no transaction logic.
 
-The unified script checks the environment and installs Python dependencies
+The unified script derives the MQTT configuration from HaierPi, checks the environment and installs Python dependencies
 in a temporary directory **before touching the running controller**.
 It backs up old diagnostic services/configuration, invokes install-safe.sh
 to snapshot and update the core with the local pinned release archive,
