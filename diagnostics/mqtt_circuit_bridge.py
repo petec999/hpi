@@ -1,3 +1,8 @@
+try:
+    from .source_topics import live_state_topic
+except ImportError:
+    from source_topics import live_state_topic
+
 """MQTT Discovery-driven, read-only HaierPi PR7 telemetry sidecar.
 
 Requires paho-mqtt and the circuit_telemetry.py module in this directory.
@@ -89,6 +94,7 @@ class TelemetryState:
         if not 0 < ttl <= 180:
             raise ValueError("TTL must be between 0 and 180 seconds")
         self.ttl = float(ttl)
+        self.base = os.environ.get("HPI_TOPIC", "climate/haier").rstrip("/")
         self.mapping = {}
         self.values = {}
         self.availability = {"r141": False, "r241": False, "bridge": False}
@@ -97,7 +103,7 @@ class TelemetryState:
         unique = config.get("uniq_id", config.get("unique_id"))
         if unique not in SOURCE_IDS.values():
             return False
-        topic = config.get("stat_t", config.get("state_topic"))
+        topic = live_state_topic(unique, config.get("stat_t", config.get("state_topic")), self.base)
         if not isinstance(topic, str) or not topic:
             raise ValueError("Source has no MQTT state topic")
         template = config.get("val_tpl", config.get("value_template", ""))
@@ -213,7 +219,7 @@ def main():
             try:
                 cfg = json.loads(msg.payload)
                 if state.configure(cfg):
-                    topic = cfg.get("stat_t", cfg.get("state_topic"))
+                    topic = state.mapping[next(k for k, v in SOURCE_IDS.items() if v == cfg.get("uniq_id", cfg.get("unique_id")))][0]
                     if topic not in source_topics:
                         client.subscribe(topic, qos=1)
                         source_topics[topic] = True
