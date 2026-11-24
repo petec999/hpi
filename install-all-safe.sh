@@ -21,8 +21,15 @@ fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 [[ -f "$MQTT_ENV" && -s "$MQTT_ENV" ]] || fail "Create MQTT config $MQTT_ENV first (see README)"
 [[ "$(stat -c '%a' "$MQTT_ENV")" == 600 ]] || fail "MQTT env must have permissions 600"
 [[ "$CHECK_SECONDS" =~ ^[0-9]+$ ]] || fail "Bad check time"
-for bin in systemctl tar "$PYTHON" cp mv; do command -v "$bin" >/dev/null || fail "Missing $bin"; done
-id haier >/dev/null || fail "Service account 'haier' does not exist; set up appropriate account first"
+for bin in systemctl tar "$PYTHON" cp mv sed flock stat; do command -v "$bin" >/dev/null || fail "Missing $bin"; done
+if id haier >/dev/null 2>&1; then
+    DIAG_USER=haier
+elif id nobody >/dev/null 2>&1; then
+    DIAG_USER=nobody
+else
+    fail "No non-privileged account for diagnostic services"
+fi
+DIAG_GROUP="$(id -gn "$DIAG_USER")"
 for file in "$CORE_SCRIPT" "$RESTORE_CORE" "$ROOT/alpha13.sh" "$ROOT/1.4.5_alpha13.tar.gz"; do
     [[ -f "$file" ]] || fail "Missing $file"
 done
@@ -140,7 +147,7 @@ printf '%s\n' "$CORE_SNAP" > "$SNAP/core-snapshot-path"
 CORE_DONE=1
 
 # Deploy three isolated services; never overwrite controller files.
-install -d -o haier -g haier -m 750 "$STORE"
+install -d -o "$DIAG_USER" -g "$DIAG_GROUP" -m 750 "$STORE"
 for n in 6 7 8; do
     key="haierpi-pr$n"
     systemctl stop "$key.service" >/dev/null 2>&1 || true
@@ -148,8 +155,9 @@ for n in 6 7 8; do
     mkdir -p "/opt/$key"
     cp -a "$ROOT/diagnostics" "/opt/$key/"
     cp -a "$STAGING/venv" "/opt/$key/.venv"
-    chown -R haier:haier "/opt/$key"
+    chown -R "$DIAG_USER:$DIAG_GROUP" "/opt/$key"
     install -m 644 "$ROOT/deployment/$key.service" "/etc/systemd/system/$key.service"
+    sed -i "s/^User=.*/User=$DIAG_USER/; s/^Group=.*/Group=$DIAG_GROUP/" "/etc/systemd/system/$key.service"
     install -m 600 "$MQTT_ENV" "/etc/$key.env"
 done
 systemctl daemon-reload
