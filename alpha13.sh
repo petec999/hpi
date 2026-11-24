@@ -15,6 +15,88 @@ cd "$BASE_DIR"
 
 curl -sL https://github.com/kamilostatek/hpi/raw/refs/heads/main/1.4.5_alpha13.tar.gz | tar -xz
 
+# -------------------------------------------------
+# Signed 12-bit U2 temperatures (Haier RS485 / PyHaier)
+# https://www.elektroda.pl/rtvforum/topic3994059-30.html#21714188
+# -------------------------------------------------
+# The alpha13 archive contains 10 cases of "-= 4095" in six PyHaier
+# temperature decoders. For 12-bit two's complement, subtract 4096.
+# Verify all expected files BEFORE changing any decoder; fail on unknown layouts.
+python3 - <<'PYHAIER_U2'
+import ast
+from pathlib import Path
+
+root = Path('/opt/haier/env/lib/python3.9/site-packages/PyHaier')
+expected = {
+    'GetTao.py': 1,
+    'GetTdef.py': 1,
+    'GetTdTs.py': 2,
+    'GetTSatPd.py': 2,
+    'GetTSatPs.py': 2,
+    'GetThiTho.py': 2,
+}
+old, new = ' -= 4095', ' -= 4096'
+changes = {}
+for name, count in expected.items():
+    path = root / name
+    original = path.read_text(encoding='utf-8')
+    if original.count(old) == count and original.count(new) == 0:
+        patched = original.replace(old, new)
+        ast.parse(patched, filename=str(path))
+        changes[path] = patched
+    elif original.count(old) == 0 and original.count(new) == count:
+        continue  # Already patched (safe re-run).
+    else:
+        raise RuntimeError(f'Unexpected PyHaier decoder layout: {path}')
+for path, patched in changes.items():
+    path.write_text(patched, encoding='utf-8')
+print(f'HaierPi U2: corrected {sum(expected.values())} temperature decodes '
+      f'in {len(expected)} files ({len(changes)} file(s) changed).')
+PYHAIER_U2
+
+# -------------------------------------------------
+# Remove only retired SENSOR discovery configurations in alpha13.
+# Keep the current binary_sensor, number, climate and switch entities.
+# HA must receive the retained empty config on the next MQTT discovery run.
+# -------------------------------------------------
+HPI_MAIN_PY="$BASE_DIR/main.py" python3 - <<'PYHAIER_LEGACY_DISCOVERY'
+import ast
+import os
+from pathlib import Path
+
+path = Path(os.environ["HPI_MAIN_PY"])
+source = path.read_text(encoding="utf-8")
+anchor = "    _clear('sensor', 'HaierPi_DHWSet')\n"
+marker = "    # Legacy sensors retired in alpha13: use newer discovery entities.\n"
+legacy = {
+    # Old pressure sensors superseded by Pd/Ps set/actual sensors (bar).
+    "HaierPi_Pd",
+    "HaierPi_Ps",
+    # Old read-only CH/DHW switch states: binary_sensor replacements exist.
+    "HaierPi_PCH",
+    "HaierPi_PCool",
+    "HaierPi_PDHW",
+    # Discontinued estimated daily compressor-energy counters.
+    "HaierPi_CH_daily_kWh",
+    "HaierPi_DHW_daily_kWh",
+    # Removed ECO delta sensor (quiet/turbo/flimit deltas remain supported).
+    "HaierPi_DeltaTempEco",
+}
+# Never remove retained configs for current entities (e.g. HaierPi_Delta,
+# humidity, direct thermostat target, or the binary_sensor PCH/PCool/PDHW).
+if marker not in source:
+    if source.count(anchor) != 1:
+        raise RuntimeError("Unexpected HaierPi MQTT discovery layout")
+    lines = marker + "".join(
+        "    _clear('sensor', {!r})\n".format(unique_id)
+        for unique_id in sorted(legacy)
+    )
+    source = source.replace(anchor, anchor + lines, 1)
+    ast.parse(source, filename=str(path))
+    path.write_text(source, encoding="utf-8")
+print("HaierPi MQTT discovery: retired legacy sensor configs cleared on reconnect.")
+PYHAIER_LEGACY_DISCOVERY
+
 HPI_MAIN_PY="$BASE_DIR/main.py" python3 - <<'PYHAIER_FRESHNESS'
 """Post-extraction patch of the distributed HaierPi 1.4.5 alpha13 main.py.
 
@@ -379,6 +461,46 @@ fi
 # -------------------------------------------------
 # START
 # -------------------------------------------------
+
+# -------------------------------------------------
+# Fix published compressor frequency mapping and signed SH/SC values
+# Verify the exact alpha13 source before modifying it.
+# -------------------------------------------------
+HPI_MAIN_PY="$BASE_DIR/main.py" python3 - <<'HPI_METRICS'
+from pathlib import Path
+import ast
+import os
+
+path = Path(os.environ["HPI_MAIN_PY"])
+source = path.read_text(encoding="utf-8")
+
+replacements = [
+    ('superheat = f"{abs(Ts - TsatPs_act):.1f}"',
+     'superheat = f"{Ts - TsatPs_act:.1f}"'),
+    ('subcooling = f"{abs(TsatPd_act - Thi):.1f}"',
+     'subcooling = f"{TsatPd_act - Thi:.1f}"'),
+    ('''configure_sensor("Compressor fact", st('compinfo'), "HaierPi_Compfact", "Hz", "frequency", "measurement", "{{ value_json[0] | float }}")''',
+     '''configure_sensor("Compressor fact", st('compinfo'), "HaierPi_Compfact", "Hz", "frequency", "measurement", "{{ value_json[1] | float }}")'''),
+    ('''configure_sensor("Compressor fset", st('compinfo'), "HaierPi_Compfset", "Hz", "frequency", "measurement", "{{ value_json[1] | float }}")''',
+     '''configure_sensor("Compressor fset", st('compinfo'), "HaierPi_Compfset", "Hz", "frequency", "measurement", "{{ value_json[0] | float }}")'''),
+]
+
+changed = 0
+for before, after in replacements:
+    if source.count(before) == 1 and source.count(after) == 0:
+        source = source.replace(before, after, 1)
+        changed += 1
+    elif source.count(before) == 0 and source.count(after) == 1:
+        continue  # Already patched
+    else:
+        raise RuntimeError("Unexpected HaierPi alpha13 metric layout: " + before[:80])
+
+ast.parse(source, filename=str(path))
+if changed:
+    path.write_text(source, encoding="utf-8")
+print("HaierPi metrics: %d change(s), 4 verified sites." % changed)
+HPI_METRICS
+
 
 echo
 echo "🚀 Startuję usługę Haier..."
