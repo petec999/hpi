@@ -69,6 +69,22 @@ if not data.get("HPI_TOPIC"): raise SystemExit("Set HPI_TOPIC")
 PY
 fi
 
+# Fail closed before changing the running controller. Full-core alpha13
+# replacement needs enough room to stage/restore the entire app on /opt AND
+# a separate backup/failed-app on the backup filesystem. On the stock 246 MB
+# overlay this usually cannot be guaranteed; use the light diagnostics installer.
+CORE_APP="${HPI_APP_DIR:-/opt/haier}"
+[[ -d "$CORE_APP" ]] || fail "Core app directory missing: $CORE_APP"
+CORE_KB="$(du -sk "$CORE_APP" | awk '{print $1}')"
+mkdir -p "$BACKUP_ROOT"
+APP_FREE_KB="$(df -Pk "$CORE_APP" | awk 'NR==2{print $4}')"
+BACKUP_FREE_KB="$(df -Pk "$BACKUP_ROOT" | awk 'NR==2{print $4}')"
+APP_REQUIRED_KB=$(( CORE_KB + 32768 ))
+BACKUP_REQUIRED_KB=$(( CORE_KB * 2 + 65536 ))
+if (( APP_FREE_KB < APP_REQUIRED_KB || BACKUP_FREE_KB < BACKUP_REQUIRED_KB )); then
+    fail "Full upgrade refused BEFORE core changes: app filesystem has ${APP_FREE_KB}KB free (requires ${APP_REQUIRED_KB}KB), backup filesystem has ${BACKUP_FREE_KB}KB (requires ${BACKUP_REQUIRED_KB}KB). Run install-diagnostics-light.sh for read-only PR6/PR7/PR8 instead; core fixes #1-#4 are NOT installed by light mode."
+fi
+
 # All dependencies prepared in staging first. Failure here leaves original untouched.
 STAGING="$(mktemp -d /tmp/haierpi-stage.XXXXXXXX)"
 cleanup_stage(){ rm -rf -- "$STAGING"; }
