@@ -1,3 +1,8 @@
+try:
+    from .source_topics import live_state_topic
+except ImportError:
+    from source_topics import live_state_topic
+
 """PR #8: MQTT history collector for HaierPi, PR6 and PR7 diagnostics.
 
 Subscribe via retained HA MQTT Discovery, persist only numeric readings and
@@ -63,7 +68,7 @@ class HistoryCollector:
 
     def discover(self, definition):
         uid = definition.get("uniq_id", definition.get("unique_id"))
-        topic = definition.get("stat_t", definition.get("state_topic"))
+        topic = live_state_topic(uid, definition.get("stat_t", definition.get("state_topic")), self.base)
         if (not isinstance(uid, str) or not uid.startswith("HaierPi_")
                 or not isinstance(topic, str) or not topic.startswith(self.base + "/")):
             return None
