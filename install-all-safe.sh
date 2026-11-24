@@ -44,7 +44,7 @@ done
 # Validate network and venv capability before touching the existing controller.
 "$PYTHON" - <<'PY'
 import sys, venv
-assert sys.version_info >= (3,10), 'Python 3.10+ is required for diagnostics'
+assert sys.version_info >= (3,9), 'Python 3.9+ is required for diagnostics'
 PY
 # Optional override config is checked before touching the controller.
 # Do not source secrets into the installer's own shell.
@@ -81,7 +81,7 @@ if [[ -z "$MQTT_ENV" ]]; then
 fi
 [[ "$(stat -c '%a' "$MQTT_ENV")" == 600 ]] || fail "MQTT config must have permissions 600"
 "$PYTHON" -m venv "$STAGING/venv"
-"$STAGING/venv/bin/python" -m pip install --disable-pip-version-check 'paho-mqtt>=1.6,<3'
+"$STAGING/venv/bin/python" -m pip install --disable-pip-version-check 'paho-mqtt>=1.6,<2'
 "$STAGING/venv/bin/python" -c 'import paho.mqtt.client' || fail "paho-mqtt unavailable"
 
 mkdir -p "$BACKUP_ROOT"
