@@ -38,7 +38,17 @@ with tarfile.open(sys.argv[1], 'r:gz') as tar:
             raise SystemExit('Unsafe alpha13 archive entry: '+m.name)
 PY
 bash -n "$INSTALLER" || die "Invalid installer shell syntax"
+# The previous release filled overlayfs-root while moving a failed 74 MB
+# application across filesystems. Reject the operation before stopping HaierPi.
 mkdir -p "$BACKUP_ROOT"
+APP_KB="$(du -sk "$APP_DIR" | awk '{print $1}')"
+APP_FREE_KB="$(df -Pk "$APP_DIR" | awk 'NR==2{print $4}')"
+BACKUP_FREE_KB="$(df -Pk "$BACKUP_ROOT" | awk 'NR==2{print $4}')"
+APP_NEED_KB=$(( APP_KB + 32768 ))
+BACKUP_NEED_KB=$(( APP_KB * 2 + 32768 ))
+if (( APP_FREE_KB < APP_NEED_KB || BACKUP_FREE_KB < BACKUP_NEED_KB )); then
+    die "Insufficient rollback space: app filesystem free=${APP_FREE_KB}KB (need ${APP_NEED_KB}KB); backup filesystem free=${BACKUP_FREE_KB}KB (need ${BACKUP_NEED_KB}KB). Original HaierPi unchanged. Use install-diagnostics-light.sh for PR6-PR8."
+fi
 exec 9>"$BACKUP_ROOT/.install.lock"
 flock -n 9 || die "An installation is already running"
 
