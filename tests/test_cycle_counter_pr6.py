@@ -20,6 +20,16 @@ class CycleCounterTests(unittest.TestCase):
             compressor_hz=hz, defrost=df,
             r141_fresh=fresh, r241_fresh=fresh)
 
+    def test_ram_only_works_without_disk_path(self):
+        counter = CycleCounter()
+        counter.observe(BASE, compressor_hz=0, defrost=False,
+                        r141_fresh=True, r241_fresh=True)
+        result = counter.observe(BASE + timedelta(seconds=30),
+                                 compressor_hz=40, defrost=False,
+                                 r141_fresh=True, r241_fresh=True)
+        self.assertEqual(result["compressor_starts"], 1)
+        self.assertIsNone(counter.path)
+
     def test_starts_runtime_and_defrost(self):
         self.sample(0)
         self.assertEqual(self.sample(30, hz=42)["compressor_starts"], 1)
