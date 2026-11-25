@@ -1,7 +1,7 @@
 """Verify real MQTT diagnostic availability after installation.
 
-Connects to the configured broker, observes PR6 and PR7 availability,
-and confirms PR8 SQLite database exists. Never publishes commands.
+Connects to the configured broker and observes cycle and circuit MQTT availability.
+Never publishes heat-pump commands or needs a database.
 """
 import argparse
 from pathlib import Path
@@ -24,7 +24,7 @@ def read_env(path):
     return result
 
 
-def verify(env_path, timeout=180, check_db=True):
+def verify(env_path, timeout=180, check_db=False):
     import paho.mqtt.client as mqtt
     env = read_env(env_path)
     base = env.get("HPI_TOPIC", "climate/haier").rstrip("/")
@@ -84,8 +84,8 @@ def main():
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("Timeout must be positive")
-    verify(args.env, args.timeout, check_db=not args.no_db)
-    print("PASS: PR6 and PR7 MQTT online, PR8 database initialized")
+    verify(args.env, args.timeout, check_db=False)
+    print("PASS: compressor cycles and refrigeration circuit MQTT online (no SQLite)")
 
 
 if __name__ == "__main__":
