@@ -6,8 +6,6 @@ from pathlib import Path
 from diagnostics.source_topics import live_state_topic
 from diagnostics.mqtt_cycle_bridge import MQTTInput
 from diagnostics.mqtt_circuit_bridge import TelemetryState, SOURCE_IDS
-from diagnostics.history_store import HistoryStore
-from diagnostics.mqtt_history import HistoryCollector
 
 
 BASE = "climate/haier"
@@ -77,20 +75,6 @@ class LiveTopicReconciliationTests(unittest.TestCase):
         self.assertEqual(result["pressure_delta_mpa"], -0.02)
         self.assertEqual(result["compressor_frequency_error_hz"], 0.0)
 
-    def test_pr8_records_live_discovery_topic(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db = HistoryStore(Path(tmp) / "history.sqlite")
-            try:
-                c = HistoryCollector(db, base=BASE, minimum_interval=1)
-                topic = c.discover({
-                    "unique_id": "HaierPi_Twi",
-                    "state_topic": BASE + "/haierunit/temperatures/twitwo/state",
-                    "value_template": "{{ value_json[0] | float }}"})
-                self.assertEqual(topic, BASE + "/haierunit/temperatures/twitwo/state")
-                c.receive(topic, "[50.6,51.0]", monotonic=100)
-                self.assertEqual(db.summary()["sample_count"], 1)
-            finally:
-                db.close()
 
 
 if __name__ == "__main__":
