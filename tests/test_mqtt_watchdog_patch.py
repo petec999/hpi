@@ -15,6 +15,13 @@ SOURCE = """def mqtt_snapshot_tick():
 
 def on_message(client, userdata, msg):  # vendor comment with trailing spaces   
     return None
+
+def connect_mqtt():
+    while True:
+        try:
+            rc = cl.loop(timeout=1.0)
+        except Exception:
+            pass
 """
 
 class WatchdogPatchTests(unittest.TestCase):
@@ -34,3 +41,18 @@ class WatchdogPatchTests(unittest.TestCase):
     def test_comment_optional(self):
         patched = wd.patch(SOURCE.replace("  # vendor comment with trailing spaces   ", ""))
         compile(patched, "test-core", "exec")
+
+    def test_upgrade_v1(self):
+        old = SOURCE.replace("def mqtt_snapshot_tick():",
+            "# HOME-IOT MQTT WATCHDOG v1\ndef _haierpi_watchdog_worker():\n    pass\n\n"
+            "def mqtt_snapshot_tick():", 1)
+        old = old.replace("    mqtt_publish_snapshot()\n",
+            "    mqtt_publish_snapshot()\n    _haierpi_watchdog_tick()\n", 1)
+        old = old.replace("    return None\n",
+            '    if msg.topic == str(mqtt_topic) + "/haierpi/watchdog_heartbeat":\n'
+            '        return\n    return None\n', 1)
+        self.assertEqual(wd.patch(old), wd.patch(SOURCE))
+
+    def test_missing_worker_refuses(self):
+        with self.assertRaises(RuntimeError):
+            wd.patch(SOURCE.replace("cl.loop(timeout=1.0)", "cl.loop()"))
