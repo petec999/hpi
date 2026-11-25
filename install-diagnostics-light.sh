@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Low-footprint deployment of PR6/PR7/PR8 ONLY; never changes /opt/haier.
+# Low-footprint, RAM-only MQTT diagnostics: cycles + refrigeration circuit.
+# Never changes /opt/haier. Stops/retires old SQLite historian service.
 # The core fixes #1-#4 must already be installed separately.
 set -Eeuo pipefail
 umask 077
@@ -16,7 +17,9 @@ SNAP=""
 READY=0
 CHANGED=0
 LOCKED=0
-UNITS=(haierpi-pr6 haierpi-pr7 haierpi-pr8)
+UNITS=(haierpi-cycles haierpi-circuit)
+LEGACY_UNITS=(haierpi-pr6 haierpi-pr7 haierpi-pr8)
+ALL_UNITS=("${UNITS[@]}" "${LEGACY_UNITS[@]}")
 
 err(){ echo "ERROR: $*" >&2; exit 1; }
 available_kb(){ df -Pk "$1" | awk 'NR==2{print $4}'; }
@@ -98,12 +101,14 @@ for path in "$APP" /opt/haierpi-pr6 /opt/haierpi-pr7 /opt/haierpi-pr8 \
             /etc/haierpi-pr6.env /etc/haierpi-pr7.env /etc/haierpi-pr8.env \
             /etc/systemd/system/haierpi-pr6.service \
             /etc/systemd/system/haierpi-pr7.service \
-            /etc/systemd/system/haierpi-pr8.service; do
+            /etc/systemd/system/haierpi-pr8.service \
+            /etc/systemd/system/haierpi-cycles.service \
+            /etc/systemd/system/haierpi-circuit.service; do
     if [[ -e "$path" || -L "$path" ]]; then
         echo "${path#/}" >> "$SNAP/paths"
     fi
 done
-for unit in "${UNITS[@]}"; do
+for unit in "${ALL_UNITS[@]}"; do
     systemctl is-enabled --quiet "$unit.service" && touch "$SNAP/$unit.enabled" || true
     systemctl is-active --quiet "$unit.service" && touch "$SNAP/$unit.active" || true
 done
@@ -121,7 +126,7 @@ rollback(){
         # A volatile journal disappears on reboot on stock HaierPi devices.
         {
             echo "Diagnostic failure at $(date -u -Is), exit=$status"
-            for unit in "${UNITS[@]}"; do
+            for unit in "${ALL_UNITS[@]}"; do
                 echo "=== $unit STATUS ==="
                 systemctl status "$unit.service" --no-pager -l 2>&1 || true
                 echo "=== $unit JOURNAL ==="
@@ -133,7 +138,7 @@ rollback(){
         chmod 600 "$SNAP/failure-diagnostics.log" 2>/dev/null || true
         echo "Failure evidence saved: $SNAP/failure-diagnostics.log" >&2
         echo "DIAGNOSTICS FAILED: restoring only PR6/PR7/PR8; original HaierPi untouched" >&2
-        for unit in "${UNITS[@]}"; do
+        for unit in "${ALL_UNITS[@]}"; do
             systemctl stop "$unit.service" >/dev/null 2>&1 || true
             systemctl disable "$unit.service" >/dev/null 2>&1 || true
         done
@@ -142,7 +147,9 @@ rollback(){
                  /etc/haierpi-pr6.env /etc/haierpi-pr7.env /etc/haierpi-pr8.env \
                  /etc/systemd/system/haierpi-pr6.service \
                  /etc/systemd/system/haierpi-pr7.service \
-                 /etc/systemd/system/haierpi-pr8.service; do
+                 /etc/systemd/system/haierpi-pr8.service \
+                 /etc/systemd/system/haierpi-cycles.service \
+                 /etc/systemd/system/haierpi-circuit.service; do
             rm -rf -- "$x"
         done
         # Restore data from snapshot (never discard current state without a verified backup).
@@ -151,7 +158,7 @@ rollback(){
             echo "CRITICAL: diagnostics rollback incomplete; snapshot $SNAP" >&2
         fi
         systemctl daemon-reload || true
-        for unit in "${UNITS[@]}"; do
+        for unit in "${ALL_UNITS[@]}"; do
             [[ ! -f "$SNAP/$unit.enabled" ]] || systemctl enable "$unit.service" || true
             [[ ! -f "$SNAP/$unit.active" ]] || systemctl start "$unit.service" || true
         done
@@ -172,7 +179,12 @@ fi
 DIAG_GROUP="$(id -gn "$DIAG_USER")"
 
 CHANGED=1
-for unit in "${UNITS[@]}"; do systemctl stop "$unit.service" >/dev/null 2>&1 || true; done
+for unit in "${ALL_UNITS[@]}"; do systemctl stop "$unit.service" >/dev/null 2>&1 || true; done
+# Explicitly retire the legacy SQLite writer and numeric-name units.
+for unit in "${LEGACY_UNITS[@]}"; do
+    systemctl disable "$unit.service" >/dev/null 2>&1 || true
+    rm -f -- "/etc/systemd/system/$unit.service"
+done
 # One venv and one diagnostics tree; no core archive extraction and no core backup.
 rm -rf -- "$APP"
 install -d -o "$DIAG_USER" -g "$DIAG_GROUP" -m 750 "$APP"
@@ -180,14 +192,8 @@ cp -a "$STAGE/.venv" "$APP/.venv"
 cp -a "$STAGE/code/diagnostics" "$APP/diagnostics"
 chown -R "$DIAG_USER:$DIAG_GROUP" "$APP"
 install -m 600 "$STAGE/mqtt.env" /etc/haierpi-diagnostics.env
-install -d -o "$DIAG_USER" -g "$DIAG_GROUP" -m 750 "$DATA"
-chown -R "$DIAG_USER:$DIAG_GROUP" "$DATA"
-for n in 6 7 8; do
-    unit="haierpi-pr$n"
-    sed -e "s|^WorkingDirectory=.*|WorkingDirectory=$APP|" \
-        -e "s|^EnvironmentFile=.*|EnvironmentFile=/etc/haierpi-diagnostics.env|" \
-        -e "s|^ExecStart=/opt/haierpi-pr$n/.venv/bin/python|ExecStart=$APP/.venv/bin/python|" \
-        -e "s|^User=.*|User=$DIAG_USER|" \
+for unit in "${UNITS[@]}"; do
+    sed -e "s|^User=.*|User=$DIAG_USER|" \
         -e "s|^Group=.*|Group=$DIAG_GROUP|" \
         "$ROOT/deployment/$unit.service" > "/etc/systemd/system/$unit.service"
 done
@@ -197,10 +203,10 @@ sleep "${HPI_CHECK_SECONDS:-15}"
 systemctl is-active --quiet "$SERVICE" || err "Original controller stopped unexpectedly"
 for unit in "${UNITS[@]}"; do systemctl is-active --quiet "$unit.service" || err "$unit inactive"; done
 "$APP/.venv/bin/python" "$APP/diagnostics/install_verify.py" \
-    --env /etc/haierpi-diagnostics.env --timeout "${HPI_VERIFY_SECONDS:-180}"
+    --env /etc/haierpi-diagnostics.env --timeout "${HPI_VERIFY_SECONDS:-180}" --no-db
 
 READY=1
 trap - ERR INT TERM EXIT
 cleanup
-echo "SUCCESS: PR6/PR7/PR8 active with one shared venv; original HaierPi unchanged."
+echo "SUCCESS: HaierPi cycle monitor and refrigeration circuit monitor online; SQLite historian retired; original HaierPi unchanged."
 echo "Verified backup: $SNAP"
