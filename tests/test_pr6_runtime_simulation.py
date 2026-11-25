@@ -1,4 +1,4 @@
-"""PR6 simulated end-to-end MQTT service: discovery, transitions, persistence."""
+"""Simulated end-to-end RAM-only cycle monitor: discovery and transitions."""
 import json
 import os
 import sys
@@ -183,9 +183,8 @@ class PR6IntegrationTests(unittest.TestCase):
             self.assertEqual(values["climate/haier/diagnostics/counters/defrost_completed_cycles"], "1")
             self.assertEqual(values["climate/haier/diagnostics/counters/compressor_seconds"], "60.0")
             self.assertEqual(values["climate/haier/diagnostics/counters/defrost_seconds"], "30.0")
-            saved = json.loads((Path(temp) / "counts.json").read_text())
-            self.assertEqual(saved["daily"]["compressor_starts"], 1)
-            self.assertEqual(saved["daily"]["defrost_starts"], 1)
+            self.assertFalse((Path(temp) / "counts.json").exists(),
+                             "Running cycle monitor must never write counters to disk")
             self.assertEqual(sent[-1][1], "offline")
 
     def test_invalid_data_fails_closed(self):
