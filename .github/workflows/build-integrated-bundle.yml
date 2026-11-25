@@ -69,7 +69,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist/HaierPi-integrated-2026-11-24
           cp alpha13.sh install-safe.sh rollback-safe.sh install-all-safe.sh install-diagnostics-light.sh 1.4.5_alpha13.tar.gz dist/HaierPi-integrated-2026-11-24/
-          cp -r diagnostics tests tools deployment docs homeassistant dist/HaierPi-integrated-2026-11-24/
+          cp -r diagnostics tests tools deployment docs dist/HaierPi-integrated-2026-11-24/
           cp BUNDLE_README.md dist/HaierPi-integrated-2026-11-24/README.md
           python - <<'PY'
           from pathlib import Path
@@ -82,27 +82,12 @@ jobs:
                       z.write(f, f.relative_to(root))
           print(f'{target}: {target.stat().st_size} bytes')
           PY
-          # Lightweight HA-only package: installing this does not touch HaierPi services.
-          python - <<'PY'
-          from pathlib import Path
-          from zipfile import ZipFile, ZIP_DEFLATED
-          out = Path('dist/HaierPi-HA-dashboard-PR6-PR7-PR8.zip')
-          paths = [
-              'homeassistant/haier-diagnostyka-view.yaml',
-              'tools/pr8_report.py',
-          ]
-          with ZipFile(out, 'w', compression=ZIP_DEFLATED) as z:
-              for path in paths:
-                  z.write(path)
-          print(out, out.stat().st_size, 'bytes')
-          PY
-          sha256sum dist/HaierPi-integrated-2026-11-24.zip dist/HaierPi-HA-dashboard-PR6-PR7-PR8.zip > dist/SHA256SUMS.txt
+          sha256sum dist/HaierPi-integrated-2026-11-24.zip > dist/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
           name: HaierPi-integrated-2026-11-24
           path: |
             dist/HaierPi-integrated-2026-11-24.zip
-            dist/HaierPi-HA-dashboard-PR6-PR7-PR8.zip
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
