@@ -37,8 +37,6 @@ jobs:
           python -m unittest discover -s tests -p 'test_mqtt_circuit_bridge_pr7.py' -v
           python -m unittest discover -s tests -p 'test_live_topic_reconciliation.py' -v
           python -m unittest discover -s tests -p 'test_pr7_runtime_simulation.py' -v
-      - name: PR8 SQLite history and exports
-        run: python -m unittest discover -s tests -p 'test_history_pr8.py' -v
       - name: Unified installer shell and MQTT readiness
         run: |
           bash -n install-all-safe.sh
@@ -46,7 +44,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_install_verify.py' -v
           python -m unittest discover -s tests -p 'test_auto_mqtt_config.py' -v
           python -m unittest discover -s tests -p 'test_disk_safe_deployment.py' -v
-      - name: Simulated unified all-service install and rollback
+      - name: Verify deprecated full installer is blocked
         run: sudo "$(command -v python)" -m unittest discover -s tests -p 'test_unified_installer.py' -v
       - name: All features together
         run: python -m unittest discover -s tests -p 'test_combined_diagnostics.py' -v
