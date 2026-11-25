@@ -108,40 +108,34 @@ some of its contents).
 - PR7: 6 derived refrigerant/hydraulic diagnostic sensors via MQTT Discovery
 - PR8: SQLite telemetry historian and CSV/summary CLI (no dashboard)
 
-## Home Assistant dashboard and PR8 reporting (no reinstall)
+## Project separation — Home Assistant vs HaierPi
 
-The build includes **HaierPi-HA-dashboard-PR6-PR7-PR8.zip** as a
-separate tiny artifact, containing:
-- `homeassistant/haier-diagnostyka-view.yaml` — a Lovelace view
-  using all **8 confirmed PR6** and **6 confirmed PR7** entities, with
-  a Polish summary, minutes/hours conversion and history graphs.
-- `tools/pr8_report.py` — read-only standard-library SQLite history
-  summary and optional CSV export.
+Home Assistant dashboard YAML has moved to the **separate repository**
+[petec999/home-iot-telemetry](https://github.com/petec999/home-iot-telemetry),
+under `home_assistant/dashboards/haier-diagnostyka-view.yaml`.
 
-To add the panel, open the existing HA dashboard, create a new view and
-choose the raw YAML editor for that **view**. Paste the contents of
-`haier-diagnostyka-view.yaml`. This is a view snippet, NOT the complete
-dashboard configuration, and needs no additional HA frontend plugins.
-Do not replace the entire dashboard with this snippet.
+This `hpi` repository and its build artifacts contain only the HaierPi
+controller, independent PR6/PR7/PR8 diagnostics, their installers/tests,
+and the read-only PR8 SQLite report utility. Do not put Home Assistant
+Lovelace views, HA automations or HA templates inside the HPI release.
 
-PR8 is already running separately and logging to
-`/var/lib/haierpi/history.sqlite`. It does not create HA entities.
-On HaierPi after downloading the single script, a safe check is:
+PR8 logs numeric samples and selected events in
+`/var/lib/haierpi/history.sqlite`, without creating new HA entities.
+View its data without changing the running service using the included
+`tools/pr8_report.py`:
 
 ```sh
-python3 pr8_report.py
+python3 tools/pr8_report.py
 ```
 
-Optional CSV exports:
+Optional CSV export (creates new files, never overwrites):
+
 ```sh
-python3 pr8_report.py --samples-csv /tmp/haier-samples.csv --events-csv /tmp/haier-events.csv
+python3 tools/pr8_report.py --samples-csv /tmp/haier-samples.csv --events-csv /tmp/haier-events.csv
 ```
 
-The script opens SQLite read-only and refuses to overwrite existing CSV
-files. The PR8 historian prunes samples/events older than 90 days by
-default, but its database and WAL can still grow: monitor free space on
-the filesystem hosting `/var/lib/haierpi`. The HA history graphs query
-Home Assistant's recorder, not PR8 SQLite.
+Monitor `/var/lib/haierpi` and available overlay-root space as the database
+and SQLite WAL grow. The HA dashboard graphs use the HA recorder, not PR8.
 
 ## Deployment prerequisites
 1. Back up the original HaierPi installation, config and service unit.
