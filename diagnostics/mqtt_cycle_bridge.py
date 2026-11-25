@@ -3,7 +3,7 @@ try:
 except ImportError:
     from source_topics import live_state_topic
 
-"""PR6: read-only MQTT diagnostic sidecar, auto-discovers HaierPi source sensors.
+"""RAM-only compressor and defrost MQTT diagnostic sidecar, auto-discovers HaierPi source sensors.
 
 Prerequisites: HaierPi MQTT discovery, R141/R241 availability (fix #4).
 Never publishes Haier control commands.
@@ -160,8 +160,7 @@ def main():
     base = os.environ.get("HPI_TOPIC", "climate/haier").rstrip("/")
     prefix = os.environ.get("HPI_DISCOVERY_PREFIX", "homeassistant").rstrip("/")
     state = MQTTInput(float(os.environ.get("HPI_SAMPLE_TTL", "120")))
-    counters = CycleCounter(Path(os.environ.get(
-        "HPI_COUNTER_FILE", "/var/lib/haierpi/cycle_counters.json")))
+    counters = CycleCounter()  # RAM-only; Home Assistant owns long-term history.
     zone = ZoneInfo(os.environ.get("HPI_TZ", "Europe/Warsaw"))
     output = base + "/diagnostics/counters"
     availability = output + "/available"
@@ -170,7 +169,7 @@ def main():
         base + "/haierpi/r241_fresh": "r241",
         base + "/haierpi/connected": "connected",
     }
-    client = mqtt.Client(client_id="haierpi-pr6-counters")
+    client = mqtt.Client(client_id="haierpi-cycles")
     username = os.environ.get("HPI_MQTT_USERNAME")
     if username:
         client.username_pw_set(username, os.environ.get("HPI_MQTT_PASSWORD"))
@@ -186,7 +185,7 @@ def main():
                 "payload_available": "online",
                 "payload_not_available": "offline",
                 "device": {"identifiers": ["haierpi_pr6_diagnostics"],
-                           "name": "HaierPi Diagnostics"},
+                           "name": "HaierPi Cykle pracy"},
                 "icon": "mdi:counter" if unit is None else "mdi:timer-outline",
             }
             if unit:
