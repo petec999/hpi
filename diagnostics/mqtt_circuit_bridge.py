@@ -172,7 +172,7 @@ def main():
     prefix = os.environ.get("HPI_DISCOVERY_PREFIX", "homeassistant").strip("/")
     base = os.environ.get("HPI_TOPIC", "climate/haier").rstrip("/")
     state = TelemetryState(ttl=float(os.environ.get("HPI_SAMPLE_TTL", "150")))
-    output = base + "/diagnostics/pr7"
+    output = base + "/diagnostics/circuit"
     online = output + "/availability"
     source_topics = {}
     last_publish = None
