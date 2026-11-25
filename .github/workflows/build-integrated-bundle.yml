@@ -1,4 +1,4 @@
-name: Build HaierPi integrated diagnostics ZIP
+name: Build HaierPi RAM-only MQTT diagnostics ZIP
 on:
   push:
     branches:
@@ -66,27 +66,27 @@ jobs:
       - name: Assemble portable release bundle
         run: |
           set -euo pipefail
-          mkdir -p dist/HaierPi-integrated-2026-11-24
-          cp alpha13.sh install-safe.sh rollback-safe.sh install-all-safe.sh install-diagnostics-light.sh 1.4.5_alpha13.tar.gz dist/HaierPi-integrated-2026-11-24/
-          cp -r diagnostics tests tools deployment docs dist/HaierPi-integrated-2026-11-24/
-          cp BUNDLE_README.md dist/HaierPi-integrated-2026-11-24/README.md
+          mkdir -p dist/HaierPi-MQTT-Diagnostyka-2026-11-25
+          cp install-diagnostics-light.sh dist/HaierPi-MQTT-Diagnostyka-2026-11-25/
+          cp -r diagnostics tests tools deployment docs dist/HaierPi-MQTT-Diagnostyka-2026-11-25/
+          cp BUNDLE_README.md dist/HaierPi-MQTT-Diagnostyka-2026-11-25/README.md
           python - <<'PY'
           from pathlib import Path
           import zipfile
           root = Path('dist')
-          target = root / 'HaierPi-integrated-2026-11-24.zip'
+          target = root / 'HaierPi-MQTT-Diagnostyka-2026-11-25.zip'
           with zipfile.ZipFile(target, 'w', compression=zipfile.ZIP_DEFLATED) as z:
-              for f in sorted((root / 'HaierPi-integrated-2026-11-24').rglob('*')):
+              for f in sorted((root / 'HaierPi-MQTT-Diagnostyka-2026-11-25').rglob('*')):
                   if f.is_file() and '__pycache__' not in f.parts:
                       z.write(f, f.relative_to(root))
           print(f'{target}: {target.stat().st_size} bytes')
           PY
-          sha256sum dist/HaierPi-integrated-2026-11-24.zip > dist/SHA256SUMS.txt
+          sha256sum dist/HaierPi-MQTT-Diagnostyka-2026-11-25.zip > dist/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: HaierPi-integrated-2026-11-24
+          name: HaierPi-MQTT-Diagnostyka-2026-11-25
           path: |
-            dist/HaierPi-integrated-2026-11-24.zip
+            dist/HaierPi-MQTT-Diagnostyka-2026-11-25.zip
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
