@@ -59,6 +59,12 @@ def main():
         "raw_rs485_t241": "R241=T241" in main,
     }
     print("FEATURE_CHECKS",checks)
+    print("DISCOVERY_CLEANUP_CONTEXT")
+    lines = main.splitlines()
+    for phrase in ("HaierPi_DHWSet", "HaierPi_Pd", "HaierPi_CH_daily_kWh", "HaierPi_DeltaTempEco", "def cleanup_"):
+        for pos in [i for i, line in enumerate(lines) if phrase in line][:2]:
+            print("DISCOVERY_MATCH", repr(phrase), "line", pos+1,
+                  repr(lines[max(0,pos-1):pos+2])[:550])
     for k,v in checks.items():
         if not v: print("VERIFY_MANUALLY",k)
     for name in U2:
