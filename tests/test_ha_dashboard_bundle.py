@@ -1,24 +1,27 @@
-"""PR8 SQLite reporting utility checks; HA UI belongs in home-iot-telemetry."""
-import ast
-from pathlib import Path
+"""Guard against SQLite activity and unclear installed systemd names."""
 import subprocess
-import sys
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PR8 = ROOT / "tools" / "pr8_report.py"
 
 
-class PR8ReportTests(unittest.TestCase):
-    def test_pr8_report_syntax_and_help(self):
-        ast.parse(PR8.read_text(encoding="utf-8"))
-        proc = subprocess.run(
-            [sys.executable, str(PR8), "--help"],
-            text=True, capture_output=True, check=True)
-        self.assertIn("--samples-csv", proc.stdout)
-        self.assertIn("--events-csv", proc.stdout)
+class RamOnlyDeploymentTests(unittest.TestCase):
+    def test_cycle_counter_is_ram_only_in_live_bridge(self):
+        source = (ROOT / "diagnostics/mqtt_cycle_bridge.py").read_text()
+        self.assertIn("counters = CycleCounter()", source)
+        self.assertNotIn("HPI_COUNTER_FILE", source)
 
-    def test_hpi_does_not_bundle_home_assistant_ui(self):
+    def test_deployment_uses_readable_names_not_numeric_legacy_units(self):
+        install = (ROOT / "install-diagnostics-light.sh").read_text()
+        self.assertIn("UNITS=(haierpi-cycles haierpi-circuit)", install)
+        self.assertIn("LEGACY_UNITS=", install)
+        self.assertIn("--no-db", install)
+        self.assertFalse((ROOT / "deployment/haierpi-pr8.service").exists())
+        self.assertTrue((ROOT / "deployment/haierpi-cycles.service").exists())
+        self.assertTrue((ROOT / "deployment/haierpi-circuit.service").exists())
+
+    def test_no_home_assistant_dashboard_embedded_in_hpi(self):
         self.assertFalse((ROOT / "homeassistant" / "haier-diagnostyka-view.yaml").exists())
 
 
