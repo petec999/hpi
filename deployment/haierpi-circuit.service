@@ -1,0 +1,21 @@
+[Unit]
+Description=HaierPi refrigeration circuit monitor
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=haier
+Group=haier
+WorkingDirectory=/opt/haierpi-diagnostics
+EnvironmentFile=/etc/haierpi-diagnostics.env
+ExecStart=/opt/haierpi-diagnostics/.venv/bin/python -m diagnostics.mqtt_circuit_bridge
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
