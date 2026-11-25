@@ -21,7 +21,7 @@
 - Watchdog v2: bounded worker-thread MQTT reconnect request after three HTTP 200 mismatches, at least 180 seconds without confirmation, and a prior successful confirmation; 15-minute cooldown.
 - HA persistent notification at alarm level; automatic dismissal after confirmed recovery. No new heat-pump control or automatic core restart.
 - Upgrade from watchdog v1 without duplicating hooks. Existing 1.4.5_2 release remains unchanged.
-- Basic v1 readback was confirmed on the owner's live NanoPi at 13:27:36 on 25 November 2026; v2 recovery and notification still need hardware validation.
+- Live NanoPi validation (25 November 2026): v1 readback confirmed at 13:27:36; v2 installed from the checksummed 1.4.5_3 distribution and confirmed at 14:00:00, with zero failures/recoveries and active haier.service. Actual fault recovery, notifications and post-reboot persistence of v2 remain untested.
 
 ## Our additions in 1.4.5_3
 
@@ -67,7 +67,7 @@ bash install-1453.sh
 
 The script does not upgrade the upstream core. It applies a small guarded watchdog patch to the installed compatible main.py, backs it up and restarts haier once. For existing diagnostics use `bash install-1453.sh --watchdog-only`. It stages in RAM, installs the sidecar code once to `/opt`, and verifies MQTT. It does **not** persist `/etc` over an OverlayFS reboot. For compatible NanoPi, use the separately documented `docs/OVERLAYFS_AUTOSTART.md` one-time setup only after verifying UID/GID, source paths and recovery plan. Do not blindly append a duplicate boot hook.
 
-See [MQTT watchdog documentation](docs/MQTT_END_TO_END_WATCHDOG.md) for thresholds, requirements, RO remount behaviour and rollback. Hardware reception and the installer mount path are not yet verified.
+See [MQTT watchdog documentation](docs/MQTT_END_TO_END_WATCHDOG.md) for thresholds, requirements, RO remount behaviour and rollback. Normal v2 reception and installation are confirmed on NanoPi with /opt already writable; automatic RO-to-RW-to-RO mounting was not exercised. The installer preserves the initial mount flags.
 
 ### Safety and validation
 
@@ -75,7 +75,7 @@ See [MQTT watchdog documentation](docs/MQTT_END_TO_END_WATCHDOG.md) for threshol
 - Settings/passwords are derived from existing `/opt/config.ini` and held in RAM, never in `/boot`.
 - Cycle totals start fresh at service restart; long-term history belongs in the Home Assistant recorder.
 - On 25 November 2026, the diagnostics and boot startup were successfully restart-tested on the owner's NanoPi running the earlier patched alpha13 core.
-- **The combination with the new upstream Stable core has been verified statically and in simulated MQTT tests, but has NOT been validated against live heat-pump hardware.** Release is therefore marked **prerelease**.
+- **The combination with the new upstream Stable core has been verified statically and in simulated MQTT tests, but has NOT been validated against live heat-pump hardware.** Release is therefore marked **prerelease**. Normal watchdog operation on the installed compatible core is separately confirmed as above; this does not certify the complete upstream/diagnostics combination or fault recovery.
 - There is no automatic or silent upgrade of the working NanoPi core.
 
 See also: [Home Assistant dashboard](https://github.com/petec999/home-iot-telemetry/tree/main/home_assistant/dashboards) (maintained separately).
