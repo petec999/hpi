@@ -53,7 +53,7 @@ def main():
         "subcooling_signed": 'subcooling = f"{TsatPd_act - Thi:.1f}"' in main,
         "old_superheat_abs_absent": 'abs(Ts - TsatPs_act)' not in main,
         "old_subcool_abs_absent": 'abs(TsatPd_act - Thi)' not in main,
-        "legacy_cleanup": "HaierPi_CH_daily_kWh" in main and "_clear(" in main,
+        "legacy_cleanup": "HaierPi_CH_daily_kWh" in main and "for _legacy_sensor in (" in main,
         "old_alpha_label_absent": "alpha13" not in main.lower(),
         "raw_rs485_t141": "R141=T141" in main,
         "raw_rs485_t241": "R241=T241" in main,
