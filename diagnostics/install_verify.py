@@ -32,7 +32,7 @@ def verify(env_path, timeout=180, check_db=False):
     port = int(env.get("HPI_MQTT_PORT", "1883"))
     statuses = {
         base + "/diagnostics/counters/available": False,
-        base + "/diagnostics/pr7/availability": False,
+        base + "/diagnostics/circuit/availability": False,
     }
     lock = threading.Lock()
     connected = threading.Event()
