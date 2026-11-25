@@ -20,10 +20,8 @@ class DiskSafetyTests(unittest.TestCase):
 
     def test_full_install_rejects_before_core_install(self):
         source = (ROOT / "install-all-safe.sh").read_text()
-        self.assertIn("APP_REQUIRED_KB", source)
-        self.assertIn("BACKUP_REQUIRED_KB", source)
-        self.assertLess(source.index("Full upgrade refused BEFORE core changes"),
-                        source.index('bash "$CORE_SCRIPT"'))
+        self.assertIn("DISABLED", source)
+        self.assertNotIn("bash \"$CORE_SCRIPT\"", source)
 
     def test_core_wrapper_checks_space_before_backup(self):
         source = (ROOT / "install-safe.sh").read_text()
@@ -39,6 +37,9 @@ class DiskSafetyTests(unittest.TestCase):
         self.assertIn("SPACE OK", source)
         self.assertIn('tar -tzf "$SNAP/previous.tar.gz"', source)
         self.assertIn("install_verify.py", source)
+        self.assertIn("--no-db", source)
+        self.assertIn("haierpi-cycles haierpi-circuit", source)
+        self.assertIn("LEGACY_UNITS", source)
 
 
 if __name__ == "__main__":
