@@ -40,6 +40,7 @@ jobs:
         run: |
           set -e
           bash -n alpha13.sh
+          bash -n deployment/haierpi-startup/start.sh
           python -m unittest discover -s tests -p 'test_u2_temperature_decode.py' -v
           python -m unittest discover -s tests -p 'test_compressor_refrigerant_metrics.py' -v
           python -m unittest discover -s tests -p 'test_legacy_mqtt_discovery_cleanup.py' -v
