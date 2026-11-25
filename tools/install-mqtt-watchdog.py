@@ -11,9 +11,9 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-MARK = "# HOME-IOT MQTT WATCHDOG v1"
+MARK = "# HOME-IOT MQTT WATCHDOG v2"
 WATCHDOG = r'''
-# HOME-IOT MQTT WATCHDOG v1
+# HOME-IOT MQTT WATCHDOG v2
 import threading as _wd_threading
 import time as _wd_time
 import secrets as _wd_secrets
@@ -28,6 +28,10 @@ _wd_discovery_at = 0.0
 _wd_scope = None
 _wd_failures = 0
 _wd_recoveries = 0
+_wd_last_reconnect = None
+_wd_mismatch_streak = 0
+_wd_reconnect_request = None
+_wd_notification_open = None
 
 def _haierpi_watchdog_tick():
     """Run only after a scheduled MQTT snapshot; never block the scheduler."""
@@ -44,7 +48,8 @@ def _haierpi_watchdog_tick():
 
 def _haierpi_watchdog_worker():
     global _wd_since, _wd_last_ok, _wd_status, _wd_discovery_at, _wd_scope
-    global _wd_failures, _wd_recoveries
+    global _wd_failures, _wd_recoveries, _wd_last_reconnect, _wd_mismatch_streak
+    global _wd_reconnect_request, _wd_notification_open
     try:
         now = _wd_time.monotonic()
         topic = str(globals().get("mqtt_topic", "")).strip()
@@ -61,11 +66,15 @@ def _haierpi_watchdog_worker():
             _wd_last_ok = None
             _wd_status = None
             _wd_discovery_at = 0.0
+            _wd_mismatch_streak = 0
+            _wd_reconnect_request = None
+            _wd_notification_open = None
         interval = max(2, int(globals().get("mqtt_snapshot_interval_s", 30) or 30))
         warn_after = max(90, 3 * interval)
         alarm_after = max(180, 6 * interval)
         cl = globals().get("client")
         reason = "unknown"
+        ha_mismatch = False
         if not address or not token or not topic or not prefix or str(globals().get("ha_mqtt_discovery", "0")) != "1":
             reason = "HA API or MQTT discovery not configured"
         elif cl is None or not cl.is_connected():
@@ -108,7 +117,9 @@ def _haierpi_watchdog_worker():
                                 reason = "ok"
                                 break
                             reason = "HA has not reported current heartbeat"
+                            ha_mismatch = True
                         else:
+                            ha_mismatch = False
                             reason = "HA API HTTP %s" % resp.status_code
                             if resp.status_code in (401, 403):
                                 break
@@ -116,10 +127,13 @@ def _haierpi_watchdog_worker():
                                 # Discovery may be delayed or entity ID renamed.
                                 _wd_discovery_at = 0.0
                     except Exception as exc:
+                        ha_mismatch = False
                         reason = "HA API " + type(exc).__name__
         now = _wd_time.monotonic()
         if reason == "ok":
             previous = _wd_status
+            _wd_mismatch_streak = 0
+            _wd_reconnect_request = None
             _wd_last_ok = now
             _wd_status = "ok"
             if previous != "ok":
@@ -128,6 +142,7 @@ def _haierpi_watchdog_worker():
                 logging.info("MQTT watchdog OK: HA confirmed heartbeat (failures=%s recoveries=%s)",
                              _wd_failures, _wd_recoveries)
         else:
+            _wd_mismatch_streak = _wd_mismatch_streak + 1 if ha_mismatch else 0
             age = now - (_wd_last_ok if _wd_last_ok is not None else _wd_since)
             level = "alarm" if age >= alarm_after else "warning" if age >= warn_after else "waiting"
             status = level + ": " + reason
@@ -139,6 +154,35 @@ def _haierpi_watchdog_worker():
                 log = logging.error if level == "alarm" else logging.warning if level == "warning" else logging.info
                 log("MQTT watchdog %s; no verified reception for %.0fs", status, age)
                 _wd_status = status
+            # Request recovery only after repeated HTTP 200 readback mismatches,
+            # after a previous confirmed heartbeat. Never for HA/API failures.
+            if (level == "alarm" and _wd_last_ok is not None and
+                    _wd_mismatch_streak >= 3 and cl is not None and
+                    globals().get("client") is cl and cl.is_connected() and
+                    (_wd_last_reconnect is None or now - _wd_last_reconnect >= 900)):
+                _wd_reconnect_request = cl
+                _wd_last_reconnect = now
+                _wd_discovery_at = 0.0
+                logging.warning("MQTT watchdog requesting worker reconnect; cooldown 900s")
+        # Persistent notification is sent directly to HA (also works if MQTT is down).
+        if address and token and (_wd_status == "ok" or
+                                  (_wd_status or "").startswith("alarm:")):
+            want_open = _wd_status != "ok"
+            if _wd_notification_open is not want_open:
+                import requests
+                service = "create" if want_open else "dismiss"
+                data = {"notification_id": "haierpi_mqtt_watchdog"}
+                if want_open:
+                    data.update(title="HaierPi: awaria komunikacji MQTT",
+                                message="Brak potwierdzenia odbioru przez HA: " + reason)
+                try:
+                    response = requests.post(base + "/api/services/persistent_notification/" + service,
+                        json=data, headers={"Authorization": "Bearer " + token},
+                        timeout=(2, 3), allow_redirects=False)
+                    if response.status_code == 200:
+                        _wd_notification_open = want_open
+                except Exception:
+                    pass
     except Exception as exc:
         # Never include credentials or raw HTTP content in diagnostic logs.
         logging.warning("MQTT watchdog internal error: %s", type(exc).__name__)
@@ -150,6 +194,23 @@ def _haierpi_watchdog_worker():
 def patch(source):
     if MARK in source:
         return source
+    old_mark = "# HOME-IOT MQTT WATCHDOG v1"
+    anchor = "def mqtt_snapshot_tick():\n"
+    if old_mark in source:
+        if source.count(old_mark) != 1 or source.count(anchor) != 1:
+            raise RuntimeError("Unexpected v1 watchdog layout")
+        start = source.index(old_mark)
+        end = source.index(anchor, start)
+        old = source[start:end]
+        if "def _haierpi_watchdog_worker():" not in old:
+            raise RuntimeError("Unrecognized v1 block")
+        source = source[:start] + source[end:]
+        hook = "    _haierpi_watchdog_tick()\n"
+        ignore = ('    if msg.topic == str(mqtt_topic) + "/haierpi/watchdog_heartbeat":\n'
+                  '        return\n')
+        if source.count(hook) != 1 or source.count(ignore) != 1:
+            raise RuntimeError("Unexpected v1 hook layout")
+        source = source.replace(hook, "", 1).replace(ignore, "", 1)
     anchor = "def mqtt_snapshot_tick():\n"
     snapshot = "    _mqtt_snapshot_last_ts = now\n    mqtt_publish_snapshot()\n"
     import re
@@ -167,6 +228,16 @@ def patch(source):
     source = source.replace(handler, handler +
         '    if msg.topic == str(mqtt_topic) + "/haierpi/watchdog_heartbeat":\n'
         '        return\n', 1)
+    worker_anchor = "            rc = cl.loop(timeout=1.0)\n"
+    if source.count(worker_anchor) != 1:
+        raise RuntimeError("Unexpected MQTT worker layout; nothing changed")
+    source = source.replace(worker_anchor,
+        "            if globals().get('_wd_reconnect_request') is cl:\n"
+        "                globals()['_wd_reconnect_request'] = None\n"
+        "                if not mqtt_stop_event.is_set() and globals().get('client') is cl and cl.is_connected():\n"
+        "                    logging.warning('MQTT watchdog: disconnecting MQTT client for reconnect')\n"
+        "                    cl.disconnect()\n"
+        + worker_anchor, 1)
     return source
 
 def main():
