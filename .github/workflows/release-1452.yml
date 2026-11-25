@@ -1,0 +1,131 @@
+name: HaierPi 1.4.5_2 — build and prerelease
+on:
+  push:
+    branches:
+      - release/1.4.5_2
+    paths:
+      - 'RELEASE_1.4.5_2.md'
+      - 'diagnostics/**'
+      - 'install-1452.sh'
+      - 'tools/install-mqtt-watchdog.py'
+      - 'deployment/**'
+      - 'docs/**'
+      - 'tools/build_145_2.py'
+      - 'tools/inspect_stable_145.py'
+      - 'tests/**'
+      - '.github/workflows/release-1452.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hpi-release-1452
+  cancel-in-progress: false
+
+jobs:
+  source-and-tests:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.11']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Check syntax of deployment scripts
+        run: |
+          bash -n install-diagnostics-light.sh
+          bash -n install-1452.sh
+          python -m unittest discover -s tests -p 'test_mqtt_watchdog_patch.py' -v
+          bash -n deployment/haierpi-startup/start.sh
+      - name: Test read-only diagnostics and safe installation
+        run: |
+          set -euo pipefail
+          for test in \
+            test_cycle_counter_pr6.py \
+            test_pr6_runtime_simulation.py \
+            test_circuit_telemetry_pr7.py \
+            test_mqtt_circuit_bridge_pr7.py \
+            test_pr7_runtime_simulation.py \
+            test_live_topic_reconciliation.py \
+            test_combined_diagnostics.py \
+            test_auto_mqtt_config.py \
+            test_install_verify.py \
+            test_disk_safe_deployment.py \
+            test_ha_dashboard_bundle.py
+          do
+            python -m unittest discover -s tests -p "$test" -v
+          done
+  build:
+    needs: source-and-tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download upstream HaierPi Stable 1.4.5 and alpha13 for comparison
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/hpi-upstream
+          curl -fLSs --retry 3 --connect-timeout 15 --max-time 120 \
+            https://raw.githubusercontent.com/kamilostatek/hpi/main/1.4.5_stable.tar.gz \
+            -o /tmp/hpi-upstream/1.4.5_stable.tar.gz
+          curl -fLSs --retry 3 --connect-timeout 15 --max-time 120 \
+            https://raw.githubusercontent.com/kamilostatek/hpi/main/1.4.5_alpha13.tar.gz \
+            -o /tmp/hpi-upstream/1.4.5_alpha13.tar.gz
+          printf '%s  %s\n' \
+            ca803a3f8777efa75a40739d2efeb0362365ffa4291d3eb76d9a231c6cb53976 \
+            /tmp/hpi-upstream/1.4.5_stable.tar.gz | sha256sum -c -
+      - name: Verify baseline stable source, MQTT, U2 and changes against Alpha
+        run: |
+          python3 tools/inspect_stable_145.py \
+            /tmp/hpi-upstream/1.4.5_stable.tar.gz \
+            /tmp/hpi-upstream/1.4.5_alpha13.tar.gz
+      - name: Build verified version 1.4.5_2
+        run: |
+          python3 tools/build_145_2.py \
+            /tmp/hpi-upstream/1.4.5_stable.tar.gz dist
+          cd dist
+          sha256sum -c 1.4.5_2.sha256
+          tar -tzf 1.4.5_2.tar.gz | sort
+          tar -xOf 1.4.5_2.tar.gz \
+            HaierPi-1.4.5_2/upstream/1.4.5_stable.tar.gz \
+            | sha256sum \
+            | grep ca803a3f8777efa75a40739d2efeb0362365ffa4291d3eb76d9a231c6cb53976
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HaierPi-1.4.5_2
+          path: |
+            dist/1.4.5_2.tar.gz
+            dist/1.4.5_2.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: HaierPi-1.4.5_2
+          path: dist
+      - name: Publish verified 1.4.5_2 prerelease (do not modify main)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c 1.4.5_2.sha256
+          cd ..
+          if gh release view v1.4.5_2 >/dev/null 2>&1; then
+            echo "Release v1.4.5_2 already exists. Refusing to overwrite signed-off assets."
+            exit 1
+          fi
+          gh release create v1.4.5_2 \
+            dist/1.4.5_2.tar.gz dist/1.4.5_2.sha256 \
+            --target "$GITHUB_SHA" \
+            --title "HaierPi 1.4.5_2 — Stable + RAM diagnostics + MQTT watchdog" \
+            --notes-file RELEASE_1.4.5_2.md \
+            --prerelease
