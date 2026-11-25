@@ -124,16 +124,16 @@ class RuntimeSimulationTests(unittest.TestCase):
                        if t.startswith("homeassistant/sensor/haierpi_pr7/")]
         self.assertEqual(len(discoveries), len(METRIC_UNITS))
         published = {t: v for t, v, _ in messages
-                     if t.startswith(BASE + "/diagnostics/pr7/")}
-        self.assertEqual(published[BASE + "/diagnostics/pr7/water_delta_t"], "3.0")
-        self.assertEqual(published[BASE + "/diagnostics/pr7/saturation_lift"], "35.1")
-        self.assertEqual(published[BASE + "/diagnostics/pr7/ambient_evaporating_approach"], "4.5")
-        self.assertEqual(published[BASE + "/diagnostics/pr7/pressure_delta_mpa"], "1.6")
-        self.assertEqual(published[BASE + "/diagnostics/pr7/compressor_frequency_error_hz"], "15.0")
+                     if t.startswith(BASE + "/diagnostics/circuit/")}
+        self.assertEqual(published[BASE + "/diagnostics/circuit/water_delta_t"], "3.0")
+        self.assertEqual(published[BASE + "/diagnostics/circuit/saturation_lift"], "35.1")
+        self.assertEqual(published[BASE + "/diagnostics/circuit/ambient_evaporating_approach"], "4.5")
+        self.assertEqual(published[BASE + "/diagnostics/circuit/pressure_delta_mpa"], "1.6")
+        self.assertEqual(published[BASE + "/diagnostics/circuit/compressor_frequency_error_hz"], "15.0")
         # Shutdown correctly announces unavailable.
-        self.assertEqual(messages[-1][0], BASE + "/diagnostics/pr7/availability")
+        self.assertEqual(messages[-1][0], BASE + "/diagnostics/circuit/availability")
         self.assertEqual(messages[-1][1], "offline")
-        self.assertTrue(any(t == BASE + "/diagnostics/pr7/availability"
+        self.assertTrue(any(t == BASE + "/diagnostics/circuit/availability"
                             and v == "online" for t, v, _ in messages))
 
 
