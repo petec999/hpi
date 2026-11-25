@@ -46,11 +46,14 @@ for separate, carefully reviewed maintenance only.
 ## Important: OverlayFS service persistence
 
 The NanoPi's `/etc` changes occur in RAM and will **not** survive a reboot.
-The lightweight installer does NOT override that protection, which means
-its dynamically installed systemd units are only guaranteed for the current boot.
-Before any reboot, plan a **one-time** persistence arrangement that respects
-the read-only root design. Do not remount the SD read/write just to continuously
-log diagnostics.
+The lightweight installer does NOT by itself override that protection.
+On 25 November 2026 the real NanoPi was configured with a one-time persistent
+`/boot/dietpi/postboot` hook to `/opt/haierpi-startup/start.sh`, which restores
+the service account, MQTT settings and both units in RAM on every boot.
+**The reboot was tested successfully**, including the original HaierPi, SSH,
+cycle and circuit services, with OverlayFS still active. See
+`docs/OVERLAYFS_AUTOSTART.md` and `deployment/haierpi-startup/start.sh`.
+Do not automatically reapply the one-time hook on this already configured host.
 
 ## Home Assistant
 
@@ -59,6 +62,7 @@ The UI dashboard belongs in the separate repository:
 https://github.com/petec999/home-iot-telemetry/tree/main/home_assistant/dashboards
 
 Graph history is the responsibility of Home Assistant, **not** the NanoPi.
+Feature documentation: `docs/CYCLE_COUNTERS.md`, `docs/CIRCUIT_TELEMETRY.md`.
 
 ## Source and safety
 
@@ -69,7 +73,7 @@ Graph history is the responsibility of Home Assistant, **not** the NanoPi.
   `/opt/config.ini` without printing secrets.
 - `install-diagnostics-light.sh`: disk-safe two-service migration.
 - `tests/`: unit, simulated MQTT, and safety regression tests.
-- `docs/`: engineering notes.
+- `docs/`: engineering notes and reboot-tested OverlayFS integration.
 
 This project preserves no SQLite history, does not touch the heat-pump control
 registers, and does not add new background writes to the SD.
