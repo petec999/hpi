@@ -1,0 +1,29 @@
+name: Inspect upstream stable baseline for 1.4.5_1
+on:
+  push:
+    branches: [release/1.4.5_1]
+    paths:
+      - 'tools/inspect_stable_145.py'
+      - '.github/workflows/inspect-stable-145.yml'
+  workflow_dispatch:
+
+jobs:
+  upstream-comparison:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned public upstream archives
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/hpi-upstream
+          curl -fLSs --retry 3 --connect-timeout 15 --max-time 120 \
+            https://raw.githubusercontent.com/kamilostatek/hpi/main/1.4.5_stable.tar.gz \
+            -o /tmp/hpi-upstream/1.4.5_stable.tar.gz
+          curl -fLSs --retry 3 --connect-timeout 15 --max-time 120 \
+            https://raw.githubusercontent.com/kamilostatek/hpi/main/1.4.5_alpha13.tar.gz \
+            -o /tmp/hpi-upstream/1.4.5_alpha13.tar.gz
+      - name: Compare stable vs alpha13, audit patched locations
+        run: |
+          python3 tools/inspect_stable_145.py \
+            /tmp/hpi-upstream/1.4.5_stable.tar.gz \
+            /tmp/hpi-upstream/1.4.5_alpha13.tar.gz
