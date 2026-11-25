@@ -3,7 +3,7 @@ try:
 except ImportError:
     from source_topics import live_state_topic
 
-"""MQTT Discovery-driven, read-only HaierPi PR7 telemetry sidecar.
+"""MQTT Discovery-driven, read-only HaierPi circuit telemetry sidecar.
 
 Requires paho-mqtt and the circuit_telemetry.py module in this directory.
 Does not issue control commands or touch the original HaierPi main.py.
@@ -177,7 +177,7 @@ def main():
     source_topics = {}
     last_publish = None
 
-    client = mqtt.Client(client_id="haierpi-pr7-telemetry")
+    client = mqtt.Client(client_id="haierpi-circuit")
     user = os.environ.get("HPI_MQTT_USERNAME")
     if user:
         client.username_pw_set(user, os.environ.get("HPI_MQTT_PASSWORD"))
@@ -195,7 +195,7 @@ def main():
                 "unit_of_measurement": unit,
                 "state_class": "measurement",
                 "device": {"identifiers": ["haierpi_pr7_diagnostics"],
-                           "name": "HaierPi Advanced Diagnostics"},
+                           "name": "HaierPi Obieg chłodniczy"},
             }
             client.publish(prefix + "/sensor/haierpi_pr7/" + metric + "/config",
                            json.dumps(cfg), qos=1, retain=True)
