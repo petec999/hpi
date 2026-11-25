@@ -25,14 +25,14 @@ class DailyCounters:
 
 
 class CycleCounter:
-    """Conservative, sample-based daily counter with atomic persistence.
+    """Conservative, sample-based daily counter with optional persistence.
 
     First sample after startup, a telemetry gap or restart is a baseline,
     never a new start. Runtime is credited only between agreeing ON samples.
     """
 
-    def __init__(self, path, *, max_gap_seconds=180.0, compressor_on_hz=1.0):
-        self.path = Path(path)
+    def __init__(self, path=None, *, max_gap_seconds=180.0, compressor_on_hz=1.0):
+        self.path = Path(path) if path is not None else None
         self.max_gap_seconds = float(max_gap_seconds)
         self.compressor_on_hz = float(compressor_on_hz)
         if not math.isfinite(self.max_gap_seconds) or self.max_gap_seconds <= 0:
@@ -51,7 +51,7 @@ class CycleCounter:
         self._defrost_cycle_seconds = 0.0
 
     def _load(self):
-        if self.path.exists():
+        if self.path is not None and self.path.exists():
             payload = json.loads(self.path.read_text(encoding="utf-8"))
             if payload.get("version") != 1:
                 raise ValueError("Unsupported counter file version")
@@ -59,6 +59,8 @@ class CycleCounter:
         # Intentionally do not restore last observed ON/OFF states.
 
     def _save(self):
+        if self.path is None:
+            return  # RAM-only: never touch SD, overlayfs or SQLite.
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, name = tempfile.mkstemp(prefix=".haier_counter_", dir=self.path.parent)
         try:
