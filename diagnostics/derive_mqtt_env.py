@@ -52,7 +52,6 @@ def derive(path):
         "HPI_MQTT_PASSWORD": password,
         "HPI_TZ": "Europe/Warsaw",
         "HPI_SAMPLE_TTL": "120",
-        "HPI_HISTORY_RETENTION_DAYS": "90",
     }
 
 
