@@ -455,6 +455,9 @@ class Runtime:
     def report_view(self):
         with self.lock:
             data=self.report.snapshot()
+            # Do not present an old sampled run as a currently running compressor.
+            if self.report.last is None or not 0<=time.monotonic()-self.report.last[0]<=65:
+                data["current_streak"]=None
             rows=[]
             for key,value in self.learning.rows.items():
                 a,b,c,d=map(int,key.split(":"))
@@ -487,6 +490,7 @@ class Runtime:
                 if max(stamps)-min(stamps)>self.MAX_AGE:
                     self.observer.interrupt()
                     self.thresholds.interrupt()
+                    self.report.interrupt()
                 return
             self.observer_frames=stamps
             eligible=(self.activation_reason(s,zone,curve) is None

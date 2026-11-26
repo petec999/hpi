@@ -35,6 +35,11 @@ class ThresholdTest(unittest.TestCase):
             m.save_if_due(1000)
             m=NativeThresholds(p)
             self.assertEqual(m.model(sample(0))["start_target"],29.7)
+            g=next(g for g in m.summary()["groups"] if g["edge"]=="start")
+            self.assertEqual(len(g["samples"]),8)
+            self.assertEqual(g["samples"][0],{"at":100,"twi_offset":-2.4,"two_offset":-2.2})
+            g["samples"][0]["two_offset"]=0
+            self.assertEqual(m.summary()["groups"][0]["samples"][0]["two_offset"],-2.2)
             self.assertEqual(m.model(sample(0,mode="eco",relay=False))["stop_target"],36.4)
             self.assertEqual(m.model(sample(0))["stop"]["source"],"default")
             m.rows["stop:2:10"]=[[100+i,1,3.8 if i<4 else 5.4] for i in range(8)]

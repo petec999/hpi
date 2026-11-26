@@ -353,13 +353,40 @@ def threshold_report_api(source):
     html=once(html,'const l=d.learning,k=el("kpis");','const th=d.thresholds;el("threshold-status").textContent=th?"Ostatni zapis "+dt(th.saved_at)+(th.unsaved?" · RAM":"")+(th.storage_error?" · "+th.storage_error:""):"—";table("thresholds",["Przejście","Tryb","FLimit","Nastawa od","n","Twi K","Two K","MAD K","Model K","Źródło"],(th?th.groups:[]).map(x=>[x.edge,x.preset,x.flimit?"ON":"OFF",x.target_band,x.n,num(x.twi_median,2),num(x.two_median,2),num(x.mad,2),num(x.offset,2),x.source==="learned"?"Wyuczony":"Domyślny"]));const l=d.learning,k=el("kpis");')
     return once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
 
+def performance_report_api(source):
+    source=threshold_report_api(source)
+    line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+    html=ast.literal_eval(line.split("=",1)[1].strip())
+    if 'id="run-kpis"' not in html:
+        html=once(html,'<article><h2>Praca CO — Legacy i Auto</h2>','<article><h2>Cel: ciągła praca bez STOP</h2><div class="grid" id="run-kpis"></div><small>Ciągłość potwierdzana przez dodatnie Fset i Fact w kolejnych próbkach. Zmiany trybu i nastawy nie zerują pomiaru; przerwy w danych, priorytet i zmiana właściciela zerują. Rekord to dolna granica czasu, nie pełny cykl. Godziny ponad pierwszą godzinę oznaczają czas od 61. minuty każdego obserwowanego odcinka. Brak danych sprzed włączenia tego pomiaru.</small></article><article><h2>Praca CO — Legacy i Auto</h2>')
+        html=once(html,'<h2>Wykorzystanie konfiguracji Auto podczas pracy Fact</h2><div id="levels"></div>','<h2>Wykorzystanie konfiguracji Auto podczas pracy Fact</h2><div id="levels"></div><div class="scroll"><table id="level-details"></table></div><small>Procent liczony względem sumy zarejestrowanego czasu pracy Fact w sześciu konfiguracjach, nie względem całej doby.</small>')
+        html=once(html,'<div class="scroll"><table id="thresholds"></table></div>','<div class="scroll"><table id="thresholds"></table></div><details><summary>Zapisane pomiary użyte do obliczeń</summary><p><a href="/v2/api/adaptive-report.csv?kind=thresholds">CSV progi</a> · <a href="/v2/api/adaptive-report.csv?kind=threshold_samples">CSV pomiary progów</a></p><div class="scroll"><table id="threshold-samples"></table></div></details>')
+        html=once(html,'const empty=()=>({coverage_s:0,running_s:0,starts:0,completed:0,run_s:0,levels_s:[0,0,0,0,0,0]});','const empty=()=>({coverage_s:0,running_s:0,starts:0,completed:0,run_s:0,levels_s:[0,0,0,0,0,0],max_continuous_s:0,beyond_hour_s:0});')
+        html=once(html,'b.levels_s.forEach((v,i)=>a.levels_s[i]+=v);return a','b.levels_s.forEach((v,i)=>a.levels_s[i]+=v);a.max_continuous_s=Math.max(a.max_continuous_s,b.max_continuous_s||0);a.beyond_hour_s+=b.beyond_hour_s||0;return a')
+        html=once(html,'d.levels.forEach((x,i)=>bar(lv,x,auto.levels_s[i],sum));','''d.levels.forEach((x,i)=>bar(lv,x,auto.levels_s[i],sum));
+table("level-details",["Tryb / FLimit","Godziny","Udział"],d.levels.map((x,i)=>[x,num(auto.levels_s[i]/3600,2),sum?num(auto.levels_s[i]*100/sum,2)+"%":"—"]));
+const run=el("run-kpis");run.replaceChildren();const st=d.current_streak;
+for(const [a,b] of [["Bieżąca ciągła praca Auto",st&&st.owner==="auto"?num(st.seconds/3600,2)+" h":"—"],["Rekord Auto",auto.max_continuous_s?num(auto.max_continuous_s/3600,2)+" h":"—"],["Rekord Legacy",owners.legacy&&owners.legacy.max_continuous_s?num(owners.legacy.max_continuous_s/3600,2)+" h":"—"],["Auto – godziny ponad 1 h ciągłości",num(auto.beyond_hour_s/3600,2)+" h"],["Auto – czas pracy Fact",num(auto.running_s/3600,2)+" h"]]){const k=node("div");k.className="kpi";k.append(node("small",a),node("b",b));run.append(k)}
+const ts=(d.thresholds?d.thresholds.groups:[]).flatMap(g=>(g.samples||[]).map(x=>[x.at,g.edge,g.preset,g.flimit?"ON":"OFF",g.target_band,x.twi_offset,x.two_offset]));ts.sort((a,b)=>b[0]-a[0]);table("threshold-samples",["Czas","Przejście","Tryb","FLimit","Nastawa od °C","Twi K","Two K"],ts.map(x=>[dt(x[0]),...x.slice(1,5),num(x[5],3),num(x[6],3)]));''')
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'elif kind=="threshold_samples":' not in source:
+        source=once(source,'    elif kind=="events":','''    elif kind=="thresholds":
+        rows=data["thresholds"]["groups"]
+        fields=["edge","preset","flimit","target_band","n","sensor","twi_median","two_median","median","mad","offset","source"]
+    elif kind=="threshold_samples":
+        rows=[dict(sample,edge=g["edge"],preset=g["preset"],flimit=g["flimit"],target_band=g["target_band"]) for g in data["thresholds"]["groups"] for sample in g["samples"]]
+        fields=["at","edge","preset","flimit","target_band","twi_offset","two_offset"]
+    elif kind=="events":''')
+        source=once(source,'"completed","run_s"]+["level_"','"completed","run_s","max_continuous_s","beyond_hour_s"]+["level_"')
+    return source
+
 def experiment_api(source):
     old='choices=("legacy","manual","shadow","auto") if key=="adaptive_control"'
     new='choices=("legacy","manual","shadow","auto","experiment") if key=="adaptive_control"'
     source=source if new in source else once(source,old,new)
     old='if current==value:'
     new='if current==value and not (key=="adaptive_control" and value=="manual" and _am.view()["auto_resume_pending"]):'
-    return threshold_report_api(source if new in source else once(source,old,new))
+    return performance_report_api(source if new in source else once(source,old,new))
 
 def learning_block():
     policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")

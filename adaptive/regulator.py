@@ -700,12 +700,13 @@ class AdaptiveReport:
         self.error=None
         self.last=None
         self.run=None
+        self.streak=None
         self.load()
 
     @staticmethod
     def empty():
         return {"coverage_s":0.0,"running_s":0.0,"starts":0,"completed":0,
-                "run_s":0.0,"levels_s":[0.0]*6}
+                "run_s":0.0,"levels_s":[0.0]*6,"max_continuous_s":0.0,"beyond_hour_s":0.0}
 
     @staticmethod
     def number(x,lo=0,hi=1e12):
@@ -724,7 +725,10 @@ class AdaptiveReport:
                 day,owner,out,target=key.split(":")
                 if not (0<=int(day)<=2000000 and owner in self.OWNERS and -12<=int(out)<=12 and 3<=int(target)<=21):
                     raise ValueError("invalid report group")
-                if set(b)!=set(self.empty()) or not all(self.number(b[k]) for k in ("coverage_s","running_s","starts","completed","run_s")) or len(b["levels_s"])!=6 or not all(self.number(x) for x in b["levels_s"]):
+                # Existing schema 1 rows lack the new metrics; preserve all old totals.
+                b.setdefault("max_continuous_s",0.0)
+                b.setdefault("beyond_hour_s",0.0)
+                if set(b)!=set(self.empty()) or not all(self.number(b[k]) for k in ("coverage_s","running_s","starts","completed","run_s","max_continuous_s","beyond_hour_s")) or len(b["levels_s"])!=6 or not all(self.number(x) for x in b["levels_s"]):
                     raise ValueError("invalid report row")
                 if b["running_s"]>b["coverage_s"] or b["completed"]>b["starts"] or any(type(b[k]) is not int for k in ("starts","completed")):
                     raise ValueError("invalid report counts")
@@ -750,6 +754,7 @@ class AdaptiveReport:
     def interrupt(self):
         self.last=None
         self.run=None
+        self.streak=None
 
     def prune(self,day):
         cutoff=day-self.DAYS+1
@@ -777,11 +782,26 @@ class AdaptiveReport:
         previous=self.last
         self.last=(s.now,wall,key,group,level,active,actual)
         if previous is None:
+            self.streak=(owner,s.now,s.now) if active and actual else None
             return
         pn,pw,pk,pg,pl,pa,ph=previous
         dt=s.now-pn
-        if not 0<dt<=65 or not 0<wall-pw<=90 or pg[0]!=owner or pg[2]!=group[2]:
+        contiguous=0<dt<=65 and 0<wall-pw<=90 and pg[0]==owner
+        # Separate uninterrupted run metric: both Fset and Fact must be
+        # positive at each end. Cross target/weather bands, not owners/gaps.
+        if contiguous and pa and ph and active and actual and self.streak is not None:
+            start=self.streak[1]
+            duration=s.now-start
+            self.streak=(owner,start,s.now)
+            b=self.buckets.setdefault(pk,self.empty())
+            b["max_continuous_s"]=max(b["max_continuous_s"],duration)
+            b["beyond_hour_s"]+=max(0,duration-3600)-max(0,pn-start-3600)
+            self.dirty=True
+        else:
+            self.streak=(owner,s.now,s.now) if active and actual else None
+        if not contiguous or pg[2]!=group[2]:
             self.run=None
+            self.prune(day)
             return
         # Attribute intervals to the last observed state; no interpolation
         # across telemetry gaps or owner/target-band changes.
@@ -864,6 +884,7 @@ class AdaptiveReport:
         return {"schema":1,"since":self.since,"saved_at":self.saved_at,"unsaved":self.dirty,
                 "storage_error":self.error,"retention_days":self.DAYS,"groups":groups,
                 "events":copy.deepcopy(self.events),"scores":dict(self.scores),
+                "current_streak":{"owner":self.streak[0],"seconds":self.streak[2]-self.streak[1]} if self.streak is not None and self.last is not None else None,
                 "levels":[m+(" + FLimit" if limit else " / OFF") for m,limit in LEVELS]}
 
 
@@ -1023,7 +1044,8 @@ class NativeThresholds:
         for key,rows in sorted(self.rows.items()):
             edge,level,band=key.split(":")
             m,relay=LEVELS[int(level)]
-            groups.append(dict(self.estimate(edge,rows),edge=edge,preset=m,flimit=relay,target_band=int(band)*3))
+            groups.append(dict(self.estimate(edge,rows),edge=edge,preset=m,flimit=relay,target_band=int(band)*3,
+                               samples=[{"at":row[0],"twi_offset":row[1],"two_offset":row[2]} for row in rows]))
         return {"groups":groups,"minimum_samples":self.MIN_SAMPLES,"saved_at":self.saved_at,"unsaved":self.dirty,"storage_error":self.error}
 
     def save_if_due(self,now):

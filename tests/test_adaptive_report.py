@@ -53,6 +53,42 @@ class ReportTest(unittest.TestCase):
             r.save_if_due(2800)
             self.assertEqual(AdaptiveReport(p).events,r.events)
 
+    def test_continuous_run_spans_modulation_and_target_bands(self):
+        r=AdaptiveReport()
+        for t in range(0,7231,30):
+            s=sample(t,True,"quiet" if t<3600 else "eco")
+            s=replace(s,target=32 if t<3600 else 34)
+            r.observe(s,"auto",True,86400+t,1)
+        data=r.snapshot()
+        self.assertEqual(data["current_streak"]["seconds"],7230)
+        self.assertEqual(max(b["max_continuous_s"] for b in data["groups"]),7230)
+        self.assertEqual(sum(b["beyond_hour_s"] for b in data["groups"]),3630)
+        r.observe(sample(7260,False),"auto",True,93660,1)
+        self.assertIsNone(r.snapshot()["current_streak"])
+        self.assertEqual(max(b["max_continuous_s"] for b in r.buckets.values()),7230)
+        r.observe(sample(7290,True),"auto",True,93690,1)
+        r.observe(sample(7400,True),"auto",True,93800,1)
+        self.assertEqual(r.snapshot()["current_streak"]["seconds"],0)
+
+    def test_old_report_migrates_and_record_survives_restart(self):
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)/"report.json"
+            r=AdaptiveReport(p)
+            for t in (0,30,60):
+                r.observe(sample(t,True),"auto",True,86400+t,1)
+            r.save_if_due(1000)
+            self.assertEqual(max(b["max_continuous_s"] for b in AdaptiveReport(p).buckets.values()),60)
+            self.assertIsNone(AdaptiveReport(p).snapshot()["current_streak"])
+            d=json.loads(p.read_text())
+            for b in d["buckets"].values():
+                del b["max_continuous_s"]
+                del b["beyond_hour_s"]
+            p.write_text(json.dumps(d))
+            restored=AdaptiveReport(p)
+            self.assertEqual(sum(b["running_s"] for b in restored.buckets.values()),60)
+            self.assertEqual(sum(b["max_continuous_s"] for b in restored.buckets.values()),0)
+
     def test_bounded_events(self):
         r=AdaptiveReport()
         for i in range(600):
