@@ -1,5 +1,8 @@
 # Adaptive modulation — experimental design
 
+> **Historical design note.** For current installation, storage, thresholds, ownership and restart behavior, use the [branch README](../README.md) and [current handover](ADAPTIVE_HANDOVER.md). The older values and installation assumptions below are retained for engineering history, not current operational guidance.
+
+
 This branch is not a live controller. The policy module is pure Python, returns proposals only, and has no GPIO, serial, MQTT, or file writes. No live-control installation on HaierPi yet.
 
 ## Ownership

@@ -1,5 +1,8 @@
 # Integrated adaptive preview for 1.4.5 Stable
 
+> **Historical design note.** For current installation, storage, thresholds, ownership and restart behavior, use the [branch README](../README.md) and [current handover](ADAPTIVE_HANDOVER.md). The older values and installation assumptions below are retained for engineering history, not current operational guidance.
+
+
 This is an opt-in **experimental preview**, not an upstream release or a validated hardware controller. It integrates the 1.4.5_4 core (GPIO, RS485 initial receive state, MQTT reconnect/PUBACK and HA watchdog), the previously device-tested Stage 2 WWW v2, and the adaptive policy. It preserves the existing configuration, original WWW and diagnostic sidecars. No reset, remount or clean installation.
 
 ## Installation and rollback

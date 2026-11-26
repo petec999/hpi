@@ -1,5 +1,8 @@
 # Adaptive Learning Preview
 
+> **Historical design note.** For current installation, storage, thresholds, ownership and restart behavior, use the [branch README](../README.md) and [current handover](ADAPTIVE_HANDOVER.md). The older values and installation assumptions below are retained for engineering history, not current operational guidance.
+
+
 An opt-in extension of the integrated adaptive preview. The installer continues to apply the existing GPIO/RS485, MQTT PUBACK/reconnect, HA watchdog and WWW patches. It accepts both supported Stable and the earlier integrated preview, replacing only the embedded adaptive modules and adding learning diagnostics on upgrade. Configuration and existing diagnostic sidecars are untouched.
 
 After a confirmed Auto reduction, the controller observes actual compressor speed and supply-temperature error for up to five minutes. It rejects interrupted samples, changes in demand/target, defrost, DHW, protection, telemetry gaps and manual ownership, and learns separately by 5 K outdoor and 3 K water-target bands and the actual preset/FLimit transition. Three completed observations are required before bounded changes to reduction confirmation (60–120 s), surplus band (0.4–0.8 K), early surplus (0.7–1.1 K) and forecast horizon (2.5–3.5 min). Shortage detection, upward response, minimum settling and physical safeguards are unchanged. The learned score indicates observed post-reduction surplus/shortage, not a causal saving or a calibrated model of heat output. Native stops are not treated as evidence of causation. The controller does not learn during Shadow, Manual or Legacy.
