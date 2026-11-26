@@ -48,3 +48,5 @@ Use --dry-run to validate without writes. Installer stages core GPIO/MQTT/WWW an
 3. Compare cycle lengths/start counts, frequency, Two vs confirmed target, defrost exclusions, successful and failed reductions, learned parameters. No claim that cycling is eliminated: minimum physical capacity may exceed building demand.
 4. Prior offline replay was exploratory; do not infer savings or causal prevention of stops. Hardware validation of live Auto and learning remains open.
 5. Future enhancements: richer export and HA visibility, explicit UI blockers, robust retention/recovery and bounded learned tuning from real traces. Preserve all prior core fixes and test new commits in isolation.
+
+Follow-up: Adaptive ownership no longer requires Legacy Manual/Auto settings to be changed. Curve navigation now links directly to the verified configuration section, and v2 has an authenticated recalculation button. Full curve editor remains the existing settings form. Check CI and live device before claiming success.

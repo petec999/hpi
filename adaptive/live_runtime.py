@@ -328,10 +328,10 @@ class Runtime:
                 relay="1" if s.relay else "0"
                 blocker=self.activation_reason(s,zone,curve)
             except Exception:
-                actual=relay=zone=None
+                actual=relay=zone=curve=None
                 blocker="Brak pełnego, świeżego odczytu pompy lub GPIO"
             if self.pending is not None:
                 blocker="Oczekiwanie na potwierdzenie poprzedniego polecenia"
             return dict(self.status,control=self.control,mode=actual,relay=relay,
-                        ready=blocker is None,activation_blocker=blocker,zone=zone,pending=self.pending is not None,fault=self.fault,
+                        ready=blocker is None,activation_blocker=blocker,curve=curve,zone=zone,pending=self.pending is not None,fault=self.fault,
                         learning=self.learning.summary())

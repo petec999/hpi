@@ -183,11 +183,14 @@ class SourceIntegration(unittest.TestCase):
             self.assertNotIn('href="/curvecalc"',html)
             self.assertIn('id="am-owner"',html)
             self.assertIn('activation_blocker',html)
+            self.assertIn('id="am-curve-recalc"',html)
+            self.assertIn('href="/settings#heatingcurve_section"',html)
+            self.assertIn('g["curvecalc"]()',src)
             self.assertIn('"reason":str(exc)',src)
             for url in ("/","/scheduler","/settings","/parameters","/charts"):
                 self.assertIn('href="'+url+'"',html)
             # Migrate the already installed learning UI without duplicating it.
-            old=html.replace('<a href="/">Panel oryginalny</a>','<a href="/curvecalc">Krzywa grzewcza</a>')
+            old=html.replace('<a href="/settings#heatingcurve_section">Edytuj krzywą</a>','<a href="/curvecalc">Krzywa grzewcza</a>')
             line=next(l for l in src.splitlines() if l.startswith("_WV_HTML = "))
             (d/"main.py").write_text(src.replace(line,"_WV_HTML = "+repr(old),1))
             self.assertEqual(installer["plan"](d)[0][2].decode(),src)

@@ -9,3 +9,5 @@ Memory: /opt/haier/.adaptive-learning.json, maximum 128 contexts, private atomic
 Experimental: automated tests cover policy, readback, storage, and source integration, but device testing is required. No claim of energy savings or eliminated cycling.
 
 WWW navigation: `/curvecalc` returns a JSON calculation and is not a page. The Advanced section links to the original panel `/`, `/scheduler`, `/settings`, `/parameters` and `/charts` instead. The live curve value remains visible in the overview. This changes navigation only; no regulation or GPIO/MQTT changes.
+
+The curve calculator in v2 is an authenticated POST with expected-state validation, current readiness and no automatic retry. It calls the existing curvecalc handler; the existing curve configuration editor is linked directly at /settings#heatingcurve_section, verified in upstream Stable templates. Full native v2 curve editing is not implemented.

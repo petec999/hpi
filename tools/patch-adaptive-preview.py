@@ -135,6 +135,47 @@ def activation_ui(html):
  finally{clearTimeout(timer);amBusy=false;amPaint(amState);}''')
     return html
 
+def curve_ui(html):
+    if 'id="am-curve-recalc"' in html:
+        return html
+    old='<a href="/">Panel oryginalny</a>'
+    html=once(html,old,'<a href="/settings#heatingcurve_section">Edytuj krzywą</a>')
+    html=once(html,'<p id="am-reason"', '<div class="ctlrow"><button id="am-curve-recalc" disabled>Przelicz krzywą</button></div><p id="am-curve-result" role="status"></p><p id="am-reason"')
+    html=once(html,' $("am-owner").textContent=',' $("am-curve-recalc").disabled=!amState||amBusy||!v.ready||!Number.isFinite(v.curve);\n $("am-owner").textContent=')
+    html=once(html,'$("am-save").addEventListener("click",', '''$("am-curve-recalc").addEventListener("click",async()=>{
+ if(!amState||amBusy||!amState.ready||!Number.isFinite(amState.curve))return;
+ const expected=amState.curve;
+ amBusy=true;amPaint(amState);
+ const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),20000);
+ try{
+  const res=await fetch("./api/control",{method:"POST",credentials:"same-origin",cache:"no-store",headers:{"Content-Type":"application/json","X-HaierPi-CSRF":document.querySelector('meta[name="wv-csrf"]').content},body:JSON.stringify({key:"curve_recalculate",value:"recalculate",expected}),signal:ctrl.signal});
+  const body=res.redirected?{}:await res.json();
+  if(!res.ok||!body.accepted)throw Error(body.reason||"Odrzucono (HTTP "+res.status+")");
+  $("am-curve-result").textContent="Krzywa przeliczona; aktualna nastawa pojawi się po odczycie.";
+ }catch(e){$("am-curve-result").textContent=e.message||"Niepotwierdzone przeliczenie.";}
+ finally{clearTimeout(timer);amBusy=false;amPaint(amState);}
+});
+$("am-save").addEventListener("click",''')
+    return html
+
+def curve_api(source):
+    if '    out["curve_recalculate"]' in source:
+        return source
+    source=once(source,'    out["adaptive_control"]=am["control"]','    out["curve_recalculate"]=out.get("hcurve")\n    out["adaptive_control"]=am["control"]')
+    source=once(source,'    if key in ("adaptive_control","flimiton"):', '''    if key=="curve_recalculate":
+        if value!="recalculate" or type(expected) not in (int,float) or not _wv_math.isfinite(expected):
+            raise ValueError("invalid curve recalculation")
+    elif key in ("adaptive_control","flimiton"):''')
+    source=once(source,'            if key=="adaptive_control":\n                try:', '''            if key=="curve_recalculate":
+                with _am.lock:
+                    a=_am.view()
+                    if not a["ready"] or a["pending"] or a["curve"]!=expected:
+                        return reply({"accepted":False,"reason":"Krzywa: stan zmienił się lub pompa nie jest gotowa"},409)
+                    g["curvecalc"]()
+            elif key=="adaptive_control":
+                try:''')
+    return source
+
 def learning_block():
     policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")
     runtime=(ROOT/"adaptive/live_runtime.py").read_text(encoding="utf-8").replace("from adaptive.regulator import","from _hpi_adaptive_policy import")
@@ -151,17 +192,17 @@ def learning_ui(source):
     # The legacy root and other links below are actual template routes.
     old='<a href="/curvecalc">Krzywa grzewcza</a>'
     if old in html:
-        html=once(html,old,'<a href="/">Panel oryginalny</a>')
-    html=activation_ui(html)
+        html=once(html,old,'<a href="/settings#heatingcurve_section">Edytuj krzywą</a>' if 'id="am-curve-recalc"' in html else '<a href="/">Panel oryginalny</a>')
+    html=curve_ui(activation_ui(html))
     if 'id="am-learning"' in html:
-        return activation_api(source if html==ast.literal_eval(line.split("=",1)[1].strip()) else once(source,line,"_WV_HTML = "+repr(html)))
+        return curve_api(activation_api(source if html==ast.literal_eval(line.split("=",1)[1].strip()) else once(source,line,"_WV_HTML = "+repr(html))))
     html=once(html,'<p id="am-reason"', '<div class="metric"><span>Uczenie (obserwacje / konteksty)</span><strong id="am-learning">—</strong></div><div class="metric"><span>Pamięć / dostrojenie</span><strong id="am-learning-detail">—</strong></div><p id="am-reason"')
     html=once(html,' $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";',
     ''' const l=v.learning;
  $("am-learning").textContent=l?l.observations+" / "+l.contexts:"—";
  $("am-learning-detail").textContent=l?(l.storage_error?"RAM (błąd zapisu)":l.unsaved?"RAM (oczekuje na zapis)":"Zapis / brak nowych danych")+" · "+fmt(v.down_confirm)+" s / "+fmt(v.surplus_band)+" K":"—";
  $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";''')
-    return activation_api(once(source,line,"_WV_HTML = "+repr(html)))
+    return curve_api(activation_api(once(source,line,"_WV_HTML = "+repr(html))))
 
 def patch(source):
     if MARK in source:
