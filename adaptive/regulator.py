@@ -145,7 +145,7 @@ class Regulator:
         finite=all(type(x) in (int,float) and math.isfinite(x) for x in
                    (s.now,s.target,s.return_temp,s.supply_temp,s.hz,s.requested_hz))
         valid=(finite and s.fresh and s.heating and not s.defrost and not s.dhw
-               and not s.override and s.error==0 and s.hz>0 and s.requested_hz>=0
+               and not s.override and s.error==0 and s.hz>0 and s.requested_hz>0
                and 10<=s.target<=65 and -10<=s.return_temp<=85 and -10<=s.supply_temp<=85)
         if not valid:
             self.reset()
@@ -204,7 +204,7 @@ class Regulator:
         if self.trial and now-self.trial[2]>c.trial_window:
             self.trial=None
         direction=None
-        risk="balanced"
+        risk=("cycling_risk_at_minimum" if level==0 else "cycling_risk") if stop_risk else "balanced"
         if urgent or shortfall:
             direction="up"
             risk="shortfall"
