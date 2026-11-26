@@ -268,8 +268,9 @@ class Regulator:
 
 class Learning:
     """Bounded adaptation from confirmed, uninterrupted Auto reductions."""
-    MAX_CONTEXTS = 128
-    SAVE_INTERVAL = 21600
+    MAX_CONTEXTS = 1024
+    MAX_FILE_BYTES = 512 * 1024
+    SAVE_INTERVAL = 1800
 
     def __init__(self, path=None, logger=None):
         self.path = Path(path) if path is not None else None
@@ -291,7 +292,7 @@ class Learning:
         if self.path is None:
             return
         try:
-            if self.path.is_symlink() or self.path.stat().st_size > 65536:
+            if self.path.is_symlink() or self.path.stat().st_size > self.MAX_FILE_BYTES:
                 raise ValueError("invalid learning file")
             data = json.loads(self.path.read_text(encoding="utf-8"))
             if data["schema"] != 2 or not isinstance(data["contexts"], dict) or len(data["contexts"]) > self.MAX_CONTEXTS:

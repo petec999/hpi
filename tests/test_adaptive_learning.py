@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from dataclasses import replace
-from adaptive.regulator import Learning, Sample, LEVELS, Settings
+from adaptive.regulator import Learning, Sample, LEVELS, Settings, adjacent
 
 def sample(t,level=5,supply=38,hz=45,**kw):
     mode,relay=LEVELS[level]
@@ -64,10 +64,46 @@ class LearningTest(unittest.TestCase):
             self.trial(l)
             l.save_if_due(1001)
             self.assertEqual(first,p.read_bytes())
-            l.save_if_due(22600)
+            l.save_if_due(2799)
+            self.assertEqual(first,p.read_bytes())
+            l.save_if_due(2800)
             self.assertEqual(Learning(p).summary()["observations"],2)
+            saved=p.read_bytes()
+            l.save_if_due(4600)
+            self.assertEqual(saved,p.read_bytes())
             p.write_text("corrupt")
             self.assertEqual(Learning(p).summary()["observations"],0)
+
+    def test_extended_context_capacity_roundtrip_and_eviction(self):
+        # Use real valid context keys and distinct last-update times.
+        from unittest.mock import patch
+        keys=[f"{a}:{b}:{c}:{adjacent(c,'down')}"
+              for a in range(-8,10) for b in range(3,22)
+              for c in range(len(LEVELS)) if adjacent(c,"down")!=c]
+        self.assertGreater(len(keys),1024)
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)/"learning.json"
+            l=Learning(p)
+            self.assertEqual(l.MAX_CONTEXTS,1024)
+            self.assertEqual(l.SAVE_INTERVAL,1800)
+            for i,key in enumerate(keys[:1024]):
+                with patch("adaptive.regulator.time.time",return_value=10000+i):
+                    l.record(key,0,1.25,0.5,0.1)
+            l.save_if_due(1000)
+            self.assertGreater(p.stat().st_size,65536)
+            self.assertLessEqual(p.stat().st_size,l.MAX_FILE_BYTES)
+            restored=Learning(p)
+            self.assertEqual(restored.rows,l.rows)
+            with patch("adaptive.regulator.time.time",return_value=20000):
+                restored.record(keys[0],1,2.0,0.5,0.1)
+            with patch("adaptive.regulator.time.time",return_value=20001):
+                restored.record(keys[1024],0,1.0,0.5,0.1)
+            self.assertEqual(len(restored.rows),1024)
+            self.assertIn(keys[0],restored.rows)
+            self.assertNotIn(keys[1],restored.rows)
+            self.assertIn(keys[1024],restored.rows)
+            restored.save_if_due(restored.last_save+1800)
+            self.assertEqual(Learning(p).rows,restored.rows)
 
     def test_old_schema_does_not_tune_return_policy(self):
         import json
