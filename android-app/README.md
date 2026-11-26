@@ -1,0 +1,5 @@
+# HaierPi Android preview 0.1.0
+
+A native Android WebView container for the existing HaierPi /v2/ panel. No server update is required. No cloud account, no bundled telemetry or credentials. Android 8+. The user supplies the existing panel URL including port. HTTP is allowed with an explicit warning; use trusted LAN or VPN. HTTPS certificates are validated. Main-frame external navigation and file/content access are blocked. Existing panel login and authorization are unchanged. This app is not a new native dashboard; the website supplies its controls and content.
+
+Build with Android SDK platform 35/build-tools 35.0.0 and Java 17: bash android-app/build.sh. GitHub Actions uploads the signed preview APK and SHA256 checksum in an artifact ZIP. The default preview signing key is newly generated each build, so future preview APKs may require uninstalling the old version unless a stable key is configured. Do not use the preview key for production distribution. No phone/device tests are included. No server firmware or control changes.
