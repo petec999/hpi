@@ -9,19 +9,19 @@ HaierPi fork for local heat-pump monitoring, Home Assistant/MQTT integration and
 | Stable core 1.4.5 | Baseline; no experimental Adaptive or Android changes merged | This branch |
 | 1.4.5_3 | Published prerelease with RAM diagnostics and HA MQTT watchdog | [Release and checksums](https://github.com/petec999/hpi/releases/tag/v1.4.5_3) |
 | 1.4.5_4 | Reliability integration; packaged installer hardware validation pending; not published as a release | [Release notes](https://github.com/petec999/hpi/blob/release/1.4.5_4/RELEASE_1.4.5_4.md) |
-| Adaptive preview | Automated tests pass; field experiment and Auto validation still open | [Installation and status](https://github.com/petec999/hpi/tree/feature/adaptive-learning) |
+| Adaptive preview | Latest verified revision 5cfd1415; native threshold learning, passive reporting, A4A heater status/counters; hardware validation open | [Installation and status](https://github.com/petec999/hpi/tree/feature/adaptive-learning) |
 | Android 0.2.0 | Signed preview build; device/API acceptance tests pending | [Mobile app](https://github.com/petec999/hpi/tree/feature/android-app/android-app) · [APK build artifacts](https://github.com/petec999/hpi/actions/runs/45868217263) |
 
 The experimental controller never replaces native compressor protection. Install only on compatible HaierPi systems with a backup and follow the instructions for the chosen track. Android uses the installed authenticated v2 API; it does not install firmware.
 
 ## Development status and remaining work
 
-- [Open pull requests](https://github.com/petec999/hpi/pulls): historical alpha13 integrations and read-only diagnostic sidecars. Keep these separate from current Stable/Adaptive work until their hardware acceptance is established.
+- [Open pull requests](https://github.com/petec999/hpi/pulls): only the deferred standalone SQLite historian (#4) remains open in this fork. Alpha13 fixes (#3) and earlier standalone cycle/circuit sidecars (#1/#2) were closed as superseded deployment paths, not merged. Their branches remain available for reference.
 - [GitHub Actions](https://github.com/petec999/hpi/actions): automated tests and Android builds.
 - [Adaptive handover and validation](https://github.com/petec999/hpi/blob/feature/adaptive-learning/docs/ADAPTIVE_HANDOVER.md).
 - [Home Assistant dashboards](https://github.com/petec999/home-iot-telemetry/tree/main/home_assistant).
 
-No experimental branch is automatically deployed, merged into Stable or submitted upstream. Published release assets are unchanged. Please report the installed version, sanitized logs and observed behavior when opening issues.
+No experimental branch is automatically deployed or merged into Stable. The adaptive heater writer was retired after unsuccessful field switching; no independent tank heater command or configurable native DHW hysteresis has been verified. Published release assets are unchanged. Please report the installed version, sanitized logs and observed behavior when opening issues.
 
 ## Stable 1.4.5 — original change summary
 
