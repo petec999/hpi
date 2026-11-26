@@ -192,7 +192,9 @@ class Regulator:
             return Decision(level,level,"collecting samples",er,supply_error=es,deficit_integral=self.integral)
         ts=trend(rows,1)
         tr=trend(rows,2)
-        forecast=-er-max(-0.5,min(0.5,tr))*c.forecast_min
+        # A long median lags rising return temperature; start forecast at
+        # the latest three-sample median, using the robust full-window trend.
+        forecast=-median(x[2] for x in rows[-3:])-max(-0.5,min(0.5,tr))*c.forecast_min
         def decision(proposed,reason,risk,blocked=0):
             return Decision(level,proposed,reason,er,tr,es,ts,forecast,self.integral,risk,blocked)
         urgent=er>=c.urgent_deficit and es>=c.urgent_deficit and tr>=-c.trend_band and ts>=-c.trend_band
