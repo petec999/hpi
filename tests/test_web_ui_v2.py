@@ -1,5 +1,7 @@
 import importlib.util
 import unittest
+import re
+import time
 from pathlib import Path
 from flask_login import LoginManager, UserMixin
 
@@ -84,6 +86,56 @@ class Tests(unittest.TestCase):
         self.assertIsNone(state["values"]["superheat"])
         self.assertEqual(state["values"]["two"],34.2)
         self.assertEqual(g["_wv_state"](g,1200)["watchdog"]["status"],"alarm")
+    def test_upgrade_previous_preview(self):
+        old=SOURCE.replace('@app.route("/")',patcher.PREVIOUS_BLOCK+'@app.route("/")')
+        updated=patcher.patch(old)
+        self.assertEqual(updated,patcher.patch(SOURCE))
+        self.assertEqual(patcher.patch(updated),updated)
+        self.assertRaises(ValueError,patcher.patch,old.replace("Panel techniczny","Unknown panel"))
+
+    def test_commands(self):
+        calls=[]
+        g=self.g
+        g.update(_pump_frame_last_at={"R141":time.monotonic(),"R241":time.monotonic()},
+                 statusdict={"settemp":{"value":"30.0"},"dhw":{"value":"50.0"},
+                             "pch":{"value":"on"},"pdhw":{"value":"off"},
+                             "mode":{"value":"eco"}},
+                 new_tempchange=lambda *a:(calls.append(a) or "ok",True),
+                 statechange=lambda *a:calls.append(a),
+                 new_presetchange=lambda *a:(calls.append(a) or "ok",True))
+        url="/v2/api/control"
+        payload={"key":"settemp","value":30.5,"expected":30}
+        self.assertEqual(self.client.post(url,json=payload).status_code,401)
+        self.login()
+        page=self.client.get("/v2/").data.decode()
+        token=re.search(r'name="wv-csrf" content="([a-f0-9]{64})"',page).group(1)
+        h={"Origin":"http://localhost","X-HaierPi-CSRF":token}
+        def post(p,headers=h):
+            return self.client.post(url,json=p,headers=headers)
+        self.assertEqual(post(payload,{}).status_code,403)
+        self.assertEqual(post(payload,{**h,"Origin":"http://other"}).status_code,403)
+        self.assertEqual(post({**payload,"value":70}).status_code,400)
+        self.assertEqual(post({**payload,"value":True}).status_code,400)
+        self.assertEqual(post({**payload,"value":30.2}).status_code,400)
+        self.assertEqual(post({**payload,"key":"heater"}).status_code,400)
+        self.assertEqual(post({**payload,"expected":29}).status_code,409)
+        self.assertEqual(calls,[])
+        self.assertEqual(post(payload).status_code,202)
+        self.assertEqual(calls,[("heat","30.5","0")])
+        self.assertEqual(post({"key":"pdhw","value":"on","expected":"off"}).status_code,429)
+        g["_wv_last_command"]=float("-inf")
+        self.assertEqual(post({"key":"pdhw","value":"on","expected":"off"}).status_code,202)
+        self.assertEqual(calls[-1],("pdhw","on","0"))
+        g["_wv_last_command"]=float("-inf")
+        self.assertEqual(post({"key":"dhw","value":51,"expected":50}).status_code,202)
+        self.assertEqual(calls[-1],("dhw","51.0","1"))
+        g["_wv_last_command"]=float("-inf")
+        self.assertEqual(post({"key":"mode","value":"quiet","expected":"eco"}).status_code,202)
+        self.assertEqual(calls[-1],("quiet",))
+        g["_pump_frame_last_at"]["R141"]=0
+        self.assertEqual(post(payload).status_code,409)
+        self.assertEqual(len(calls),4)
+
     def test_invalid_values(self):
         g=self.g
         g.update(_pump_frame_last_at={"R141":990,"R241":990},
