@@ -38,21 +38,25 @@ jobs:
           wd = runpy.run_path('tools/install-mqtt-watchdog.py')
           ui = runpy.run_path('tools/install-web-ui-v2.py')
           patched = wd['patch'](core)
+          import ast
+          names={n.name for n in ast.walk(ast.parse(patched)) if isinstance(n,ast.FunctionDef)}
+          assert {'new_tempchange','statechange','new_presetchange','curvecalc'} <= names
           result = ui['patch'](patched)
+          previous=patched
+          idx=result.index(ui['BLOCK'])
+          previous=result[:idx]+ui['PREVIOUS_BLOCK']+result[idx+len(ui['BLOCK']):]
+          assert ui['patch'](previous)==result
           assert ui['patch'](result) == result
           compile(result, 'main.py', 'exec')
           print('Pinned stable + watchdog v2 + UI patch: syntax and idempotence OK')
           PY
-      - name: Verify legacy command semantics
-        if: matrix.python-version == '3.11'
+      - name: Check embedded browser JavaScript syntax
         run: |
           python - <<'PY'
-          import tarfile
-          with tarfile.open('/tmp/stable.tar.gz') as t:
-              src=t.extractfile(next(m for m in t.getmembers() if m.isfile() and m.name.removeprefix('./')=='main.py')).read().decode()
-          lines=src.splitlines()
-          for i,line in enumerate(lines):
-              if any(k in line for k in ('def new_tempchange(', 'def statechange(', 'def new_presetchange(', 'topic + "/ch/pch/set"', 'topic + "/dhw/pdhw/set"', 'topic + "/ch/target_temp/set"', 'topic + "/dhw/target_temp/set"', 'configure_select("Preset"', 'configure_number("DHW Target')):
-                  print('===',i+1)
-                  print('\n'.join(lines[i:i+35]))
+          import ast,runpy,pathlib
+          block=runpy.run_path('tools/install-web-ui-v2.py')['BLOCK']
+          tree=ast.parse(block)
+          html=next(ast.literal_eval(n.value) for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(k,ast.Name) and k.id=='_WV_HTML' for k in n.targets))
+          pathlib.Path('/tmp/web-v2.js').write_text(html.split('<script>',1)[1].split('</script>',1)[0])
           PY
+          node --check /tmp/web-v2.js
