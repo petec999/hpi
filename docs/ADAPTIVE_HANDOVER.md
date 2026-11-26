@@ -50,3 +50,5 @@ Use --dry-run to validate without writes. Installer stages core GPIO/MQTT/WWW an
 5. Future enhancements: richer export and HA visibility, explicit UI blockers, robust retention/recovery and bounded learned tuning from real traces. Preserve all prior core fixes and test new commits in isolation.
 
 Follow-up: Adaptive ownership no longer requires Legacy Manual/Auto settings to be changed. Curve navigation now links directly to the verified configuration section, and v2 has an authenticated recalculation button. Full curve editor remains the existing settings form. Check CI and live device before claiming success.
+
+Full WWW v2 editor added: 14 manual points, manual/static/auto curve mode, slope/shift/gain, manual plot, explicit save/cancel. Reads existing SETTINGS fields; writes only curve keys with atomic replacement, conflict detection and reload via Stable loadconfig. Direct mode remains read-only in editor. Existing scheduled calculation applies changes; live installation still to validate. No automatic adjustment of curve by Adaptive.

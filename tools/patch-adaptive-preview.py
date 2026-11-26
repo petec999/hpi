@@ -176,6 +176,104 @@ def curve_api(source):
                 try:''')
     return source
 
+def curve_editor_ui(html):
+    old='<a href="/settings#heatingcurve_section">Edytuj krzywą</a>'
+    link='<a href="#am-curve-editor">Krzywa grzewcza</a>'
+    if old in html:
+        html=once(html,old,link)
+    if 'id="am-curve-editor"' in html:
+        return html
+    fields=''.join('<label style="display:grid;gap:4px">'+str(t)+' °C<input id="am-cp-'+str(i)+'" type="number" min="0" max="65" step="0.5" disabled></label>' for i,t in enumerate((-20,-15,-10,-8,-6,-4,-2,0,2,4,6,8,10,15)))
+    editor="""<article class="card ctlcard" id="am-curve-editor"><h3>Krzywa grzewcza</h3>
+<div class="metric"><span>Aktualna obliczona nastawa</span><strong id="am-c-current">—</strong></div>
+<label>Rodzaj krzywej <select id="am-c-mode" disabled><option value="manual">Ręczna</option><option value="static">Statyczna</option><option value="auto">Automatyczna</option><option value="directly" disabled>Bezpośrednio</option></select></label>
+<div id="am-c-coeff" style="display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
+<label>Nachylenie<input id="am-c-slope" type="number" min="0" max="5" step="0.01" disabled></label>
+<label>Przesunięcie<input id="am-c-shift" type="number" min="-30" max="30" step="0.1" disabled></label>
+<label>Wzmocnienie<input id="am-c-gain" type="number" min="0" max="20" step="0.1" disabled></label></div>
+<div id="am-c-points" style="display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(85px,1fr))">"""+fields+"""</div>
+<canvas id="am-c-chart" width="500" height="180" style="width:100%;height:auto" aria-label="Wykres ręcznej krzywej"></canvas>
+<div class="ctlrow"><button id="am-c-save" class="primary" disabled>Zapisz krzywą</button><button id="am-c-cancel" disabled>Anuluj zmiany</button></div>
+<p id="am-c-msg" role="status">Oczekiwanie na konfigurację.</p><small>Zapis zmienia istniejącą konfigurację HaierPi. Nowa nastawa zostanie zastosowana w zwykłym cyklu obliczeń z zachowaniem zabezpieczeń.</small></article>"""
+    html=once(html,'<article class="card ctlcard"><h3>Zaawansowane</h3>',editor+'<article class="card ctlcard"><h3>Zaawansowane</h3>')
+    js="""
+let curveBase=null,curveDirty=false,curveBusy=false,curveMsg="";
+const curveIds=["am-c-mode","am-c-slope","am-c-shift","am-c-gain",...Array.from({length:14},(_,i)=>"am-cp-"+i)];
+function curveRead(){
+ const num=id=>$(id).value.trim()===""?NaN:Number($(id).value);
+ return {mode:$("am-c-mode").value,slope:num("am-c-slope"),shift:num("am-c-shift"),gain:num("am-c-gain"),points:Array.from({length:14},(_,i)=>num("am-cp-"+i))};
+}
+function curveDraw(){
+ const c=$("am-c-chart"),ctx=c.getContext("2d");if(!ctx)return;
+ const xs=[-20,-15,-10,-8,-6,-4,-2,0,2,4,6,8,10,15],v=curveRead().points;
+ ctx.clearRect(0,0,c.width,c.height);ctx.font="12px sans-serif";ctx.fillStyle="#888";ctx.strokeStyle="#888";
+ for(const k of [0,20,40,60]){const y=152-k*2;ctx.fillText(k+"°",4,y);ctx.beginPath();ctx.moveTo(38,y);ctx.lineTo(480,y);ctx.stroke();}
+ ctx.fillText("-20°C",38,172);ctx.fillText("15°C",445,172);
+ if(v.some(n=>!Number.isFinite(n)))return;
+ ctx.strokeStyle="#2794c7";ctx.lineWidth=2;ctx.beginPath();
+ v.forEach((n,i)=>{const x=38+(xs[i]+20)*442/35,y=152-n*2;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();ctx.lineWidth=1;
+}
+function curvePaint(v){
+ const cfg=v&&v.curve_settings;
+ $("am-c-current").textContent=fmt(v&&v.curve)+" °C";
+ if(cfg&&!curveDirty&&!curveBusy){
+  curveBase=cfg;
+  $("am-c-mode").value=cfg.mode;$("am-c-slope").value=cfg.slope;$("am-c-shift").value=cfg.shift;$("am-c-gain").value=cfg.gain;
+  cfg.points.forEach((n,i)=>$("am-cp-"+i).value=n);
+ }
+ const locked=!cfg||curveBusy||cfg.mode==="directly",mode=$("am-c-mode").value;
+ $("am-c-mode").disabled=locked;
+ $("am-c-slope").disabled=locked||mode==="manual";
+ $("am-c-shift").disabled=locked||mode!=="auto";$("am-c-gain").disabled=locked||mode!=="auto";
+ $("am-c-points").hidden=mode!=="manual";$("am-c-chart").hidden=mode!=="manual";
+ for(let i=0;i<14;i++)$("am-cp-"+i).disabled=locked||mode!=="manual";
+ $("am-c-save").disabled=locked||!curveDirty||v.pending;
+ $("am-c-cancel").disabled=curveBusy||!curveDirty;
+ const conflict=curveDirty&&cfg&&curveBase&&JSON.stringify(cfg)!==JSON.stringify(curveBase);
+ $("am-c-msg").textContent=curveMsg||(conflict?"Konfiguracja zmieniona poza edytorem; anuluj i odczytaj ponownie.":!cfg?"Brak poprawnego odczytu konfiguracji.":cfg.mode==="directly"?"Tryb bezpośredni: edycja krzywej nieaktywna.":curveDirty?"Niezapisane zmiany.":"Konfiguracja odczytana.");
+ if(conflict)$("am-c-save").disabled=true;
+ curveDraw();
+}
+for(const id of curveIds)$(id).addEventListener("input",()=>{curveDirty=true;curveMsg="";curvePaint(amState);});
+$("am-c-cancel").addEventListener("click",()=>{curveDirty=false;curveMsg="";curvePaint(amState);});
+$("am-c-save").addEventListener("click",async()=>{
+ if(!curveBase||!amState||!curveDirty||curveBusy||$("am-c-save").disabled)return;
+ const value=curveRead(),expected=curveBase;
+ if(!curveIds.every(id=>$(id).disabled||$(id).checkValidity())||[value.slope,value.shift,value.gain,...value.points].some(n=>!Number.isFinite(n))){curveMsg="Nieprawidłowe wartości krzywej.";curvePaint(amState);return;}
+ curveBusy=true;curveMsg="Zapisywanie…";curvePaint(amState);
+ const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),20000);
+ try{
+  const res=await fetch("./api/control",{method:"POST",credentials:"same-origin",cache:"no-store",headers:{"Content-Type":"application/json","X-HaierPi-CSRF":document.querySelector('meta[name="wv-csrf"]').content},body:JSON.stringify({key:"curve_settings",value,expected}),signal:ctrl.signal});
+  const body=res.redirected?{}:await res.json();
+  if(!res.ok||!body.accepted)throw Error(body.reason||"Zapis odrzucony (HTTP "+res.status+")");
+  curveDirty=false;curveMsg="Zapisano. Oczekiwanie na kolejny odczyt.";
+ }catch(e){curveMsg=e.message||"Niepotwierdzony zapis. Sprawdź odczyt przed ponowieniem.";}
+ finally{clearTimeout(timer);curveBusy=false;curvePaint(amState);}
+});
+"""
+    html=once(html,'function amPaint(a){',js+'\nfunction amPaint(a){')
+    html=once(html,' amState=a||null;const v=amState||{};',' amState=a||null;const v=amState||{};curvePaint(v);')
+    return html
+
+def curve_editor_api(source):
+    if '    out["curve_settings"]' in source:
+        return source
+    source=once(source,'    out["curve_recalculate"]=','    out["curve_settings"]=_am.curve_settings()\n    out["curve_recalculate"]=')
+    source=once(source,'    if key=="curve_recalculate":\n        if value', '''    if key=="curve_settings":
+        value=_am.validate_curve(value)
+        expected=_am.validate_curve(expected)
+    elif key=="curve_recalculate":
+        if value''')
+    source=once(source,'if (key!="adaptive_control" and not state["control_ready"])', 'if (key not in ("adaptive_control","curve_settings") and not state["control_ready"])')
+    source=once(source,'            if key=="curve_recalculate":\n                with _am.lock:', '''            if key=="curve_settings":
+                try:
+                    _am.save_curve(value,expected)
+                except _am_sys.modules["_hpi_adaptive_runtime"].SelectionBlocked as exc:
+                    return reply({"accepted":False,"reason":str(exc)},409)
+            elif key=="curve_recalculate":
+                with _am.lock:''')
+    return source
+
 def learning_block():
     policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")
     runtime=(ROOT/"adaptive/live_runtime.py").read_text(encoding="utf-8").replace("from adaptive.regulator import","from _hpi_adaptive_policy import")
@@ -192,17 +290,17 @@ def learning_ui(source):
     # The legacy root and other links below are actual template routes.
     old='<a href="/curvecalc">Krzywa grzewcza</a>'
     if old in html:
-        html=once(html,old,'<a href="/settings#heatingcurve_section">Edytuj krzywą</a>' if 'id="am-curve-recalc"' in html else '<a href="/">Panel oryginalny</a>')
-    html=curve_ui(activation_ui(html))
+        html=once(html,old,'<a href="#am-curve-editor">Krzywa grzewcza</a>' if 'id="am-curve-editor"' in html else '<a href="/settings#heatingcurve_section">Edytuj krzywą</a>' if 'id="am-curve-recalc"' in html else '<a href="/">Panel oryginalny</a>')
+    html=curve_editor_ui(curve_ui(activation_ui(html)))
     if 'id="am-learning"' in html:
-        return curve_api(activation_api(source if html==ast.literal_eval(line.split("=",1)[1].strip()) else once(source,line,"_WV_HTML = "+repr(html))))
+        return curve_editor_api(curve_api(activation_api(source if html==ast.literal_eval(line.split("=",1)[1].strip()) else once(source,line,"_WV_HTML = "+repr(html)))))
     html=once(html,'<p id="am-reason"', '<div class="metric"><span>Uczenie (obserwacje / konteksty)</span><strong id="am-learning">—</strong></div><div class="metric"><span>Pamięć / dostrojenie</span><strong id="am-learning-detail">—</strong></div><p id="am-reason"')
     html=once(html,' $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";',
     ''' const l=v.learning;
  $("am-learning").textContent=l?l.observations+" / "+l.contexts:"—";
  $("am-learning-detail").textContent=l?(l.storage_error?"RAM (błąd zapisu)":l.unsaved?"RAM (oczekuje na zapis)":"Zapis / brak nowych danych")+" · "+fmt(v.down_confirm)+" s / "+fmt(v.surplus_band)+" K":"—";
  $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";''')
-    return curve_api(activation_api(once(source,line,"_WV_HTML = "+repr(html))))
+    return curve_editor_api(curve_api(activation_api(once(source,line,"_WV_HTML = "+repr(html)))))
 
 def patch(source):
     if MARK in source:

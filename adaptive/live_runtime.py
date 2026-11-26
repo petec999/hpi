@@ -2,6 +2,9 @@
 import threading
 import time
 import math
+import os
+import tempfile
+from pathlib import Path
 from adaptive.regulator import Regulator, Sample, LEVELS, Learning
 
 class SelectionBlocked(ValueError):
@@ -320,6 +323,100 @@ class Runtime:
         finally:
             self.lock.release()
 
+    @staticmethod
+    def validate_curve(value):
+        if not isinstance(value,dict) or set(value)!={"mode","slope","shift","gain","points"}:
+            raise ValueError("invalid curve fields")
+        if value["mode"] not in ("manual","static","auto","directly"):
+            raise ValueError("invalid curve mode")
+        def number(v,lo,hi):
+            if type(v) not in (int,float) or not math.isfinite(v) or not lo<=v<=hi:
+                raise ValueError("invalid curve number")
+            return float(v)
+        points=value["points"]
+        if not isinstance(points,list) or len(points)!=14:
+            raise ValueError("14 curve points required")
+        return {"mode":value["mode"],"slope":number(value["slope"],0,5),
+                "shift":number(value["shift"],-30,30),"gain":number(value["gain"],0,20),
+                "points":[number(v,0,65) for v in points]}
+
+    def curve_settings(self):
+        try:
+            c=self.g["config"]["SETTINGS"]
+            return self.validate_curve({"mode":c["heatingcurve"].strip().lower(),
+                "slope":float(c["hcslope"]),"shift":float(c["hcpshift"]),"gain":float(c["hcamp"]),
+                "points":[float(v) for v in c["hcman"].split(",")]})
+        except (KeyError,ValueError,TypeError,AttributeError,OverflowError):
+            return None
+
+    def save_curve(self,value,expected,path="/opt/config.ini"):
+        # Same config keys and reload path as Stable. Atomic replacement, not a
+        # series of partially applied writes. No change to unrelated settings.
+        import configparser
+        with self.lock:
+            value=self.validate_curve(value)
+            expected=self.validate_curve(expected)
+            if value["mode"]=="directly" or expected["mode"]=="directly":
+                raise SelectionBlocked("Edycja krzywej wymaga trybu ogrzewania krzywą")
+            if self.pending is not None or self.curve_settings()!=expected:
+                raise SelectionBlocked("Ustawienia zmieniły się lub trwa polecenie; odśwież")
+            if value==expected:
+                return
+            target=Path(path).resolve(strict=True)
+            original=target.read_bytes()
+            stat=target.stat()
+            disk=configparser.ConfigParser(interpolation=None)
+            disk.read_string(original.decode("utf-8"))
+            live=self.g["config"]["SETTINGS"]
+            keys=("heatingcurve","heatingcurve_last","hcslope","hcpshift","hcamp","hcman")
+            if any(disk["SETTINGS"].get(k)!=live.get(k) for k in keys):
+                raise SelectionBlocked("Konfiguracja na dysku zmieniła się; odśwież")
+            changes={"heatingcurve":value["mode"],"heatingcurve_last":value["mode"],
+                     "hcslope":str(value["slope"]),"hcpshift":str(value["shift"]),
+                     "hcamp":str(value["gain"]),"hcman":",".join(str(v) for v in value["points"])}
+            before={k:live.get(k) for k in keys}
+            def replace_config(data,previous):
+                fd,tmp=tempfile.mkstemp(prefix=".curve-",dir=target.parent)
+                try:
+                    with os.fdopen(fd,"wb") as stream:
+                        stream.write(data)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.chmod(tmp,stat.st_mode & 0o777)
+                    os.chown(tmp,stat.st_uid,stat.st_gid)
+                    if target.read_bytes()!=previous:
+                        raise SelectionBlocked("Plik konfiguracji zmienił się; odśwież")
+                    os.replace(tmp,target)
+                finally:
+                    if os.path.exists(tmp):
+                        os.unlink(tmp)
+            import io
+            disk["SETTINGS"].update(changes)
+            buffer=io.StringIO()
+            disk.write(buffer)
+            updated=buffer.getvalue().encode("utf-8")
+            replace_config(updated,original)
+            try:
+                live.update(changes)
+                self.g["loadconfig"]()
+                if self.curve_settings()!=value:
+                    raise RuntimeError("curve configuration readback mismatch")
+            except Exception:
+                for k,v in before.items():
+                    if v is None:
+                        live.pop(k,None)
+                    else:
+                        live[k]=v
+                replace_config(original,updated)
+                self.g["loadconfig"]()
+                raise
+            self.learning.cancel()
+            self.learning_before=None
+            self.reg.reset()
+            # Core scheduled calculation applies new settings with native guards.
+            # Do not force a write during defrost/DHW or an unconfirmed transition.
+            self.g["logging"].info("Heating curve settings saved from WWW v2")
+
     def view(self):
         with self.lock:
             try:
@@ -334,4 +431,4 @@ class Runtime:
                 blocker="Oczekiwanie na potwierdzenie poprzedniego polecenia"
             return dict(self.status,control=self.control,mode=actual,relay=relay,
                         ready=blocker is None,activation_blocker=blocker,curve=curve,zone=zone,pending=self.pending is not None,fault=self.fault,
-                        learning=self.learning.summary())
+                        curve_settings=self.curve_settings(),learning=self.learning.summary())

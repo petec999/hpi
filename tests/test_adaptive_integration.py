@@ -103,6 +103,27 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(self.r.control,"legacy")
         self.assertFalse(self.writes)
 
+    def test_curve_editor_roundtrip_and_conflict(self):
+        import configparser
+        c=configparser.ConfigParser()
+        c.read_dict({"SETTINGS":{"heatingcurve":"manual","heatingcurve_last":"manual","hcslope":"0.5","hcpshift":"0","hcamp":"1","hcman":",".join(["32"]*14),"flimit":"manual"},"MQTT":{"address":"test"}})
+        self.g.update(config=c,loadconfig=lambda:None)
+        before=self.r.curve_settings()
+        self.assertEqual(len(before["points"]),14)
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/"config.ini"
+            with path.open("w") as f:c.write(f)
+            new=dict(before,points=[33.0]*14)
+            self.r.save_curve(new,before,path)
+            self.assertEqual(self.r.curve_settings(),new)
+            reread=configparser.ConfigParser();reread.read(path)
+            self.assertEqual(reread["MQTT"]["address"],"test")
+            self.assertEqual(reread["SETTINGS"]["flimit"],"manual")
+            with self.assertRaises(ValueError):self.r.save_curve(before,before,path)
+            with self.assertRaises(ValueError):self.r.save_curve(dict(new,points=[100]*14),new,path)
+            self.assertFalse(self.writes)
+            self.assertEqual(self.r.control,"legacy")
+
     def test_auto_manual_handoff(self):
         self.r.choose("auto","legacy")
         self.r.manual("preset","eco")
@@ -184,13 +205,16 @@ class SourceIntegration(unittest.TestCase):
             self.assertIn('id="am-owner"',html)
             self.assertIn('activation_blocker',html)
             self.assertIn('id="am-curve-recalc"',html)
-            self.assertIn('href="/settings#heatingcurve_section"',html)
+            self.assertIn('href="#am-curve-editor"',html)
+            self.assertIn('id="am-c-save"',html)
+            self.assertEqual(html.count('id="am-curve-editor"'),1)
+            self.assertTrue(all('id="am-cp-'+str(i)+'"' in html for i in range(14)))
             self.assertIn('g["curvecalc"]()',src)
             self.assertIn('"reason":str(exc)',src)
             for url in ("/","/scheduler","/settings","/parameters","/charts"):
                 self.assertIn('href="'+url+'"',html)
             # Migrate the already installed learning UI without duplicating it.
-            old=html.replace('<a href="/settings#heatingcurve_section">Edytuj krzywą</a>','<a href="/curvecalc">Krzywa grzewcza</a>')
+            old=html.replace('<a href="#am-curve-editor">Krzywa grzewcza</a>','<a href="/curvecalc">Krzywa grzewcza</a>')
             line=next(l for l in src.splitlines() if l.startswith("_WV_HTML = "))
             (d/"main.py").write_text(src.replace(line,"_WV_HTML = "+repr(old),1))
             self.assertEqual(installer["plan"](d)[0][2].decode(),src)
