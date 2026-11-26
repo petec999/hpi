@@ -39,28 +39,29 @@ class TestPolicy(unittest.TestCase):
         two=[32.2,32.3,32.3,32.3,32.4,32.6,32.6,32.6,32.8,32.8,32.9,33.1,32.8]
         ds=[r.step(sample(i*30,level=5,supply=b,ret=a,hz=45)) for i,(a,b) in enumerate(zip(twi,two))]
         self.assertTrue(all(d.proposed==5 for d in ds))
-    def test_return_near_stop_even_when_supply_is_not_primary(self):
-        ds=self.series(Regulator(),level=5,supply=38,ret=36.2,end=360)
+    def test_supply_near_stop_even_with_cold_return(self):
+        ds=self.series(Regulator(),level=5,supply=36.8,ret=29,end=360)
         self.assertEqual(ds[-1].risk,"cycling_risk")
         self.assertEqual(ds[-1].proposed,4)
-        self.assertAlmostEqual(ds[-1].predicted_surplus,4.2)
-    def test_rising_return_forecast(self):
+        self.assertAlmostEqual(ds[-1].supply_forecast,4.8)
+        self.assertAlmostEqual(ds[-1].predicted_surplus,-3)
+    def test_rising_supply_forecast_warns_before_stop(self):
         r=Regulator()
-        ds=[r.step(sample(t,level=5,supply=36+t/120,ret=32+t/120)) for t in range(0,421,30)]
+        ds=[r.step(sample(t,level=5,supply=33+t/120,ret=29)) for t in range(0,421,30)]
         first=next(i for i,d in enumerate(ds) if d.risk=="cycling_risk")
-        self.assertLessEqual(first*30,330)
-        self.assertLess(32+first*30/120,37)
+        self.assertLess(33+first*30/120,37)
         self.assertTrue(any(d.proposed==4 for d in ds))
-    def test_no_increase_if_current_return_reaches_warning_even_if_median_lags(self):
+    def test_no_increase_if_current_supply_reaches_warning_even_if_median_lags(self):
         r=Regulator()
         self.series(r,level=5,supply=29,ret=29,end=180)
-        d=r.step(sample(210,level=5,supply=38,ret=36.2))
+        d=r.step(sample(210,level=5,supply=36.5,ret=29))
         self.assertEqual(d.proposed,5)
         self.assertEqual(d.risk,"cycling_risk")
-    def test_supply_surplus_alone_is_not_return_stop_risk(self):
-        ds=self.series(Regulator(),level=5,supply=36,ret=29,end=900)
+    def test_supply_surplus_below_warning_not_stop_risk(self):
+        ds=self.series(Regulator(),level=5,supply=35.5,ret=29,end=900)
         self.assertTrue(all(d.proposed==5 for d in ds))
-        self.assertAlmostEqual(ds[-1].predicted_surplus,-3)
+        self.assertEqual(ds[-1].risk,"balanced")
+        self.assertAlmostEqual(ds[-1].supply_forecast,3.5)
     def test_noisy_deadband(self):
         r=Regulator()
         ds=[r.step(sample(t,supply=32+(.2 if t%60==0 else -.2),hz=25)) for t in range(0,1800,30)]

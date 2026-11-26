@@ -290,6 +290,14 @@ def status_ui(html):
  $("am-stop-target").textContent=fmt(v.stop_target)+" °C";
  $("am-stop-margin").textContent=fmt(v.stop_margin)+" K";
  $("am-return-trend").textContent=fmt(v.return_trend)+" K/min";''')
+    if 'id="am-supply-forecast"' not in html:
+        html=once(html,'<span>Próg STOP (założenie)</span>','<span>Próg STOP Two (model +5 K)</span>')
+        html=once(html,'<span>Do progu STOP</span>','<span>Do progu STOP Two</span>')
+        html=once(html,'<div class="metric"><span>Trend Twi</span>', '<div class="metric"><span>Two – zasilanie</span><strong id="am-supply-temp">—</strong></div><div class="metric"><span>Prognoza Two względem nastawy</span><strong id="am-supply-forecast">—</strong></div><div class="metric"><span>Auto po restarcie</span><strong id="am-resume">—</strong></div><div class="metric"><span>Trend Twi</span>')
+        html=once(html,' $("am-return-temp").textContent=fmt(v.return_temp)+" °C";', ''' $("am-return-temp").textContent=fmt(v.return_temp)+" °C";
+ $("am-supply-temp").textContent=fmt(v.supply_temp)+" °C";
+ $("am-supply-forecast").textContent=fmt(v.supply_forecast)+" K";
+ $("am-resume").textContent=v.owner_storage_error|| (v.auto_resume_pending?"Oczekuje na dane":v.control==="auto"?"Zapamiętane":"Wyłączone");''')
     if 'id="am-hysteresis"' not in html:
         html=once(html,'<p id="am-reason"', '<div class="metric"><span>Obserwator histerezy CO (tylko odczyt)</span><strong id="am-hysteresis">—</strong></div><p id="am-hysteresis-time"></p><p id="am-hysteresis-twi"></p><p id="am-hysteresis-two"></p><small>Progi orientacyjne, względem nastawy, z przejść Fset. Oddzielne grupy nastawy, trybu, FLimit i sterowania; bez automatycznej zmiany progów.</small><p id="am-reason"')
         html=once(html,' $("am-reason").textContent=v.fault||v.reason_pl||v.reason||"Brak odczytu.";', ''' const h=v.hysteresis;
@@ -326,7 +334,7 @@ def learning_block():
     block=MARK+"\nimport sys as _am_sys, types as _am_types\n"
     for name,code in (("_hpi_adaptive_policy",policy),("_hpi_adaptive_runtime",runtime)):
         block+=f'_am_module = _am_types.ModuleType({name!r})\n_am_sys.modules[{name!r}] = _am_module\nexec(compile({code!r}, {name!r}, "exec"), _am_module.__dict__)\n'
-    block+='_am = _am_module.Runtime(globals(), learning_path="/opt/haier/.adaptive-learning-twi-v2.json")\n# HOME-IOT ADAPTIVE MODULATION END'
+    block+='_am = _am_module.Runtime(globals(), learning_path="/opt/haier/.adaptive-learning-two-v3.json")\n# HOME-IOT ADAPTIVE MODULATION END'
     return block
 
 def learning_ui(source):

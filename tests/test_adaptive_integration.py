@@ -321,6 +321,47 @@ class RuntimeTest(unittest.TestCase):
             self.assertEqual(self.r.learning.summary()["observations"],1)
             self.assertEqual(self.r.view()["learning"]["contexts"],1)
 
+    def test_auto_restart_waits_for_two_fresh_sets_and_priority_clear(self):
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/"learning.json"
+            self.r=Runtime(self.g,path)
+            self.refresh()
+            self.r.choose("auto","legacy")
+            self.r=Runtime(self.g,path)
+            self.assertEqual(self.r.control,"manual")
+            self.assertTrue(self.r.resume_requested)
+            self.r.tick()
+            self.assertFalse(self.writes)
+            self.now.return_value+=30
+            self.refresh()
+            self.r.tick()
+            self.assertEqual(self.r.control,"manual")
+            self.now.return_value+=30
+            self.refresh()
+            self.g["get_temp_zone"]=lambda v:"frost"
+            self.r.tick()
+            self.assertEqual(self.r.control,"manual")
+            self.now.return_value+=30
+            self.refresh()
+            self.g["get_temp_zone"]=lambda v:"normal"
+            self.r.tick()
+            self.assertEqual(self.r.control,"auto")
+            self.assertFalse(self.writes)
+            self.r.fail("test fault")
+            self.r=Runtime(self.g,path)
+            self.assertFalse(self.r.resume_requested)
+            self.assertEqual(self.r.control,"manual")
+
+    def test_manual_selection_cancels_pending_resume(self):
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/"learning.json"
+            self.r=Runtime(self.g,path)
+            self.refresh()
+            self.r.choose("auto","legacy")
+            self.r=Runtime(self.g,path)
+            self.r.choose("manual","manual")
+            self.assertFalse(Runtime(self.g,path).resume_requested)
+
     def test_auto_disarm_on_lost_telemetry(self):
         self.r.choose("auto","legacy")
         for t in range(1090,1361,30):
@@ -371,12 +412,12 @@ class SourceIntegration(unittest.TestCase):
             (d/"main.py").write_text(src)
 
             self.assertEqual(installer["plan"](d),[])
-            self.assertIn('learning_path="/opt/haier/.adaptive-learning-twi-v2.json"',src)
+            self.assertIn('learning_path="/opt/haier/.adaptive-learning-two-v3.json"',src)
             self.assertIn('STABLE MQTT RECONNECT v2',src)
             self.assertIn('HOME-IOT MQTT WATCHDOG v2',src)
             # Simulate the previous embedded module: migration must keep all
             # core patches and leave the installed version idempotent.
-            old=src.replace('learning_path="/opt/haier/.adaptive-learning-twi-v2.json"','learning_path=None',1)
+            old=src.replace('learning_path="/opt/haier/.adaptive-learning-two-v3.json"','learning_path=None',1)
             (d/"main.py").write_text(old)
             planned=installer["plan"](d)
             self.assertEqual(len(planned),1)

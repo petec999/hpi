@@ -23,6 +23,10 @@ class Runtime:
         self.frames_lock=threading.Lock()
         self.frames={}
         self.control="legacy"
+        self.resume_path=Path(learning_path).with_name(".adaptive-owner-v1") if learning_path else None
+        self.resume_requested=False
+        self.resume_error=None
+        self.load_owner()
         self.reg=Regulator()
         self.learning=Learning(learning_path,g.get("logging"))
         self.learning_before=None
@@ -34,12 +38,83 @@ class Runtime:
         self.experiment_initial=None
         self.last_tick=0
         self.pending=None
-        self.status={"reason":"Legacy; no adaptive writes","risk":"paused"}
+        self.status={"reason":"Waiting for valid boot telemetry" if self.resume_requested else "Legacy/Manual; no adaptive writes","risk":"paused"}
         self.fault=None
         self.invalid_since=None
         self.ready_log_frames=None
         self.ready_log_count=0
         self.idle_frame=None
+
+    def load_owner(self):
+        if self.resume_path is None:
+            return
+        try:
+            if self.resume_path.is_symlink() or self.resume_path.stat().st_size>16:
+                raise ValueError("invalid owner file")
+            saved=self.resume_path.read_text(encoding="ascii").strip()
+            if saved not in ("auto","manual","legacy"):
+                raise ValueError("invalid owner")
+            self.resume_requested=saved=="auto"
+            self.control="manual" if saved in ("auto","manual") else "legacy"
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError):
+            self.control="manual"
+            self.resume_error="Nie można odczytać zapamiętanego trybu; sterowanie ręczne"
+
+    def persist_owner(self,mode):
+        if self.resume_path is None:
+            self.resume_requested=False
+            return
+        value="auto" if mode=="auto" else "manual" if mode in ("manual","experiment") else "legacy"
+        temp=None
+        try:
+            if self.resume_path.is_symlink():
+                raise ValueError("invalid owner path")
+            fd,temp=tempfile.mkstemp(prefix=".adaptive-owner-",dir=self.resume_path.parent)
+            with os.fdopen(fd,"w",encoding="ascii") as stream:
+                stream.write(value+"\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp,self.resume_path)
+            temp=None
+            fd=os.open(str(self.resume_path.parent),os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            self.resume_requested=False
+            self.resume_error=None
+        except (OSError,ValueError) as e:
+            self.resume_requested=False
+            self.resume_error="Nie można zapisać trybu na dysku; sprawdź pamięć przed restartem"
+            self.g["logging"].error("Adaptive owner persistence failed: %s",type(e).__name__)
+            raise SelectionBlocked(self.resume_error) from None
+        finally:
+            if temp is not None:
+                try:
+                    os.unlink(temp)
+                except OSError:
+                    pass
+
+    def resume_auto(self):
+        if not self.resume_requested:
+            return
+        self.status={"reason":"Auto resume pending","reason_pl":"Auto po restarcie – oczekiwanie na świeże pomiary i normalne CO","risk":"paused"}
+        if self.ready_log_count<2:
+            return
+        try:
+            s,zone,curve,_=self.snapshot()
+            if self.activation_reason(s,zone,curve) or not self.flag(self.raw("pch")) or not self.gpio("heatdemandpin"):
+                return
+            with self.frames_lock:
+                power=int(self.frames["R101"][1][0])&255
+            if not (power&1 and power&4 and not power&2):
+                return
+        except Exception:
+            return
+        self.choose("auto","manual")
+        self.g["logging"].info("Adaptive Auto restored after restart; fresh telemetry verified")
 
     def note(self,key,regs):
         # Separate lock: never hold controller lock in the serial reader.
@@ -168,6 +243,11 @@ class Runtime:
             if self.control in ("manual","auto","experiment"):
                 if self.priority() or self.pending is not None:
                     return ("Priority operation or pending readback",False if kind=="preset" else "error")
+                try:
+                    self.persist_owner("manual")
+                except SelectionBlocked:
+                    self.control="manual"
+                    return ("Cannot persist Manual hold",False if kind=="preset" else "error")
                 self.control="manual"
                 self.idle_frame=None
                 self.learning.cancel()
@@ -201,6 +281,7 @@ class Runtime:
                 # Disarm immediately, but do not send competing commands.
                 if mode in ("manual","shadow"):
                     self.control="manual"
+                    self.persist_owner("manual")
                     return
                 raise SelectionBlocked("Oczekiwanie na potwierdzenie poprzedniego polecenia")
             if mode in ("auto","experiment"):
@@ -213,6 +294,7 @@ class Runtime:
                     raise SelectionBlocked(reason)
                 # The Adaptive owner gates legacy CO writers. Stored legacy
                 # preset/FLimit policies remain untouched for a return to Legacy.
+            self.persist_owner(mode)
             self.control=mode
             self.observer.interrupt()
             self.experiment_idle=None
@@ -231,6 +313,10 @@ class Runtime:
         self.learning.cancel()
         self.learning_before=None
         self.control="manual"
+        try:
+            self.persist_owner("manual")
+        except SelectionBlocked:
+            reason+="; "+str(self.resume_error)
         self.reg=Regulator()
         self.fault=reason
         self.status={"reason":reason,"risk":"paused"}
@@ -305,7 +391,7 @@ class Runtime:
         self.status={"reason":"idle startup preparation","reason_pl":reason,
                      "risk":"paused","actual":actual,"proposed":proposed,
                      "target":s.target,"return_temp":s.return_temp,"stop_target":s.target+STOP_HYSTERESIS,
-                     "stop_margin":s.target+STOP_HYSTERESIS-s.return_temp,"down_confirm":self.reg.cfg.down_confirm,
+                     "supply_temp":s.supply_temp,"stop_sensor":"two","stop_margin":s.target+STOP_HYSTERESIS-s.supply_temp,"down_confirm":self.reg.cfg.down_confirm,
                      "surplus_band":self.reg.cfg.surplus_band}
         if self.control!="auto" or (s.mode,s.relay)==(mode,relay) or previous is None or not 0<frame-previous<=self.MAX_AGE:
             return True
@@ -459,6 +545,9 @@ class Runtime:
                     self.ready_log_frames=stamps
                     self.ready_log_count+=1
             self.observe_hysteresis()
+            if self.resume_requested:
+                self.resume_auto()
+                return
             if self.control=="legacy" and self.pending is None:
                 return
             try:
@@ -523,7 +612,9 @@ class Runtime:
                          "proposed":label(d.proposed),"target":s.target,
                          "supply_error":d.supply_error,"forecast":d.predicted_surplus,
                          "return_temp":s.return_temp,"return_trend":None if d.trend is None else -d.trend,
-                         "stop_target":s.target+STOP_HYSTERESIS,"stop_margin":s.target+STOP_HYSTERESIS-s.return_temp,
+                         "supply_temp":s.supply_temp,"supply_forecast":d.supply_forecast,
+                         "supply_trend":None if d.supply_trend is None else -d.supply_trend,
+                         "stop_sensor":"two","stop_target":s.target+STOP_HYSTERESIS,"stop_margin":s.target+STOP_HYSTERESIS-s.supply_temp,
                          "deficit_integral":d.deficit_integral,
                          "down_confirm":self.reg.cfg.down_confirm,
                          "surplus_band":self.reg.cfg.surplus_band}
@@ -535,6 +626,8 @@ class Runtime:
                 if z!="normal" or current.override or current.defrost or current.dhw or current.error or not current.heating or current.hz<=0 or current.requested_hz<=0 or (current.mode,current.relay)!=(s.mode,s.relay) or abs(current.target-s.target)>0.25 or abs(actual_target-current.target)>1 or self.g.get("newframe"):
                     return
                 mode,relay=LEVELS[d.proposed]
+                if d.reason in ("increase available capacity","restore previous capacity; reduction failed") and current.supply_temp-current.target>=STOP_HYSTERESIS-self.reg.cfg.stop_margin:
+                    return
                 issued=time.monotonic()
                 self.learning.cancel()
                 self.learning_before=(s,outdoor)
@@ -664,6 +757,7 @@ class Runtime:
                 blocker="Oczekiwanie na potwierdzenie poprzedniego polecenia"
             return dict(self.status,control=self.control,mode=actual,relay=relay,
                         ready=blocker is None,activation_blocker=blocker,curve=curve,zone=zone,pending=self.pending is not None,fault=self.fault,
+                        auto_resume_pending=self.resume_requested,owner_storage_error=self.resume_error,
                         curve_settings=self.curve_settings(),learning=self.learning.summary(),hysteresis=self.observer.summary(),
                         experiment={"counts":self.experiment_counts(),"levels":[m+("+FLimit" if l else " / OFF") for m,l in self.EXPERIMENT_LEVELS],
                                     "per_level":self.EXPERIMENT_CYCLES,"since":self.experiment_since})

@@ -13,7 +13,7 @@ import math
 LEVELS=(("quiet",True),("quiet",False),("eco",False),("turbo",False),
         ("eco",True),("turbo",True))
 PRESETS=("quiet","eco","turbo")
-# User-confirmed operating assumption for this installation, not a safety limit.
+# Empirical supply-temperature STOP model, not a factory-confirmed safety limit.
 STOP_HYSTERESIS=5.0
 
 @dataclass(frozen=True)
@@ -69,6 +69,7 @@ class Decision:
     deficit_integral: float=0
     risk: str="paused"
     blocked_seconds: float=0
+    supply_forecast: float=None  # predicted Two minus target
 
 def adjacent(level,direction):
     """One output per transition. Direction is a policy hypothesis.
@@ -185,8 +186,8 @@ class Regulator:
         rows=list(self.history)
         es=median(x[1] for x in rows)
         er=median(x[2] for x in rows)
-        # Twi tracks the native heating band. Two only corroborates a
-        # shortage: a cold return with adequately warm supply is normal.
+        # Twi indicates thermal demand; supply corroborates a shortage.
+        # A cold return with adequately warm supply is normal.
         self.integral=max(0,min(30,self.integral+(max(0,er-0.2) if er>0.2 and es>0.2 else -0.8)*dt))
         if len(rows)<3 or now-rows[0][0]<90:
             return Decision(level,level,"collecting samples",er,supply_error=es,deficit_integral=self.integral)
@@ -195,16 +196,17 @@ class Regulator:
         # A long median lags rising return temperature; start forecast at
         # the latest three-sample median, using the robust full-window trend.
         forecast=-median(x[2] for x in rows[-3:])-max(-0.5,min(0.5,tr))*c.forecast_min
+        supply_forecast=max(s.supply_temp-s.target,-median(x[1] for x in rows[-3:]))-max(-0.5,min(0.5,ts))*c.forecast_min
         def decision(proposed,reason,risk,blocked=0):
-            return Decision(level,proposed,reason,er,tr,es,ts,forecast,self.integral,risk,blocked)
+            return Decision(level,proposed,reason,er,tr,es,ts,forecast,self.integral,risk,blocked,supply_forecast)
         urgent=er>=c.urgent_deficit and es>=c.urgent_deficit and tr>=-c.trend_band and ts>=-c.trend_band
         shortfall=er>c.deficit_band and tr>=-c.trend_band and (
             (es>c.deficit_band and ts>=-c.trend_band) or (es>0.2 and self.integral>=c.integral_limit))
-        # Reduce well before the expected native return-temperature stop.
-        # Two surplus alone is never a reason to reduce.
+        # Return indicates surplus; supply approaching the empirical STOP
+        # band independently calls for a reduction, even with a cold return.
         excess=(er<=-c.surplus_band and tr<=c.trend_band) or (
             er<=0 and forecast>=c.early_surplus and tr<-c.trend_band)
-        stop_risk=max(s.return_temp-s.target,forecast)>=STOP_HYSTERESIS-c.stop_margin
+        stop_risk=max(s.supply_temp-s.target,supply_forecast)>=STOP_HYSTERESIS-c.stop_margin
         # Close to STOP, never increase capacity even if the median lags.
         if stop_risk:
             urgent=shortfall=False
@@ -371,9 +373,11 @@ class Learning:
             return
         if not shortage and s.now-t["start"]<300:
             return
-        # Positive score means the return is still too warm/rising after
-        # reduction, not measured savings or proof of a prevented stop.
-        score=-1 if shortage else 1 if -e>=1.5 or (-e>=0 and -e+max(0,rate)*3>=2.5) else 0
+        # Positive score means thermal surplus or persistent supply STOP risk.
+        # It is not a measurement of savings or a prevented stop.
+        supply_surplus=-median(x[3] for x in t["samples"])
+        supply_rise=max(0,min(.5,-trend(t["samples"],3)))
+        score=-1 if shortage else 1 if supply_surplus+supply_rise*3>=4 or -e>=1.5 or (-e>=0 and -e+max(0,rate)*3>=2.5) else 0
         self.record(t["key"],score,hz-t["before"].hz,e-(t["before"].target-t["before"].return_temp),rate)
         self.cancel()
 
