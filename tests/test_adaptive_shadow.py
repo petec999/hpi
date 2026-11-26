@@ -73,7 +73,7 @@ class Shadow(unittest.TestCase):
                 self.assertEqual(metrics["supply_deficit"],-0.2)
                 self.assertLess(metrics["return_trend_k_min"],0)
                 if relay=="1" and mode!="quiet":
-                    self.assertIsNone(d.proposed)
+                    self.assertIsNotNone(d.proposed)
                 stale,_=decode(self.record(),180,False,100)
                 self.assertEqual(obs.update(stale),{})
                 self.assertEqual(len(obs.history),0)
