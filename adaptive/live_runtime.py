@@ -5,7 +5,7 @@ import math
 import os
 import tempfile
 from pathlib import Path
-from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds
+from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch
 
 class SelectionBlocked(ValueError):
     """Safe, fixed activation reason exposed to authenticated UI."""
@@ -35,6 +35,7 @@ class Runtime:
         self.report=AdaptiveReport(Path(learning_path).with_name(".adaptive-report-v1.json") if learning_path else None)
         self.learning.on_record=self.report.learned
         self.thresholds=NativeThresholds(Path(learning_path).with_name(".adaptive-thresholds-v1.json") if learning_path else None)
+        self.register_watch=RegisterWatch(Path(learning_path).with_name(".adaptive-register-watch-v1.json") if learning_path else None)
         self.observer_frames=None
         self.experiment_since=None
         self.experiment_idle=None
@@ -477,7 +478,28 @@ class Runtime:
             except OSError:
                 data["learning"]["saved_at"]=None
             data["thresholds"]=self.thresholds.summary()
+            data["register_watch"]=self.register_watch.summary(time.monotonic())
             return data
+
+    def observe_registers(self,now):
+        # Independent from CO eligibility and owner. No extra bus transactions.
+        try:
+            with self.frames_lock:
+                f=dict(self.frames)
+            if set(f)!=set(self.SIZES):
+                self.register_watch.interrupt()
+                return
+            stamps=tuple(f[k][0] for k in self.SIZES)
+            frames={k:f[k][1] for k in self.SIZES}
+            context={k:self.raw(k) for k in RegisterWatch.CONTEXT}
+            self.register_watch.observe(frames,stamps,context,time.monotonic(),time.time())
+        except Exception:
+            self.register_watch.interrupt()
+        finally:
+            try:
+                self.register_watch.save_if_due(now)
+            except Exception:
+                pass
 
     def observe_hysteresis(self):
         # Separate from regulation; failures must never influence commands.
@@ -625,6 +647,7 @@ class Runtime:
                     self.g["logging"].info("Adaptive integration: four complete recent frames")
                     self.ready_log_frames=stamps
                     self.ready_log_count+=1
+            self.observe_registers(now)
             self.observe_hysteresis()
             if self.resume_requested:
                 self.resume_auto()

@@ -380,13 +380,33 @@ const ts=(d.thresholds?d.thresholds.groups:[]).flatMap(g=>(g.samples||[]).map(x=
         source=once(source,'"completed","run_s"]+["level_"','"completed","run_s","max_continuous_s","beyond_hour_s"]+["level_"')
     return source
 
+def register_watch_api(source):
+    source=performance_report_api(source)
+    line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+    html=ast.literal_eval(line.split("=",1)[1].strip())
+    if 'id="register-events"' not in html:
+        html=once(html,'<article><h2>Ostatnie decyzje i potwierdzenia</h2>','<article><h2>Diagnostyka grzałek / CWU (pasywna)</h2><p id="register-status"></p><div class="scroll"><table id="register-flags"></table></div><details><summary>Przejścia i zmienione bity</summary><p><a href="/v2/api/adaptive-report.csv?kind=register_changes">CSV zmiany bitów</a> · pełne próbki w JSON raportu.</p><div class="scroll"><table id="register-events"></table></div></details><small>Znane sygnały Heater/CWU oraz próbki co 2 min przy włączonym CWU. Zmienione bity są kandydatami, nie identyfikacją wyjścia zasobnika. Bez dodatkowych zapytań RS485 i bez sterowania. Zmiany między próbkami mogą zostać pominięte.</small></article><article><h2>Ostatnie decyzje i potwierdzenia</h2>')
+        html=once(html,'table("events",["Czas","Typ","Właściciel","Szczegóły"]', '''const rw=d.register_watch;
+el("register-status").textContent=rw?(rw.fresh?"Świeże dane":"Brak świeżych danych")+" · "+rw.events.length+"/"+rw.limit+" zdarzeń · zapis "+dt(rw.saved_at)+(rw.unsaved?" · RAM":"")+(rw.storage_error?" · "+rw.storage_error:""):"Brak danych";
+const names={heater_command:"Polecenie Heater A04",heater_readback:"Odczyt Heater A4A",valve_dhw:"Zawór CWU",valve_ch:"Zawór CO",pdhw:"PDHW",dhw_enabled:"CWU włączone",dhw_heating:"Grzanie CWU",dhw_heater_assist_active:"Wspomaganie CWU",anti_legionella_active:"Antylegionella"};
+table("register-flags",["Sygnał","Stan"],Object.entries(names).map(([k,v])=>[v,rw&&rw.flags&&rw.flags[k]!=null?(rw.flags[k]?"ON":"OFF"):"—"]));
+table("register-events",["Czas","Zdarzenie","Rejestr","Przed","Po","XOR","Bity ON","Bity OFF"],(rw?rw.events:[]).slice().reverse().flatMap(e=>e.changes.length?e.changes.map(c=>[dt(e.at),e.kind+" "+e.flags.join(", "),"R"+c.register,c.before,c.after,"0x"+c.xor.toString(16),c.set_bits.join(","),c.cleared_bits.join(",")]):[[dt(e.at),e.kind,"—","—","—","—","—","—"]]));
+table("events",["Czas","Typ","Właściciel","Szczegóły"]''')
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'elif kind=="register_changes":' not in source:
+        source=once(source,'    elif kind=="events":','''    elif kind=="register_changes":
+        rows=[dict(c,at=e["at"],kind=e["kind"],flags=";".join(e["flags"]),set_bits=";".join(map(str,c["set_bits"])),cleared_bits=";".join(map(str,c["cleared_bits"]))) for e in data["register_watch"]["events"] for c in e["changes"]]
+        fields=["at","kind","flags","register","before","after","xor","set_bits","cleared_bits"]
+    elif kind=="events":''')
+    return source
+
 def experiment_api(source):
     old='choices=("legacy","manual","shadow","auto") if key=="adaptive_control"'
     new='choices=("legacy","manual","shadow","auto","experiment") if key=="adaptive_control"'
     source=source if new in source else once(source,old,new)
     old='if current==value:'
     new='if current==value and not (key=="adaptive_control" and value=="manual" and _am.view()["auto_resume_pending"]):'
-    return performance_report_api(source if new in source else once(source,old,new))
+    return register_watch_api(source if new in source else once(source,old,new))
 
 def learning_block():
     policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")

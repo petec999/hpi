@@ -1078,3 +1078,164 @@ class NativeThresholds:
                     os.unlink(temp)
                 except OSError:
                     pass
+
+
+class RegisterWatch:
+    """Passive, bounded raw evidence, not an output decoder."""
+    SIZES={"R101":6,"R141":16,"R201":1,"R241":22}
+    LIMIT=256
+    MAX_BYTES=512*1024
+    SAVE_INTERVAL=1800
+    CONTEXT=("dhw","tank","heater","pdhw","pch","dhw_heater_assist_active","anti_legionella_active","dhw_heating","ch_heating","defrost","mode")
+    KNOWN={"heater_command":("R101",0,8),"heater_readback":("R141",3,256),
+           "valve_dhw":("R141",0,512),"valve_ch":("R141",0,1024)}
+    FLAGS=tuple(KNOWN)+("pdhw","dhw_heating","dhw_heater_assist_active","anti_legionella_active","dhw_enabled")
+
+    def __init__(self,path=None):
+        self.path=Path(path) if path else None
+        self.events=[]
+        self.last=None
+        self.stamps=None
+        self.last_sample=None
+        self.last_save=None
+        self.saved_at=None
+        self.dirty=False
+        self.error=None
+        self.load()
+
+    @classmethod
+    def valid(cls,f):
+        return isinstance(f,dict) and set(f)==set(cls.SIZES) and all(
+            isinstance(f[k],(list,tuple)) and len(f[k])==n and
+            all(type(v) is int and 0<=v<=65535 for v in f[k]) for k,n in cls.SIZES.items())
+
+    @classmethod
+    def context(cls,c):
+        return {k:str(c[k])[:40] for k in cls.CONTEXT if k in c and c[k] is not None}
+
+    @classmethod
+    def flags(cls,f,c):
+        d={k:bool(f[reg][i]&mask) for k,(reg,i,mask) in cls.KNOWN.items()}
+        d["dhw_enabled"]=bool(f["R101"][0]&2)
+        for k in cls.FLAGS:
+            if k not in d:
+                v=c.get(k)
+                d[k]=True if v in ("on","ON","1") else False if v in ("off","OFF","0") else None
+        return d
+
+    def load(self):
+        if self.path is None:
+            return
+        try:
+            if self.path.is_symlink() or self.path.stat().st_size>self.MAX_BYTES:
+                raise ValueError("invalid watch file")
+            d=json.loads(self.path.read_text(encoding="utf-8"))
+            if d["schema"]!=1 or not isinstance(d["events"],list) or len(d["events"])>self.LIMIT:
+                raise ValueError("invalid watch schema")
+            for e in d["events"]:
+                if set(e)!={"at","kind","before","after","context_before","context_after","flags"} or not AdaptiveReport.number(e["at"]) or e["kind"] not in ("baseline","edge","dhw_sample") or not self.valid(e["after"]) or (e["before"] is not None and not self.valid(e["before"])):
+                    raise ValueError("invalid watch row")
+                for c in (e["context_before"],e["context_after"]):
+                    if not isinstance(c,dict) or c!=self.context(c):
+                        raise ValueError("invalid context")
+                if not isinstance(e["flags"],list) or any(k not in self.FLAGS for k in e["flags"]):
+                    raise ValueError("invalid flags")
+            if not AdaptiveReport.number(d["saved_at"]):
+                raise ValueError("invalid timestamp")
+            self.events=d["events"]
+            self.saved_at=d["saved_at"]
+            self.last_save=time.monotonic()
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError):
+            self.error="register watch load failed"
+            self.last_save=time.monotonic()
+
+    def interrupt(self):
+        self.last=None
+        self.stamps=None
+
+    def observe(self,f,stamps,c,now,wall):
+        if not (self.valid(f) and len(stamps)==4 and AdaptiveReport.number(now) and AdaptiveReport.number(wall)
+                and all(AdaptiveReport.number(v) and 0<=now-v<=60 for v in stamps)):
+            self.interrupt()
+            return
+        if self.stamps is not None and not all(a>b for a,b in zip(stamps,self.stamps)):
+            return
+        f={k:list(v) for k,v in f.items()}
+        c=self.context(c)
+        flags=self.flags(f,c)
+        previous=self.last
+        self.last=(now,f,c,flags)
+        self.stamps=tuple(stamps)
+        if previous is None or not 0<now-previous[0]<=65:
+            if self.last_sample is None or now-self.last_sample>=600:
+                self.add(wall,"baseline",None,f,{},c,[])
+                self.last_sample=now
+            return
+        _,old,oldctx,oldflags=previous
+        changed=[k for k in self.FLAGS if flags[k] is not None and oldflags[k] is not None and flags[k]!=oldflags[k]]
+        if changed:
+            self.add(wall,"edge",old,f,oldctx,c,changed)
+            self.last_sample=now
+        elif flags["dhw_enabled"] and (self.last_sample is None or now-self.last_sample>=120):
+            # Even a tank-only heater transition may change none of our known flags.
+            self.add(wall,"dhw_sample",old,f,oldctx,c,[])
+            self.last_sample=now
+
+    def add(self,wall,kind,before,after,oldctx,c,flags):
+        self.events.append({"at":wall,"kind":kind,"before":before,"after":after,
+                            "context_before":oldctx,"context_after":c,"flags":flags})
+        self.events=self.events[-self.LIMIT:]
+        self.dirty=True
+
+    def summary(self,now):
+        import copy
+        fresh=self.last is not None and 0<=now-self.last[0]<=60
+        events=copy.deepcopy(self.events)
+        for e in events:
+            diff=[]
+            if e["before"] is not None:
+                for bank,values in e["after"].items():
+                    for i,(a,b) in enumerate(zip(e["before"][bank],values)):
+                        if a!=b:
+                            diff.append({"register":int(bank[1:])+i,"before":a,"after":b,"xor":a^b,
+                                         "set_bits":[j for j in range(16) if (b&~a)&(1<<j)],
+                                         "cleared_bits":[j for j in range(16) if (a&~b)&(1<<j)]})
+            e["changes"]=diff
+        return {"events":events,"limit":self.LIMIT,"saved_at":self.saved_at,"unsaved":self.dirty,
+                "storage_error":self.error,"fresh":fresh,
+                "current":copy.deepcopy(self.last[1]) if fresh else None,
+                "flags":copy.deepcopy(self.last[3]) if fresh else None,
+                "context":copy.deepcopy(self.last[2]) if fresh else None}
+
+    def save_if_due(self,now):
+        if not self.dirty or self.path is None or (self.last_save is not None and now-self.last_save<self.SAVE_INTERVAL):
+            return
+        self.last_save=now
+        tmp=None
+        try:
+            if self.path.is_symlink():
+                raise ValueError("invalid watch path")
+            wall=time.time()
+            data=json.dumps({"schema":1,"events":self.events,"saved_at":wall},allow_nan=False,separators=(",",":")).encode()
+            if len(data)>self.MAX_BYTES:
+                raise ValueError("watch file too large")
+            fd,tmp=tempfile.mkstemp(prefix=".adaptive-watch-",dir=self.path.parent)
+            with os.fdopen(fd,"wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp,self.path)
+            tmp=None
+            self.saved_at=wall
+            self.dirty=False
+            self.error=None
+        except (OSError,ValueError,TypeError):
+            self.error="register watch save failed"
+        finally:
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
