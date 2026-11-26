@@ -67,3 +67,25 @@ jobs:
           PY
           find /tmp/stable-audit -maxdepth 3 -type f -name '*.html' -print
           grep -inE 'curvecalc|heatingcurve|krzyw|heatcurve' /tmp/stable-audit/templates/index.html /tmp/stable-audit/templates/settings.html | cut -c1-350 | head -100 || true
+      - name: Audit existing curve configuration contract
+        run: |
+          python3 - <<'PY'
+          import ast
+          from pathlib import Path
+          s=Path('/tmp/stable-audit/main.py').read_text()
+          for n in ast.parse(s).body:
+              if not isinstance(n,ast.FunctionDef): continue
+              x=ast.get_source_segment(s,n)
+              if n.name=='curvecalc' or ('heatingcurve' in x and ('config' in x or 'socket' in x)) or ('SETTINGS$' in x):
+                  print('FUNCTION',n.name)
+                  if n.name=='curvecalc':
+                      print('\n'.join(l for l in x.splitlines() if any(k in l.lower() for k in ('curve','slope','hcamp','hcman','config','outtemp','settemp','return'))))
+                  else:
+                      lines=x.splitlines()
+                      idx=set()
+                      for i,l in enumerate(lines):
+                          if any(k in l.lower() for k in ('heatingcurve','hcman','hcslope','hcamp','settings$','config.write','saveconfig','save_config','configfile','config_file','update_config','request.form','@socket','def ')):
+                              idx.update(range(max(0,i-3),min(len(lines),i+4)))
+                      print('\n'.join(lines[i] for i in sorted(idx)))
+          PY
+          sed -n '550,830p;2420,2445p;2540,2665p' /tmp/stable-audit/templates/settings.html
