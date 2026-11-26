@@ -1,0 +1,44 @@
+name: Web UI v2 preview tests
+on:
+  push:
+    branches: [feature/web-ui-v2]
+    paths:
+      - 'tools/install-web-ui-v2.py'
+      - 'install-web-ui-v2.sh'
+      - 'tests/test_web_ui_v2.py'
+      - '.github/workflows/web-ui-v2.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9','3.11']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install 'Flask>=2.2,<3.2' 'Flask-Login>=0.6,<0.7'
+      - run: bash -n install-web-ui-v2.sh
+      - run: python -m unittest discover -s tests -p test_web_ui_v2.py -v
+      - name: Verify patch on pinned upstream archive plus watchdog v2
+        run: |
+          curl -fsSL --retry 3 https://raw.githubusercontent.com/kamilostatek/hpi/main/1.4.5_stable.tar.gz -o /tmp/stable.tar.gz
+          printf '%s  %s\n' ca803a3f8777efa75a40739d2efeb0362365ffa4291d3eb76d9a231c6cb53976 /tmp/stable.tar.gz | sha256sum -c -
+          python - <<'PY'
+          import tarfile, runpy
+          with tarfile.open('/tmp/stable.tar.gz') as t:
+              m = [m for m in t.getmembers() if m.isfile() and m.name.removeprefix('./') == 'main.py']
+              assert len(m) == 1
+              core = t.extractfile(m[0]).read().decode()
+          wd = runpy.run_path('tools/install-mqtt-watchdog.py')
+          ui = runpy.run_path('tools/install-web-ui-v2.py')
+          patched = wd['patch'](core)
+          result = ui['patch'](patched)
+          assert ui['patch'](result) == result
+          compile(result, 'main.py', 'exec')
+          print('Pinned stable + watchdog v2 + UI patch: syntax and idempotence OK')
+          PY
