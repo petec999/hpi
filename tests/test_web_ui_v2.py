@@ -2,6 +2,8 @@ import importlib.util
 import unittest
 import re
 import time
+import copy
+from types import SimpleNamespace
 from pathlib import Path
 from flask_login import LoginManager, UserMixin
 
@@ -18,6 +20,9 @@ statusdict={}
 _pump_frame_last_at={}
 PUMP_FRAME_STALE_AFTER_S=180
 _wd_last_ok=None
+
+def on_message(client,userdata,msg):
+    return "original"
 
 @app.route("/")
 @login_required
@@ -90,6 +95,8 @@ class Tests(unittest.TestCase):
         old=SOURCE.replace('@app.route("/")',patcher.PREVIOUS_BLOCK+'@app.route("/")')
         updated=patcher.patch(old)
         self.assertEqual(updated,patcher.patch(SOURCE))
+        self.assertEqual(patcher.patch(SOURCE.replace('@app.route("/")',patcher.CONTROL_BLOCK+'@app.route("/")')),updated)
+        self.assertEqual(updated.count("# HOME-IOT WEB V2 COUNTER TAP"),1)
         self.assertEqual(patcher.patch(updated),updated)
         self.assertRaises(ValueError,patcher.patch,old.replace("Panel techniczny","Unknown panel"))
 
@@ -135,6 +142,97 @@ class Tests(unittest.TestCase):
         g["_pump_frame_last_at"]["R141"]=0
         self.assertEqual(post(payload).status_code,409)
         self.assertEqual(len(calls),4)
+
+    def test_pressure_and_counters(self):
+        g=self.g
+        now=time.monotonic()
+        cl=SimpleNamespace(is_connected=lambda:True)
+        g.update(client=cl,mqtt_topic="climate/haier",use_mqtt="1",
+                 _pump_frame_last_at={"R141":now,"R241":now},
+                 statusdict={"pdps":{"mqtt":"/haierunit/pressures/pdps/state","value":[24,23.5,6,7]}})
+        def msg(key,payload,retain=False):
+            return g["on_message"](cl,None,SimpleNamespace(topic="climate/haier/diagnostics/counters/"+key,payload=payload,retain=retain))
+        self.assertEqual(msg("available",b"online"),"original")
+        for k in g["_WV_COUNTER_KEYS"]:
+            msg(k,b"4",True)
+        msg("available",b"online",True)
+        state=g["_wv_state"](g,time.monotonic())
+        self.assertEqual(state["counters"],{})
+        self.assertEqual(state["values"]["pd"],23.5)
+        self.assertEqual(state["values"]["pressure_delta"],16.5)
+        for k in g["_WV_COUNTER_KEYS"]:
+            msg(k,b"4")
+        msg("available",b"online")
+        self.assertEqual(g["_wv_state"](g,time.monotonic())["counters"]["compressor_starts"],4)
+        msg("available",b"offline")
+        self.assertEqual(g["_wv_state"](g,time.monotonic())["counters"],{})
+        g["_pump_frame_last_at"]["R241"]=0
+        self.assertIsNone(g["_wv_state"](g,time.monotonic())["values"]["pd"])
+
+    def test_curve_and_scheduler(self):
+        g=self.g
+        now=time.monotonic()
+        cfg={"ch":{"target":"room","min":12,"max":30,"step":.1},
+             "dhw":{"target":"dhw","min":30,"max":55,"step":.5}}
+        schedules={k:[{"day":i,"periods":[]} for i in range(7)] for k in cfg}
+        saved=[]
+        def save_curve(block,key,value):
+            saved.append((block,key,value))
+            g["hcman"]=value.split(",")
+            return True
+        def validate(data,which,rules):
+            if any(p["start"]>=p["end"] for d in data for p in d["periods"]):
+                raise ValueError("bad period")
+            return data
+        def save_sched(which,raw):
+            import json
+            schedules[which]=json.loads(raw)
+            saved.append(which)
+            return "ok","success"
+        g.update(_pump_frame_last_at={"R141":now,"R241":now},
+                 heatingcurve="manual",hcman=["35"]*14,expert_mode="0",
+                 _load_schedule=lambda k:copy.deepcopy(schedules[k]),
+                 _scheduler_config=lambda:cfg,validate_schedule=validate,
+                 schedule_write=save_sched,saveconfig=save_curve,loadconfig=lambda:None,
+                 chscheduler="1",dhwscheduler="0")
+        self.login()
+        token=re.search(r'name="wv-csrf" content="([a-f0-9]{64})"',self.client.get("/v2/").data.decode()).group(1)
+        h={"Origin":"http://localhost","X-HaierPi-CSRF":token}
+        curve="/v2/api/curve"
+        self.assertEqual(self.client.post(curve,json={"points":[36]*14,"expected":[35]*14}).status_code,403)
+        self.assertEqual(self.client.post(curve,json={"points":[60]*14,"expected":[35]*14},headers=h).status_code,400)
+        self.assertEqual(self.client.post(curve,json={"points":[36]*14,"expected":[34]*14},headers=h).status_code,409)
+        self.assertEqual(self.client.post(curve,json={"points":[36]*14,"expected":[35]*14},headers=h).status_code,200)
+        self.assertEqual(g["hcman"],["36.0"]*14)
+        self.assertEqual(len(saved),1)
+        g["_wv_last_command"]=float("-inf")
+        url="/v2/api/schedule/ch"
+        state=self.client.get(url).json
+        self.assertTrue(state["enabled"])
+        proposed=copy.deepcopy(state["schedule"])
+        proposed[0]["periods"]=[{"start":"06:00","end":"08:00","temperature":21,"temperature_target":"room","title":""}]
+        self.assertEqual(self.client.post(url,json={"schedule":proposed,"expected":"old"},headers=h).status_code,409)
+        self.assertEqual(self.client.post(url,json={"schedule":proposed,"expected":state["revision"]},headers=h).status_code,200)
+        self.assertEqual(schedules["ch"],proposed)
+        self.assertEqual(schedules["dhw"][0]["periods"],[])
+        self.assertEqual(self.client.post(url,json={"schedule":proposed,"expected":state["revision"]},headers=h).status_code,409)
+
+    def test_a03(self):
+        g=self.g
+        now=time.monotonic()
+        calls=[]
+        g.update(_pump_frame_last_at={"R141":now,"R241":now},
+                 statusdict={"tempcompensation_set":{"value":0}},
+                 new_tempchange=lambda *a:("",True),statechange=lambda *a:None,
+                 new_presetchange=lambda *a:("",True),
+                 new_tempcompchange=lambda *a:(calls.append(a) or "",True))
+        self.login()
+        token=re.search(r'name="wv-csrf" content="([a-f0-9]{64})"',self.client.get("/v2/").data.decode()).group(1)
+        h={"Origin":"http://localhost","X-HaierPi-CSRF":token}
+        url="/v2/api/control"
+        self.assertEqual(self.client.post(url,json={"key":"tempcompensation_set","value":16,"expected":0},headers=h).status_code,400)
+        self.assertEqual(self.client.post(url,json={"key":"tempcompensation_set","value":.5,"expected":0},headers=h).status_code,202)
+        self.assertEqual(calls,[("0.5",)])
 
     def test_invalid_values(self):
         g=self.g
