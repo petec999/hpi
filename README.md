@@ -1,115 +1,64 @@
 # HaierPi Adaptive — experimental integrated preview
 
-**Status (2026-11-26):** CI passed on Python 3.9/3.11 and Stable writer audit. Real pump validation remains open; this is not a production release.
+Opt-in anti-cycling supervision for existing HaierPi Stable 1.4.5 installations, with authenticated WWW v2, bounded online learning and read-only diagnostics.
 
-[Latest verified functional commit](https://github.com/petec999/hpi/commit/6d73fe68a1174946acf188e21aee14301e89a8d4) · [CI results](https://github.com/petec999/hpi/actions/runs/45877988884) · [Operating and rollback guide](docs/INTEGRATED_ADAPTIVE_PREVIEW.md) · [Handover](docs/ADAPTIVE_HANDOVER.md)
+**Current functional revision (2026-11-26):** [`5cfd1415`](https://github.com/petec999/hpi/commit/5cfd14153e394ef0296e3192b53f2a7169a2c51e) — [Python 3.9/3.11 and Stable writer audit passed](https://github.com/petec999/hpi/actions/runs/45886053115). This is an experimental preview, not a production release. Physical acceptance of the latest version remains open.
 
-## Update a compatible existing HaierPi
+## Install / update
 
-Use the pinned functional revision, not an unreviewed branch HEAD. Run on the HaierPi host as root.
+On the HaierPi host, as root, only on a compatible existing installation:
 
 ```bash
-REF=6d73fe68a1174946acf188e21aee14301e89a8d4
+REF=5cfd14153e394ef0296e3192b53f2a7169a2c51e
 curl -fsSL "https://raw.githubusercontent.com/petec999/hpi/$REF/install-adaptive-preview.sh" -o /tmp/install-adaptive-preview.sh && bash /tmp/install-adaptive-preview.sh "$REF" --dry-run
 ```
 
-Repeat with `--apply` only after a successful dry-run and when a brief service restart is acceptable. The installer backs up modified files, verifies fresh four-frame telemetry and attempts rollback on failure. Check the HA watchdog separately. A restart restores saved Auto only after valid telemetry and normal heating demand; without saved Auto, starts in Legacy or Manual hold. Experiment sessions reset; saved measurements survive. Do not interrupt an active experiment just for a documentation update.
+Repeat with `--apply` after a successful dry-run and when a brief service restart is acceptable. The installer backs up modified files, checks fresh telemetry and attempts rollback on failure. Verify MQTT separately. No automatic remount or replacement of existing schedules and settings.
 
-## Operating modes in /v2/
+## WWW v2 (`/v2/`)
 
-| Mode | Behavior |
+| Mode | Behaviour |
 | --- | --- |
-| Legacy | Original automation; default without a saved selection |
-| Manual | Manual preset/FLimit; normal legacy modulation blocked |
-| Shadow / Obserwacja | Adaptive proposals only; legacy automation may still act |
-| Auto | Experimental adaptive modulation; supply STOP model and saved Auto resume |
-| Experiment | Opt-in preset/FLimit trials during confirmed idle only |
+| Legacy | Original policy |
+| Manual | User controls preset and FLimit |
+| Shadow | Adaptive proposals only; legacy automation may still act |
+| Auto | Experimental supervisor using the six preset/FLimit combinations |
+| Experiment | Optional idle-only trials; three accepted cycles per configuration |
 
-Experiment: Eco OFF → Quiet OFF → Quiet ON → Eco ON → Turbo ON → Turbo OFF; three newly accepted cycles per configuration, no calendar deadline. Completion restores the starting combination at an eligible idle, then selects Manual. Priority writes and command/telemetry failure can disarm to Manual. Manual cancellation and service restart do not guarantee restoration.
+Auto does not command compressor frequency, demand or water setpoint. It preserves native and priority protections. Saved Auto waits for two distinct fresh sets of frames and eligible normal CO before resuming after restart. Manual/Legacy selection cancels resume. Failed commands or prolonged telemetry loss may disarm to Manual.
 
-## Evidence and outstanding validation
+The experiment has no calendar deadline; completion restores the original combination at an eligible idle, then selects Manual. Cancellation/restart does not guarantee restoration.
 
-- Observer measures Twi, Two and their average relative to the actual setpoint at Fset transitions. Stores pre/post frequency, outdoor temperature, water delta, run duration and sampled time above target bands. No automatic application of measured hysteresis.
-- Auto uses a provisional Two +5 K STOP model based on observed historical behavior, **not** a factory-confirmed threshold; passive measurements continue.
-- Experiment progress counts by configuration; threshold statistics keep exact target, owner, preset and relay separate. Changes in conditions may invalidate cycles or slow collection.
-- Persisted cycle data: `/opt/haier/.adaptive-hysteresis-v1.json`; 128 recent cycles, atomic saves at most every five minutes. Auto response learning is separate: `/opt/haier/.adaptive-learning-two-v3.json`. Unsaved data can be lost.
-- Remaining: representative per-context samples and real-world Auto modulation, restart and readback verification. The experiment is optional. No verified savings or guarantee of eliminating cycling.
+## Diagnostics and data
 
-Android companion: [native app 0.2.0](https://github.com/petec999/hpi/tree/feature/android-app/android-app).
+- **Native threshold estimation:** empirical START near target −2 K (Twi/Two idle proxy); STOP near target +5 K (Two). Estimates require repeated stable observations; defaults remain when evidence is insufficient. Neither is a manufacturer-confirmed threshold.
+- **Adaptive report:** `/v2/adaptive-report`, authenticated JSON and CSV, weather/target-matched Auto and Legacy groups, frequency-confirmed running time, continuous-operation KPIs, threshold samples and decision history.
+- **Heater A4A:** read-only status, observed starts/runtime and last 128 transitions. The experimental A04 writer and MQTT controls were retired after unsuccessful field switching. No replacement writer is enabled. Existing core service/protection logic remains intact.
+- **Register Watch:** passive raw frame comparisons, known signals and candidate changes; last 256 events. No additional RS485 traffic or writes. R101 bit 7 selects TANK, not tank heater output. Independent tank-heater command and native DHW hysteresis parameter remain unresolved.
+- **HA:** [dashboard updater](https://github.com/petec999/home-iot-telemetry/tree/main/home_assistant) displays A4A and counters, not a switch.
 
----
+### Storage
 
-## Historical 1.4.5_3 release instructions
+| File in /opt/haier | Bound / dirty save interval |
+| --- | --- |
+| .adaptive-owner-v1 | Selected owner; atomic on selection |
+| .adaptive-learning-two-v3.json | 1024 contexts, 512 KiB load cap; 30 min |
+| .adaptive-hysteresis-v1.json | 128 cycles; 5 min |
+| .adaptive-thresholds-v1.json | 24 samples per context, 1 MiB cap; 5 min |
+| .adaptive-report-v1.json | 90 UTC days / 2048 groups, 512 events, 2 MiB cap; 30 min |
+| .adaptive-register-watch-v1.json | 256 events, 512 KiB cap; 30 min |
+| .adaptive-heater-counter-v1.json | 128 transitions, 32 KiB cap; 30 min |
 
-The following section is for the earlier published diagnostic prerelease, **not** the current Adaptive installer.
+Data is sampled and bounded. Counters exclude gaps; they are not utility-meter readings. Unsaved observations may be lost on restart. A4A is a controller indication, not independently measured heater power. No raw household logs or historical HA data are uploaded or automatically imported.
 
-Current distribution: **[1.4.5_3 (prerelease)](https://github.com/petec999/hpi/releases/tag/v1.4.5_3)**. This branch contains the complete installation sources, not a replacement for upstream Stable 1.4.5.
+## Further work
 
-## Quick update on an existing compatible HaierPi
+Hardware verification of Auto/learning and MQTT, evaluation of continuous run lengths versus Legacy, and read-only investigation of DHW. No savings claim or guarantee of continuous operation at minimum capacity.
 
-Run on NanoPi as root. For existing diagnostics, install only the watchdog:
+- [Current handover](docs/ADAPTIVE_HANDOVER.md)
+- [Earlier documentation and detailed evolution](https://github.com/petec999/hpi/blob/3d9ae8eda2c7419c241a5933df74716fbebdc50c/README.md)
+- [Integrated preview guide (earlier design)](docs/INTEGRATED_ADAPTIVE_PREVIEW.md)
+- [Stable and published releases](https://github.com/petec999/hpi#start-here)
+- [Android preview](https://github.com/petec999/hpi/tree/feature/android-app/android-app)
 
-```bash
-cd /tmp
-BASE=https://github.com/petec999/hpi/releases/download/v1.4.5_3
-curl -fsSLO "$BASE/1.4.5_3.tar.gz" &&
-curl -fsSLO "$BASE/1.4.5_3.sha256" &&
-sha256sum -c 1.4.5_3.sha256 &&
-tar -xzf 1.4.5_3.tar.gz &&
-cd HaierPi-1.4.5_3 &&
-bash install-1453.sh --dry-run &&
-bash install-1453.sh --watchdog-only
-```
-
-For a compatible core without the two RAM diagnostic services, use `bash install-1453.sh` instead. This is not a full core upgrade. The installer creates backups and preserves the initial mount flags, including RW if already writable.
-
-Verify:
-```bash
-grep -n 'HOME-IOT MQTT WATCHDOG' /opt/haier/main.py
-journalctl -u haier -b --no-pager | grep -i watchdog
-systemctl is-active haier
-```
-
-## Validation, 25 November 2026
-
-```text
-# HOME-IOT MQTT WATCHDOG v2
-14:00:00 MQTT watchdog OK: HA confirmed heartbeat (failures=0 recoveries=0)
-active
-```
-
-[CI build and simulated failure/recovery tests](https://github.com/petec999/hpi/actions/runs/45618747904) passed. Hardware installation and normal HA round-trip are confirmed. Actual outage/reconnect, persistent notification and reboot tests remain open; automatic RO remount was not tested because /opt was already RW. Do not interrupt a working heating system solely to test these paths.
-
-## Documentation
-
-- [Release notes and architecture](RELEASE_1.4.5_3.md)
-- [MQTT watchdog, prerequisites and rollback](docs/MQTT_END_TO_END_WATCHDOG.md)
-- [OverlayFS startup](docs/OVERLAYFS_AUTOSTART.md)
-- [Home Assistant dashboard setup](https://github.com/petec999/home-iot-telemetry/blob/main/home_assistant/README.md)
-
-Published archives and tags are immutable; later README updates do not modify the released archive or its checksum.
-
-## Supply STOP model and restart behavior (26 November 2026)
-
-Verified functional revision: `6d73fe68a1174946acf188e21aee14301e89a8d4` ([CI](https://github.com/petec999/hpi/actions/runs/45877988884)). STOP risk uses current Two and its short-horizon forecast against actual water target +5 K, with a provisional 1 K warning margin; Twi remains a return-demand and surplus signal. This is an empirical model, not a factory threshold. No changes to native demand, temperature target or compressor protection. Learning starts in a new file `.adaptive-learning-two-v3.json`, retaining old files; the passive observer continues using the same store. Explicit Auto selection is persisted atomically in `.adaptive-owner-v1`. After reboot, Auto waits in Manual hold for two independent fresh frame sets, valid normal CO, demand and no priority override. Explicit Manual/Legacy/Shadow/Experiment selection cancels Auto resume; failures persist Manual where storage is writable. If storage cannot be updated, a visible error warns that a saved choice may survive a restart. No experiment or pending command is resumed. Hardware verification remains open.
-
-### Learning storage capacity
-
-Auto response learning retains up to 1024 contexts in the existing `.adaptive-learning-two-v3.json` file (unchanged schema, up to 512 KiB on load). Dirty state is saved atomically at most once per 30 minutes per process; the first dirty save can be immediate if no file was loaded. The least recently updated context is evicted only when adding a new context at capacity. Existing valid learning records survive the update. A sudden outage may lose unsaved observations; an incomplete trial is not restored. The separate passive hysteresis observer retains its existing 128-cycle limit and five-minute save cadence.
-
-
-## Adaptive report
-
-In WWW v2 select **Raport Adaptive**, or open `/v2/adaptive-report`. It is an authenticated read-only page. Refresh on demand; JSON and CSV endpoints export observed daily groups, learned contexts and recent events. No SQLite and no external connection. Data is saved to `/opt/haier/.adaptive-report-v1.json` independently of the learning and hysteresis stores; dirty saves at most once per 30 minutes. Retains up to 90 UTC days/2048 daily groups, 512 recent events and cumulative scores since report initialization. A restart loses in-flight cycles and unsaved data, not saved aggregates. Existing learned contexts are shown immediately; new score counts start with the report.
-
-Performance sampling uses independent fresh four-frame sets in eligible normal CO, with demand and no protection/priority. It counts observed Fset starts, complete Fset runs confirmed by Fact, actual running time by preset/FLimit and observed coverage; preset or FLimit changes do not break a performance cycle. Gaps, priority or owner/target-band changes interrupt it. Counts are not whole-day meter totals. Weather/target comparison groups by 5 K outdoor and 3 K target bands, and displays only groups observed under both Legacy and Auto; sample counts and observation time remain visible. Historical Home Assistant exports are **not automatically imported** and owner attribution for old logs is not assumed. No causal savings/COP claim. Do not switch a working installation to Legacy solely to fill the report.
-
-Reporting is observational; controller behavior is unchanged. Hardware/browser verification still open. Functional commit `6d73fe68a1174946acf188e21aee14301e89a8d4`: [passing CI](https://github.com/petec999/hpi/actions/runs/45877988884).
-
-## Learned native START / STOP model
-
-Independent stable-edge observations, not the strict whole-cycle hysteresis observer, are stored in `/opt/haier/.adaptive-thresholds-v1.json` (up to 24 samples per edge, preset/FLimit and 3 K water-target band, five-minute dirty saves). Separate START and STOP estimates can be learned even when Auto changes configuration during a cycle. Samples require eligible fresh normal CO, stable owner/configuration/setpoint and phase for at least 120 seconds before the Fset edge, narrow water-temperature brackets, and Fact confirmation with 60 seconds of uninterrupted post-edge observation (maximum 180 seconds). Eight or more samples, MAD <= 0.35 K, at least 80% within 0.6 K of median and an allowed range are required. Default START -2 K, STOP +5 K; learned bounds START -3.5 to -1 K, STOP +3.5 to +5.5 K. START is a proxy using mean Twi/Two only when both agree during idle; the actual native START sensor is not identified. STOP uses Two. The learned STOP drives the existing reduction/shortfall veto and response scoring with the 1 K warning margin; START provides an idle cooling ETA and readiness indication. Auto still prepares Quiet+FLimit during confirmed idle. It may preserve a confirmed STOP sample for one additional tick only when both water temperatures are at least 2 K above predicted START and no imminent START forecast; it never commands the compressor, demand or setpoint. Estimates revert to defaults when evidence is insufficient or inconsistent. Existing learning/report files are unchanged. WWW v2 and Raport Adaptive show thresholds, sources, sample counts and dispersion. No automatic import from HA history; new observations are collected locally. Real pump validation remains open.
-
-## Continuous-operation KPIs and threshold evidence
-
-Report `/v2/adaptive-report` now shows the current observed uninterrupted Auto run, longest observed Auto/Legacy runs in the retained report window, Auto operating hours and accumulated seconds beyond the first hour of each uninterrupted observed run. Both Fset and Fact must be positive at both ends of each fresh interval. Modulation and target-band changes do not break this streak; missing data, priority operation, zero Fset/Fact, owner changes and service restart do. Current duration is a lower bound from observed samples, not reconstructed from before installation or across restarts. Saved maxima and accumulated durations survive restart; old report schema 1 files are read with zero new counters while preserving original aggregates. The existing 90-day/2048-group retention applies. Percentages and hours for each of the six preset/FLimit combinations use observed Fact-positive runtime as denominator (not wall-clock day). Threshold report includes a collapsible table of retained source measurements (timestamp, edge, preset, FLimit, target band, Twi/Two offsets) and CSV exports `kind=thresholds` and `kind=threshold_samples`. Threshold files and policy are unchanged; each group retains 24 recent samples, not a permanent archive. JSON includes both model statistics and retained samples. No new historical data is inferred. Verified functional commit `6d73fe68a1174946acf188e21aee14301e89a8d4`: [CI](https://github.com/petec999/hpi/actions/runs/45877988884); real hardware/browser validation still open.
+Do not publish credentials or raw household telemetry.
