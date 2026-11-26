@@ -46,6 +46,8 @@ class Settings:
     urgent_deficit: float=2
     integral_limit: float=4  # K*min, not thermal energy
     trend_band: float=0.08
+    stop_risk_supply: float=3.0  # empirical warning, NOT a factory trip threshold
+    stop_risk_return: float=0.5  # supporting return-temperature overshoot
     probe_hz: float=30  # experimental opt-out threshold, not factory minimum
 
 @dataclass(frozen=True)
@@ -192,6 +194,8 @@ class Regulator:
         # This is an overshoot proxy, not a known factory shutoff threshold.
         excess=(es<=-c.surplus_band and ts<=c.trend_band) or (
             es<=0.2 and forecast>=c.surplus_band and ts<-c.trend_band and tr<=c.trend_band)
+        stop_risk=(forecast>=c.stop_risk_supply and -er>=c.stop_risk_return
+                   and ts<=c.trend_band and tr<=c.trend_band)
         settled=now-self.ready_since>=c.startup_hold and now-self.changed_at>=c.settle_hold
         stable_probe=(now-self.ready_since>=c.probe_after and abs(es)<=0.3 and
                       abs(ts)<=c.trend_band and abs(tr)<=c.trend_band and
@@ -209,7 +213,7 @@ class Regulator:
                 direction=None
         elif (settled and (excess or stable_probe)) or (excess and forecast>=c.early_surplus and ts<-c.trend_band and tr<=c.trend_band and now-self.ready_since>=c.settle_hold and now-self.changed_at>=c.settle_hold):
             direction="down"
-            risk="surplus" if excess else "efficiency_probe"
+            risk="cycling_risk" if stop_risk else "surplus" if excess else "efficiency_probe"
         # A reduction while the inverter is already ramping down can overshoot
         # in the opposite direction; let its own regulation settle first.
         if direction=="down" and trend(rows,3)<-2 and trend(rows,4)<-2:
@@ -224,6 +228,8 @@ class Regulator:
         if proposed==level or proposed not in allowed:
             self.candidate=self.candidate_since=None
             self.last_offer=None
+            if direction=="down" and proposed==level:
+                return decision(level,"minimum available envelope; native modulation or stop", "cycling_risk_at_minimum" if stop_risk else "surplus_at_minimum")
             return decision(level,"capacity boundary or restriction",risk)
         blocked=self.blocked.get((level,proposed),0)-now
         if direction=="down" and blocked>0:
