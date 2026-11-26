@@ -22,9 +22,9 @@ jobs:
         run: bash android-app/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: HaierPi-Android-0.1.0
+          name: HaierPi-Android-0.2.0
           path: |
-            android-app/build/HaierPi-0.1.0-preview.apk
+            android-app/build/HaierPi-0.2.0-preview.apk
             android-app/build/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 90

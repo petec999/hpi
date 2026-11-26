@@ -19,7 +19,7 @@ if [[ ! -f "$KEY" ]]; then
     -keyalg RSA -keysize 2048 -validity 3650 -dname "CN=HaierPi Preview" -storetype JKS -noprompt
 fi
 "$BT/apksigner" sign --ks "$KEY" --ks-key-alias haierpi-preview --ks-pass pass:android --key-pass pass:android \
-  --out "$OUT/HaierPi-0.1.0-preview.apk" "$OUT/aligned.apk"
-"$BT/apksigner" verify --verbose --print-certs "$OUT/HaierPi-0.1.0-preview.apk"
-"$BT/aapt2" dump badging "$OUT/HaierPi-0.1.0-preview.apk"
-(cd "$OUT" && sha256sum HaierPi-0.1.0-preview.apk > SHA256SUMS.txt)
+  --out "$OUT/HaierPi-0.2.0-preview.apk" "$OUT/aligned.apk"
+"$BT/apksigner" verify --verbose --print-certs "$OUT/HaierPi-0.2.0-preview.apk"
+"$BT/aapt2" dump badging "$OUT/HaierPi-0.2.0-preview.apk"
+(cd "$OUT" && sha256sum HaierPi-0.2.0-preview.apk > SHA256SUMS.txt)

@@ -53,12 +53,12 @@ public final class MainActivity extends Activity {
         title.setGravity(android.view.Gravity.CENTER_VERTICAL);
         bar.addView(title,new LinearLayout.LayoutParams(0,dp(48),1));
         Button reload=new Button(this);
-        reload.setText("Odśwież");
-        reload.setOnClickListener(v->{if(origin!=null)web.reload();});
+        reload.setText("V2");
+        reload.setOnClickListener(v->{if(origin!=null)web.loadUrl(origin+DEFAULT_PATH);});
         bar.addView(reload);
         Button address=new Button(this);
-        address.setText("Adres");
-        address.setOnClickListener(v->chooseAddress());
+        address.setText("Pulpit");
+        address.setOnClickListener(v->finish());
         bar.addView(address);
         root.addView(bar);
         status=new TextView(this);
@@ -95,7 +95,7 @@ public final class MainActivity extends Activity {
                 return true;
             }
             @Override public void onPageFinished(WebView v,String url){
-                if(sameOrigin(url))status.setText(origin);
+                if(sameOrigin(url))status.setText(url);
             }
             @Override public void onReceivedError(WebView v,WebResourceRequest req,WebResourceError error){
                 if(req.isForMainFrame())status.setText("Brak połączenia. Sprawdź Wi-Fi, VPN i adres.");
