@@ -1008,7 +1008,7 @@ class NativeThresholds:
         idle=s.hz==0 and s.requested_hz==0 and abs(s.return_temp-s.supply_temp)<=0.6
         margin=mean-s.target-start["offset"] if idle else None
         eta=None
-        if idle and len(self.idle)>=4 and self.idle[-1][0]-self.idle[0][0]>=90:
+        if idle and self.context is not None and self.context[1:]==(s.mode,s.relay,s.target) and len(self.idle)>=4 and 0<=s.now-self.idle[-1][0]<=65 and self.idle[-1][0]-self.idle[0][0]>=90:
             rate=trend(list(self.idle),1)
             if margin<=0:
                 eta=0

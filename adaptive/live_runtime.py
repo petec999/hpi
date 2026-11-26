@@ -416,6 +416,13 @@ class Runtime:
                      "surplus_band":self.reg.cfg.surplus_band}
         if self.control!="auto" or (s.mode,s.relay)==(mode,relay) or previous is None or not 0<frame-previous<=self.MAX_AGE:
             return True
+        # Preserve a near-complete STOP observation for at most one tick
+        # if both water sensors are still well above the predicted START.
+        # Native restart remains independent; skip this hold near START.
+        edge=self.thresholds.pending
+        if edge is not None and not edge[5] and edge[6] and 30<=s.now-edge[1]<60 and min(s.return_temp,s.supply_temp)>=model["start_target"]+2 and (model["start_eta_min"] is None or model["start_eta_min"]>5):
+            self.status["reason_pl"]="Postój – potwierdzanie progu STOP przed przygotowaniem"
+            return True
         with self.serial_lock:
             current,z,actual_target,_=self.snapshot()
             if (not self.idle_snapshot_valid(current,z,actual_target)
