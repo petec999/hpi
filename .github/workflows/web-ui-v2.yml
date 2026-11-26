@@ -47,21 +47,14 @@ jobs:
         if: matrix.python-version == '3.11'
         run: |
           python - <<'PY'
-          import ast, tarfile
+          import ast,tarfile
           with tarfile.open('/tmp/stable.tar.gz') as t:
-              m = next(m for m in t.getmembers() if m.isfile() and m.name.removeprefix('./') == 'main.py')
-              src=t.extractfile(m).read().decode()
+              src=t.extractfile(next(m for m in t.getmembers() if m.isfile() and m.name.removeprefix('./')=='main.py')).read().decode()
           tree=ast.parse(src)
           for n in tree.body:
-              if isinstance(n,ast.FunctionDef):
-                  decorators=[ast.unparse(d) for d in n.decorator_list]
-                  if any('app.route' in d or 'socketlocal.on' in d for d in decorators):
-                      print(n.name, decorators, n.lineno, n.end_lineno)
-                  if n.name=='on_message':
-                      for line in ast.get_source_segment(src,n).splitlines():
-                          if any(k in line.lower() for k in ('settemp','heatcontrol','tempcompensation','dhw','/mode/','/preset/','/set','chmode')):
-                              print(line)
-          for n in tree.body:
-              if isinstance(n,ast.FunctionDef) and any('app.route' in ast.unparse(d) and any(k in ast.unparse(d).lower() for k in ('settemp','control','set_temperature','set_mode','command')) for d in n.decorator_list):
-                  print(ast.get_source_segment(src,n)[:10000])
+              if isinstance(n,ast.FunctionDef) and n.name in ('change_state_route','change_mode_route','change_temp_route','new_tempchange','new_modechange','statechange','new_heatcontrol_change'):
+                  print(n.name,ast.get_source_segment(src,n)[:15000])
+          for line in src.splitlines():
+              if ('statusdict' in line or 'HaierPi_SetTemp' in line or 'HaierPi_DHWSet' in line or 'HaierPi_Mode' in line or 'HaierPi_Preset' in line) and any(k in line.lower() for k in ('settemp','dhw','mode','heatcontrol','preset','power')):
+                  print(line[:250])
           PY
