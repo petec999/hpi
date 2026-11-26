@@ -1,0 +1,180 @@
+"""Validated source transformation for the experimental integrated preview."""
+import ast
+from pathlib import Path
+import runpy
+
+ROOT=Path(__file__).resolve().parents[1]
+MARK="# HOME-IOT ADAPTIVE MODULATION PREVIEW v1"
+WEB=runpy.run_path(str(ROOT/"tools/install-web-ui-v2.py"))
+
+UI_HTML="""<article class="card ctlcard"><h3>AntiON-OFF v2</h3>
+<div class="ctlrow"><select id="am-control" aria-label="Sterowanie modulacją" disabled>
+<option value="legacy">Legacy – oryginalna automatyka</option><option value="manual">Ręczne</option><option value="shadow">Obserwacja</option><option value="auto">Auto – eksperymentalne</option></select>
+<button id="am-save" class="primary" disabled>Zastosuj</button></div>
+<div class="metric"><span>Tryb / zworka (odczyt)</span><strong id="am-actual">—</strong></div>
+<div class="ctlrow"><button id="am-relay-on" disabled>FLimit ON</button><button id="am-relay-off" disabled>FLimit OFF</button></div>
+<div class="metric"><span>Propozycja regulatora</span><strong id="am-proposed">—</strong></div>
+<div class="metric"><span>Stan / ryzyko</span><strong id="am-risk">—</strong></div>
+<div class="metric"><span>Odczytana nastawa CO</span><strong id="am-target">—</strong></div>
+<div class="metric"><span>Prognozowana nadwyżka</span><strong id="am-forecast">—</strong></div>
+<p id="am-reason" role="status">Oczekiwanie na dane.</p>
+<small>Auto jest eksperymentalne. Legacy pozostaje domyślne po restarcie. CWU, odszranianie i wymuszone strefy mają priorytet. Sterowanie ręczne profilem w Auto przełącza na Ręczne.</small></article>"""
+UI_JS="""
+let amState=null,amBusy=false,amDirty=false;
+function amPaint(a){
+ amState=a||null;const v=amState||{};
+ if(!amDirty)$("am-control").value=v.control||"legacy";
+ $("am-control").disabled=!amState||amBusy;
+ $("am-save").disabled=!amState||amBusy||!amDirty;
+ for(const [id,val] of [["am-relay-on","1"],["am-relay-off","0"]])$(id).disabled=!amState||amBusy||!v.ready||v.pending||v.relay===val||!["manual","auto"].includes(v.control);
+ $("am-actual").textContent=v.mode?v.mode+" / FLimit "+(v.relay==="1"?"ON":"OFF"):"—";
+ $("am-proposed").textContent=v.proposed||"—";
+ $("am-risk").textContent=v.risk||"—";
+ $("am-target").textContent=fmt(v.target)+" °C";
+ $("am-forecast").textContent=fmt(v.forecast)+" K";
+ $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";
+}
+$("am-control").addEventListener("change",()=>{amDirty=!!amState&&$("am-control").value!==amState.control;amPaint(amState)});
+async function amSend(key,value){
+ if(!amState||amBusy)return;
+ const expected=key==="adaptive_control"?amState.control:amState.relay;
+ if(expected===value||expected===null)return;
+ amBusy=true;amPaint(amState);
+ const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),20000);
+ try{
+  const res=await fetch("./api/control",{method:"POST",credentials:"same-origin",cache:"no-store",headers:{"Content-Type":"application/json","X-HaierPi-CSRF":document.querySelector('meta[name="wv-csrf"]').content},body:JSON.stringify({key,value,expected}),signal:ctrl.signal});
+  if(!res.ok||res.redirected||!(await res.json()).accepted)throw Error("rejected");
+  amDirty=false;amPaint(null);$("am-reason").textContent="Polecenie przyjęte; czekam na odczyt.";
+ }catch(e){amPaint(null);$("am-reason").textContent="Polecenie niepotwierdzone. Sprawdź aktualny stan; brak automatycznej ponawiania."}
+ finally{clearTimeout(timer);amBusy=false;}
+}
+$("am-save").addEventListener("click",()=>amSend("adaptive_control",$("am-control").value));
+$("am-relay-on").addEventListener("click",()=>amSend("flimiton","1"));
+$("am-relay-off").addEventListener("click",()=>amSend("flimiton","0"));
+"""
+
+def once(s,old,new):
+    if s.count(old)!=1:
+        raise ValueError("Unexpected anchor: "+old[:120])
+    return s.replace(old,new,1)
+
+def patch_web(s):
+    # Start from exactly the earlier, hardware-tested Stage 2 block.
+    s=WEB["patch"](s)
+    base=WEB["BLOCK"]
+    line=next(x for x in base.splitlines() if x.startswith("_WV_HTML = "))
+    html=ast.literal_eval(line.split("=",1)[1].strip())
+    html=once(html,'<article class="card ctlcard"><h3>Zaawansowane</h3>',UI_HTML+'<article class="card ctlcard"><h3>Zaawansowane</h3>')
+    html=once(html,"function plot(){",UI_JS+"\nfunction plot(){")
+    html=once(html,"plot();ctlUpdate(d);","plot();ctlUpdate(d);amPaint(d.adaptive);")
+    html=once(html,"available=false;live={};if(pending", "available=false;live={};amPaint(null);if(pending")
+    b=once(base,line,"_WV_HTML = "+repr(html))
+    b=once(b,'"controls":_wv_controls(g), "control_ready":','"controls":_wv_controls(g), "adaptive":_am.view(), "control_ready":')
+    b=once(b,"    return out\n\ndef _wv_ready",'''    am=_am.view()
+    out["adaptive_control"]=am["control"]
+    out["flimiton"]=am["relay"]
+    return out
+
+def _wv_ready''')
+    b=once(b,'    if key in ("settemp","dhw"):', '''    if key in ("adaptive_control","flimiton"):
+        choices=("legacy","manual","shadow","auto") if key=="adaptive_control" else ("0","1")
+        if value not in choices or expected not in choices:
+            raise ValueError("invalid adaptive control")
+    elif key in ("settemp","dhw"):''')
+    b=once(b,'    if key in ("pch","pdhw"):\n        g["statechange"]', '''    if key=="adaptive_control":
+        raise RuntimeError("selection requires expected state")
+    elif key=="flimiton":
+        _,ok=_am.manual("relay",value)
+        if ok!="success":
+            raise RuntimeError("relay rejected")
+    elif key in ("pch","pdhw"):
+        g["statechange"]''')
+    b=once(b,'_,ok=g["new_presetchange"](value)','_,ok=_am.manual("preset",value)')
+    b=once(b,'if not state["control_ready"] or current is None or current!=expected:', 'if (key!="adaptive_control" and not state["control_ready"]) or current is None or current!=expected:')
+    b=once(b,'            _wv_execute(g,key,value)', '''            if key=="adaptive_control":
+                _am.choose(value,expected)
+            elif key=="flimiton":
+                with _am.lock:
+                    a=_am.view()
+                    if a["control"] not in ("manual","auto") or a["relay"]!=expected or not a["ready"] or a["pending"]:
+                        raise ValueError("relay control unavailable")
+                    _wv_execute(g,key,value)
+            else:
+                _wv_execute(g,key,value)''')
+    return once(s,base,b)
+
+def patch(source):
+    if MARK in source:
+        if source.count(MARK)!=1 or "_am.tick()" not in source or 'id="am-control"' not in ast.literal_eval(next(l for l in source.splitlines() if l.startswith("_WV_HTML = ")).split("=",1)[1].strip()):
+            raise ValueError("Incomplete adaptive patch")
+        return source
+    # Match known call sites by AST and reject new writers. Do not edit arbitrary strings.
+    tree=ast.parse(source)
+    functions={n.name:n for n in tree.body if isinstance(n,ast.FunctionDef)}
+    expected={
+        "on_message":(1,1),
+        "GetParameters":(2,2),
+        "_tempzone_flimit_restore_guard":(0,2),
+        "curvecalc":(10,4),
+        "flimitreset":(0,1),
+        "deltacheck":(3,2),
+        "change_mode_route":(1,0),
+        "change_flimitrelay_route":(0,1),
+    }
+    lines=source.splitlines(keepends=True)
+    changes=[]
+    for name,n in functions.items():
+        calls=[x for x in ast.walk(n) if isinstance(x,ast.Call) and isinstance(x.func,ast.Name) and x.func.id in ("new_presetchange","flimitchange")]
+        if not calls:
+            continue
+        counts=tuple(sum(x.func.id==k for x in calls) for k in ("new_presetchange","flimitchange"))
+        if counts!=expected.pop(name,None):
+            raise ValueError("Unrecognized output writer: "+name+" "+str(counts))
+        for x in calls:
+            kind="preset" if x.func.id=="new_presetchange" else "relay"
+            if len(x.args)!=1 or x.keywords or x.lineno!=x.end_lineno:
+                raise ValueError("Unexpected call format")
+            arg=ast.get_source_segment(source,x.args[0])
+            if name=="curvecalc":
+                repl='_am.legacy('+repr(kind)+','+arg+',zone)'
+            elif name in ("GetParameters","_tempzone_flimit_restore_guard"):
+                repl='_am.priority_write('+repr(kind)+','+arg+')'
+            elif name in ("on_message","change_mode_route","change_flimitrelay_route"):
+                repl='_am.manual('+repr(kind)+','+arg+')'
+            else:
+                # Existing legacy checks run only when allowed by legacy_tick.
+                continue
+            # AST columns are UTF-8 offsets; replacements operate on encoded lines.
+            changes.append((x.lineno-1,x.col_offset,x.end_col_offset,repl))
+    if expected:
+        raise ValueError("Missing expected output writers: "+repr(expected))
+    for i,a,b,repl in sorted(changes,reverse=True):
+        raw=lines[i].encode("utf-8")
+        lines[i]=(raw[:a]+repl.encode("utf-8")+raw[b:]).decode("utf-8")
+    s="".join(lines)
+    s=once(s,"    deltacheck(twitwo)\n    flimitreset()", '    _am.legacy_tick("deltacheck",twitwo)\n    _am.legacy_tick("flimitreset")')
+    s=once(s,"    log_status_snapshot(30)","    _am.tick()\n    log_status_snapshot(30)")
+    for key in ("101","141","201","241"):
+        old="                    R"+key+"=T"+key+"\n"
+        s=once(s,old,old+'                    _am.note("R'+key+'",T'+key+')\n')
+    # Serialize the existing single-slot write mailbox across all callers.
+    n=next(n for n in ast.parse(s).body if isinstance(n,ast.FunctionDef) and n.name=="set_newframe")
+    ls=s.splitlines(keepends=True)
+    start=n.body[0].lineno-1
+    ls[start:n.end_lineno]=["    with _am.serial_lock:\n"]+["    "+l if l.strip() else l for l in ls[start:n.end_lineno]]
+    s="".join(ls)
+    # Embedded private modules avoid installing a new package into the live Python env.
+    policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")
+    runtime=(ROOT/"adaptive/live_runtime.py").read_text(encoding="utf-8").replace("from adaptive.regulator import","from _hpi_adaptive_policy import")
+    block="\n"+MARK+"\nimport sys as _am_sys, types as _am_types\n"
+    for name,code in (("_hpi_adaptive_policy",policy),("_hpi_adaptive_runtime",runtime)):
+        block+=f'_am_module = _am_types.ModuleType({name!r})\n_am_sys.modules[{name!r}] = _am_module\nexec(compile({code!r}, {name!r}, "exec"), _am_module.__dict__)\n'
+    block+="_am = _am_module.Runtime(globals())\n# HOME-IOT ADAPTIVE MODULATION END\n\n"
+    # Defined before MQTT callback, reader and any core output call.
+    n=next(n for n in ast.parse(s).body if isinstance(n,ast.FunctionDef) and n.name=="on_message")
+    ls=s.splitlines(keepends=True)
+    ls.insert(min([n.lineno]+[d.lineno for d in n.decorator_list])-1,block)
+    s="".join(ls)
+    s=patch_web(s)
+    compile(s,"main.py","exec")
+    return s
