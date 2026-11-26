@@ -249,7 +249,8 @@ class Runtime:
 
     def idle_snapshot_valid(self,s,zone,curve):
         # A stopped compressor is not necessarily a stopped heating system.
-        # Require CH enabled (R101 + core status), but not heat demand GPIO.
+        # Require CH enabled (R101 + pch), not ch_heating (active operation)
+        # or heat demand GPIO. Real idle telemetry reports ch_heating=off.
         # Never change mode in cooling, off, DHW, protection or priority zones.
         with self.frames_lock:
             stamp,frame=self.frames["R101"]
@@ -258,7 +259,7 @@ class Runtime:
         return (self.activation_reason(s,zone,curve) is None and s.fresh
                 and s.hz==0 and s.requested_hz==0
                 and bool(power&1 and power&4 and not power&2)
-                and self.flag(self.raw("ch_heating"))
+                and self.flag(self.raw("pch"))
                 and 0<=time.monotonic()-stamp<=self.MAX_AGE
                 and 0<=time.monotonic()-idle_stamp<=self.MAX_AGE)
 

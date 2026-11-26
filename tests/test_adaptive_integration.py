@@ -33,7 +33,7 @@ class RuntimeTest(unittest.TestCase):
                     freqlimitpin=1,heatdemandpin=2,get_temp_zone=lambda v:"normal",
                     statusdict={k:{"value":"off"} for k in ("defrost","antifreeze","service_set_pump","service_set_heater","antifreeze_custom","anti_legionella_active","ch_cooling")},
                     flimit="auto",presetautochange="auto",newframe=[])
-        self.g["statusdict"].update(ch_heating={"value":"on"},hcurve={"value":32},outtemp={"value":1})
+        self.g["statusdict"].update(pch={"value":"on"},ch_heating={"value":"on"},hcurve={"value":32},outtemp={"value":1})
         self.g["new_presetchange"]=lambda v:(self.writes.append(("preset",v)),True)
         self.g["flimitchange"]=lambda v:(self.writes.append(("relay",v)),"success")
         self.r=Runtime(self.g)
@@ -145,6 +145,7 @@ class RuntimeTest(unittest.TestCase):
             FakeGPIO.values[1]=v
             return "limit","success"
         self.g["flimitchange"]=relay_write
+        self.g["statusdict"]["ch_heating"]["value"]="off"
         with patch.dict(FakeGPIO.values,{1:"0",2:"0"}):
             with patch.object(Decoder,"GetCompInfo",return_value=[0,0,2,320,30]), patch.object(Decoder,"GetMode",return_value="turbo") as mode:
                 self.r.tick()
@@ -176,12 +177,13 @@ class RuntimeTest(unittest.TestCase):
         self.r.choose("auto","legacy")
         with patch.object(Decoder,"GetCompInfo",return_value=[0,0,2,320,30]) as comp:
             self.r.tick()
+            self.g["statusdict"]["pch"]["value"]="off"
             self.g["statusdict"]["ch_heating"]["value"]="off"
             self.now.return_value+=30
             self.refresh()
             self.r.tick()
             self.assertFalse(self.writes)
-            self.g["statusdict"]["ch_heating"]["value"]="on"
+            self.g["statusdict"]["pch"]["value"]="on"
             self.g["get_temp_zone"]=lambda v:"frost"
             self.now.return_value+=30
             self.refresh()
@@ -193,6 +195,21 @@ class RuntimeTest(unittest.TestCase):
             self.refresh()
             self.r.tick()
             self.assertFalse(self.writes)
+
+    def test_real_idle_co_enabled_but_not_actively_heating(self):
+        # Reproduce field telemetry: pch=on, ch_heating=off, demand=1,
+        # normal zone, zero requested and actual Hz, turbo+FLimit.
+        self.g["statusdict"]["ch_heating"]["value"]="off"
+        self.r.choose("auto","legacy")
+        with patch.object(Decoder,"GetCompInfo",return_value=[0,0,0,320,25]):
+            self.r.tick()
+            self.assertEqual(self.r.status["proposed"],"quiet+FLimit")
+            self.now.return_value+=30
+            self.refresh()
+            self.r.tick()
+            self.assertEqual(self.writes,[("preset","quiet")])
+            self.assertEqual(self.r.control,"auto")
+            self.assertIsNone(self.r.learning.trial)
 
     def test_idle_shadow_never_writes(self):
         self.r.choose("shadow","legacy")

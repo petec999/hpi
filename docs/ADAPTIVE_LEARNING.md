@@ -17,3 +17,5 @@ WWW v2 includes native curve configuration editor with 14-point table/plot, manu
 Status presentation: WWW uses a Polish reason for normal compressor stops, requested stop, collecting samples and invalid measurement conditions. The underlying policy decision, timing, safeguards and machine-readable reason/risk remain unchanged.
 
 Normal CO idle preparation: after two distinct fresh zero-Hz (actual and requested) observations, Auto enables FLimit then selects Quiet, each with existing confirmation. Only with CH enabled and normal zone, no protection or priority. Shadow does not write. The running policy takes over when the compressor starts; idle changes are excluded from learning. Native minimum startup frequency remains firmware-controlled.
+
+Idle eligibility correction: use R101 CH enable plus pch, not ch_heating, which becomes off at normal compressor idle. Running-policy guards are unchanged. Regression test covers enabled CO, inactive heating, demand asserted and both frequencies zero.
