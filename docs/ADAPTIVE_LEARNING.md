@@ -13,3 +13,5 @@ WWW navigation: `/curvecalc` returns a JSON calculation and is not a page. The A
 The curve calculator in v2 is an authenticated POST with expected-state validation, current readiness and no automatic retry. It calls the existing curvecalc handler; the existing curve configuration editor is linked directly at /settings#heatingcurve_section, verified in upstream Stable templates. Full native v2 curve editing is not implemented.
 
 WWW v2 includes native curve configuration editor with 14-point table/plot, manual/static/auto selection and coefficients. It edits the existing configuration, not a second curve. Direct mode is read-only. Save is explicit, validated, conflict-checked and atomic; regular core calculation applies the new settings. Adaptive learning is reset for interrupted trial but stored model is retained.
+
+Status presentation: WWW uses a Polish reason for normal compressor stops, requested stop, collecting samples and invalid measurement conditions. The underlying policy decision, timing, safeguards and machine-readable reason/risk remain unchanged.

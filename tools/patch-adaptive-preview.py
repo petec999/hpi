@@ -274,6 +274,17 @@ def curve_editor_api(source):
                 with _am.lock:''')
     return source
 
+def status_ui(html):
+    old=' $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";'
+    new=' $("am-reason").textContent=v.fault||v.reason_pl||v.reason||"Brak odczytu.";'
+    if new not in html:
+        html=once(html,old,new)
+    old=' $("am-risk").textContent=v.risk||"—";'
+    new=' $("am-risk").textContent=({paused:"Oczekiwanie",balanced:"Stabilizacja / obserwacja",surplus:"Nadwyżka mocy",shortfall:"Niedobór mocy",cycling_risk:"Ryzyko taktowania",cycling_risk_at_minimum:"Ryzyko taktowania przy minimum",surplus_at_minimum:"Nadwyżka przy minimum",efficiency_probe:"Próba redukcji mocy"})[v.risk]||v.risk||"—";'
+    if new not in html:
+        html=once(html,old,new)
+    return html
+
 def learning_block():
     policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")
     runtime=(ROOT/"adaptive/live_runtime.py").read_text(encoding="utf-8").replace("from adaptive.regulator import","from _hpi_adaptive_policy import")
@@ -293,6 +304,7 @@ def learning_ui(source):
         html=once(html,old,'<a href="#am-curve-editor">Krzywa grzewcza</a>' if 'id="am-curve-editor"' in html else '<a href="/settings#heatingcurve_section">Edytuj krzywą</a>' if 'id="am-curve-recalc"' in html else '<a href="/">Panel oryginalny</a>')
     html=curve_editor_ui(curve_ui(activation_ui(html)))
     if 'id="am-learning"' in html:
+        html=status_ui(html)
         return curve_editor_api(curve_api(activation_api(source if html==ast.literal_eval(line.split("=",1)[1].strip()) else once(source,line,"_WV_HTML = "+repr(html)))))
     html=once(html,'<p id="am-reason"', '<div class="metric"><span>Uczenie (obserwacje / konteksty)</span><strong id="am-learning">—</strong></div><div class="metric"><span>Pamięć / dostrojenie</span><strong id="am-learning-detail">—</strong></div><p id="am-reason"')
     html=once(html,' $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";',
@@ -300,6 +312,7 @@ def learning_ui(source):
  $("am-learning").textContent=l?l.observations+" / "+l.contexts:"—";
  $("am-learning-detail").textContent=l?(l.storage_error?"RAM (błąd zapisu)":l.unsaved?"RAM (oczekuje na zapis)":"Zapis / brak nowych danych")+" · "+fmt(v.down_confirm)+" s / "+fmt(v.surplus_band)+" K":"—";
  $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";''')
+    html=status_ui(html)
     return curve_editor_api(curve_api(activation_api(once(source,line,"_WV_HTML = "+repr(html)))))
 
 def patch(source):

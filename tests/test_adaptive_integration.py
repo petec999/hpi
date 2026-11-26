@@ -124,6 +124,28 @@ class RuntimeTest(unittest.TestCase):
             self.assertFalse(self.writes)
             self.assertEqual(self.r.control,"legacy")
 
+    def test_pause_reason_stopped_compressor_and_resume(self):
+        self.r.choose("auto","legacy")
+        with patch.object(Decoder,"GetCompInfo",return_value=[0,0,2,320,30]):
+            self.r.tick()
+            self.assertEqual(self.r.status["risk"],"paused")
+            self.assertIn("Postój sprężarki",self.r.status["reason_pl"])
+            self.assertEqual(self.r.control,"auto")
+            self.assertFalse(self.writes)
+        self.now.return_value+=30
+        self.refresh()
+        self.r.tick()
+        self.assertIn("Zbieranie pomiarów",self.r.status["reason_pl"])
+        self.assertEqual(self.r.control,"auto")
+
+    def test_pause_reason_does_not_hide_bad_data(self):
+        from dataclasses import replace
+        s,_,_,_=self.r.snapshot()
+        reason="paused: operating state or data invalid"
+        self.assertIn("pomiarów",self.r.display_reason(replace(s,hz=0,fresh=False),reason))
+        self.assertIn("kończy pracę",self.r.display_reason(replace(s,requested_hz=0),reason))
+        self.assertIn("Brak aktywnego",self.r.display_reason(replace(s,heating=False),reason))
+
     def test_auto_manual_handoff(self):
         self.r.choose("auto","legacy")
         self.r.manual("preset","eco")
@@ -207,6 +229,8 @@ class SourceIntegration(unittest.TestCase):
             self.assertIn('id="am-curve-recalc"',html)
             self.assertIn('href="#am-curve-editor"',html)
             self.assertIn('id="am-c-save"',html)
+            self.assertIn('v.reason_pl||v.reason',html)
+            self.assertIn('paused:"Oczekiwanie"',html)
             self.assertEqual(html.count('id="am-curve-editor"'),1)
             self.assertTrue(all('id="am-cp-'+str(i)+'"' in html for i in range(14)))
             self.assertIn('g["curvecalc"]()',src)

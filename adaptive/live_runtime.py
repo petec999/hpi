@@ -214,6 +214,34 @@ class Runtime:
         self.status={"reason":reason,"risk":"paused"}
         self.g["logging"].warning("Adaptive modulation disarmed: %s",reason)
 
+    @staticmethod
+    def display_reason(s,reason):
+        # Presentation only: never change the decision, thresholds or timing.
+        if reason=="collecting samples":
+            return "Zbieranie pomiarów – oczekiwanie na stabilny odczyt"
+        if reason!="paused: operating state or data invalid":
+            return reason
+        values=(s.now,s.target,s.return_temp,s.supply_temp,s.hz,s.requested_hz)
+        if not s.fresh or not all(type(v) in (int,float) and math.isfinite(v) for v in values):
+            return "Brak aktualnych lub poprawnych pomiarów"
+        if not (10<=s.target<=65 and -10<=s.return_temp<=85 and -10<=s.supply_temp<=85) or min(s.hz,s.requested_hz)<0:
+            return "Pomiary poza zakresem regulatora"
+        if s.error:
+            return "Aktywny błąd pompy"
+        if s.defrost:
+            return "Odszranianie – regulacja wstrzymana"
+        if s.dhw:
+            return "Grzanie CWU – regulacja CO wstrzymana"
+        if s.override:
+            return "Aktywna funkcja ochronna lub serwisowa"
+        if s.hz==0:
+            return "Postój sprężarki – oczekiwanie na wznowienie ogrzewania"
+        if s.requested_hz==0:
+            return "Pompa kończy pracę – oczekiwanie na wznowienie ogrzewania"
+        if not s.heating:
+            return "Brak aktywnego ogrzewania CO"
+        return "Oczekiwanie na poprawny stan pracy pompy"
+
     def tick(self):
         now=time.monotonic()
         if now-self.last_tick<self.PERIOD:
@@ -288,7 +316,7 @@ class Runtime:
                 self.reg.cfg=self.learning.settings(s,outdoor)
             d=self.reg.step(s,control=self.control)
             label=lambda i: None if i is None else LEVELS[i][0]+("+FLimit" if LEVELS[i][1] else "")
-            self.status={"reason":d.reason,"risk":d.risk,"actual":label(d.current),
+            self.status={"reason":d.reason,"reason_pl":self.display_reason(s,d.reason),"risk":d.risk,"actual":label(d.current),
                          "proposed":label(d.proposed),"target":s.target,
                          "supply_error":d.supply_error,"forecast":d.predicted_surplus,
                          "deficit_integral":d.deficit_integral,
