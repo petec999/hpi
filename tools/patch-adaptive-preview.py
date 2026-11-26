@@ -311,7 +311,7 @@ def status_ui(html):
     if 'value="experiment"' not in html:
         html=once(html,'<option value="auto">Auto – eksperymentalne</option>', '<option value="auto">Auto – eksperymentalne</option><option value="experiment">Eksperyment – test konfiguracji</option>')
         html=once(html,'auto:"Adaptive Auto"', 'auto:"Adaptive Auto",experiment:"Eksperyment"')
-        html=once(html,'<p id="am-hysteresis-mean"></p>','<p id="am-hysteresis-mean"></p><p id="am-experiment"></p><small>Eksperyment zmienia tryb i FLimit tylko przy potwierdzonym postoju; 3 cykle na konfigurację, maks. 7 dni; zwykła Obserwacja nie zmienia ustawień.</small>')
+        html=once(html,'<p id="am-hysteresis-mean"></p>','<p id="am-hysteresis-mean"></p><p id="am-experiment"></p><small>Eksperyment zmienia tryb i FLimit tylko przy potwierdzonym postoju; 3 cykle na konfigurację, bez limitu czasu; zwykła Obserwacja nie zmienia ustawień.</small>')
         html=once(html,' $("am-hysteresis-mean").textContent="Średnia Twi/Two: "+hs(h&&h.mean);',' $("am-hysteresis-mean").textContent="Średnia Twi/Two: "+hs(h&&h.mean);\n const ex=v.experiment;\n $("am-experiment").textContent=ex&&ex.since?"Eksperyment: "+ex.levels.map((x,i)=>x+" "+ex.counts[i]+"/"+ex.per_level).join(" · "):"";'.replace("\n","\n"))
     return html
 

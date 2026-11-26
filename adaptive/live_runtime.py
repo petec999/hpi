@@ -15,7 +15,6 @@ class Runtime:
     PERIOD=30
     EXPERIMENT_LEVELS=(("eco",False),("quiet",False),("quiet",True),("eco",True),("turbo",True),("turbo",False))
     EXPERIMENT_CYCLES=3
-    EXPERIMENT_TIMEOUT=7*86400
     SIZES={"R101":6,"R141":16,"R201":1,"R241":22}
     def __init__(self,g,learning_path=None):
         self.g=g
@@ -31,7 +30,6 @@ class Runtime:
         self.observer=HysteresisObserver(observer_path,g.get("logging"))
         self.observer_frames=None
         self.experiment_since=None
-        self.experiment_started=None
         self.experiment_idle=None
         self.experiment_initial=None
         self.last_tick=0
@@ -220,7 +218,6 @@ class Runtime:
             self.experiment_idle=None
             if mode=="experiment":
                 self.experiment_since=time.time()
-                self.experiment_started=time.monotonic()
                 self.experiment_initial=(s.mode,s.relay)
             self.learning.cancel()
             self.learning_before=None
@@ -375,8 +372,7 @@ class Runtime:
         # Opt-in, native idle only. Never change demand, water target or Fset.
         counts=self.experiment_counts()
         idx=next((i for i,n in enumerate(counts) if n<self.EXPERIMENT_CYCLES),None)
-        expired=self.experiment_started is None or s.now-self.experiment_started>=self.EXPERIMENT_TIMEOUT
-        done=idx is None or expired
+        done=idx is None
         goal=self.experiment_initial if done else self.EXPERIMENT_LEVELS[idx]
         actual=(s.mode,s.relay)
         label=lambda x:x[0]+("+FLimit" if x[1] else " / FLimit OFF")

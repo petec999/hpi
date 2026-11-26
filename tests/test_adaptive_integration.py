@@ -244,6 +244,18 @@ class RuntimeTest(unittest.TestCase):
                 self.r.choose("shadow","experiment")
                 self.assertEqual(self.r.control,"manual")
 
+    def test_experiment_has_no_calendar_timeout(self):
+        self.r.choose("experiment","legacy")
+        original=self.r.experiment_initial
+        self.now.return_value+=8*86400
+        self.refresh()
+        s,zone,curve,_=self.r.snapshot()
+        self.r.experiment_tick(s,zone,curve)
+        self.assertEqual(self.r.control,"experiment")
+        self.assertEqual(self.r.experiment_initial,original)
+        self.assertEqual(self.r.status["proposed"],"eco / FLimit OFF")
+        self.assertFalse(self.writes)
+
     def test_experiment_priority_cancels(self):
         self.r.choose("experiment","legacy")
         self.r.priority_write("preset","quiet")
