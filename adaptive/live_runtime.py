@@ -21,7 +21,8 @@ class Runtime:
         self.status={"reason":"Legacy; no adaptive writes","risk":"paused"}
         self.fault=None
         self.invalid_since=None
-        self.reported_ready=False
+        self.ready_log_frames=None
+        self.ready_log_count=0
 
     def note(self,key,regs):
         # Separate lock: never hold controller lock in the serial reader.
@@ -51,6 +52,12 @@ class Runtime:
             raise ValueError("nonfinite data")
         return n
 
+    def gpio(self,pin):
+        value=self.g["GPIO"].input(self.g[pin])
+        if type(value) is not str or value not in ("0","1"):
+            raise ValueError("GPIO readback unavailable: "+pin)
+        return value=="1"
+
     def snapshot(self):
         now=time.monotonic()
         with self.frames_lock:
@@ -65,9 +72,9 @@ class Runtime:
         mode=str(p.GetMode(c)).lower()
         if mode not in ("quiet","eco","turbo"):
             raise ValueError("unknown preset readback")
-        relay=self.flag(self.g["GPIO"].input(self.g["freqlimitpin"]))
+        relay=self.gpio("freqlimitpin")
         power=int(a[0])&255
-        heating=bool(power&1 and power&4 and not power&2) and self.flag(self.g["GPIO"].input(self.g["heatdemandpin"]))
+        heating=bool(power&1 and power&4 and not power&2) and self.gpio("heatdemandpin")
         valve=str(p.Get3way(b)).upper()
         if valve not in ("CH","DHW"):
             raise ValueError("unknown valve")
@@ -94,7 +101,7 @@ class Runtime:
         s=Sample(now,target,self.number(water[0]),self.number(water[1]),
                  self.number(ci[1]),self.number(ci[0]),mode,relay,heating,
                  defrost_on,True,int(error),valve=="DHW",override)
-        zone=self.g["get_temp_zone"](self.raw("outtemp"))
+        zone=self.g["get_temp_zone"](self.number(self.raw("outtemp")))
         if zone not in ("normal","frost","warm"):
             raise ValueError("invalid zone")
         curve=self.number(self.raw("hcurve"))
@@ -175,12 +182,15 @@ class Runtime:
             return
         try:
             self.last_tick=now
-            if not self.reported_ready:
+            if self.ready_log_count<3:
                 with self.frames_lock:
-                    good=set(self.frames)==set(self.SIZES) and all(0<=now-t<=self.MAX_AGE for t,_ in self.frames.values())
-                if good:
+                    stamps={k:t for k,(t,_) in self.frames.items()}
+                good=set(stamps)==set(self.SIZES) and all(0<=now-t<=self.MAX_AGE for t in stamps.values())
+                if good and (self.ready_log_frames is None or
+                             all(t>self.ready_log_frames[k] for k,t in stamps.items())):
                     self.g["logging"].info("Adaptive integration: four complete recent frames")
-                    self.reported_ready=True
+                    self.ready_log_frames=stamps
+                    self.ready_log_count+=1
             if self.control=="legacy" and self.pending is None:
                 return
             try:
@@ -243,7 +253,7 @@ class Runtime:
                         self.fail("preset write not acknowledged; waiting for readback")
                 elif relay!=s.relay:
                     _,ok=self.g["flimitchange"]("1" if relay else "0")
-                    if ok!="success" or self.flag(self.g["GPIO"].input(self.g["freqlimitpin"]))!=relay:
+                    if ok!="success" or self.gpio("freqlimitpin")!=relay:
                         self.fail("FLimit GPIO readback mismatch")
                 else:
                     self.pending=None
