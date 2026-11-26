@@ -2,14 +2,14 @@
 
 **Status (2026-11-26):** CI passed on Python 3.9/3.11 and Stable writer audit. Real pump validation remains open; this is not a production release.
 
-[Latest verified functional commit](https://github.com/petec999/hpi/commit/dde94a1fa23f2b772e55787597b09966389b63da) · [CI results](https://github.com/petec999/hpi/actions/runs/45873317440) · [Operating and rollback guide](docs/INTEGRATED_ADAPTIVE_PREVIEW.md) · [Handover](docs/ADAPTIVE_HANDOVER.md)
+[Latest verified functional commit](https://github.com/petec999/hpi/commit/76eabc3f714f92c8606189e22ad5e8520c2ef27a) · [CI results](https://github.com/petec999/hpi/actions/runs/45875592144) · [Operating and rollback guide](docs/INTEGRATED_ADAPTIVE_PREVIEW.md) · [Handover](docs/ADAPTIVE_HANDOVER.md)
 
 ## Update a compatible existing HaierPi
 
 Use the pinned functional revision, not an unreviewed branch HEAD. Run on the HaierPi host as root.
 
 ```bash
-REF=dde94a1fa23f2b772e55787597b09966389b63da
+REF=76eabc3f714f92c8606189e22ad5e8520c2ef27a
 curl -fsSL "https://raw.githubusercontent.com/petec999/hpi/$REF/install-adaptive-preview.sh" -o /tmp/install-adaptive-preview.sh && bash /tmp/install-adaptive-preview.sh "$REF" --dry-run
 ```
 
@@ -91,8 +91,17 @@ Published archives and tags are immutable; later README updates do not modify th
 
 ## Supply STOP model and restart behavior (26 November 2026)
 
-Verified functional revision: `dde94a1fa23f2b772e55787597b09966389b63da` ([CI](https://github.com/petec999/hpi/actions/runs/45873317440)). STOP risk uses current Two and its short-horizon forecast against actual water target +5 K, with a provisional 1 K warning margin; Twi remains a return-demand and surplus signal. This is an empirical model, not a factory threshold. No changes to native demand, temperature target or compressor protection. Learning starts in a new file `.adaptive-learning-two-v3.json`, retaining old files; the passive observer continues using the same store. Explicit Auto selection is persisted atomically in `.adaptive-owner-v1`. After reboot, Auto waits in Manual hold for two independent fresh frame sets, valid normal CO, demand and no priority override. Explicit Manual/Legacy/Shadow/Experiment selection cancels Auto resume; failures persist Manual where storage is writable. If storage cannot be updated, a visible error warns that a saved choice may survive a restart. No experiment or pending command is resumed. Hardware verification remains open.
+Verified functional revision: `76eabc3f714f92c8606189e22ad5e8520c2ef27a` ([CI](https://github.com/petec999/hpi/actions/runs/45875592144)). STOP risk uses current Two and its short-horizon forecast against actual water target +5 K, with a provisional 1 K warning margin; Twi remains a return-demand and surplus signal. This is an empirical model, not a factory threshold. No changes to native demand, temperature target or compressor protection. Learning starts in a new file `.adaptive-learning-two-v3.json`, retaining old files; the passive observer continues using the same store. Explicit Auto selection is persisted atomically in `.adaptive-owner-v1`. After reboot, Auto waits in Manual hold for two independent fresh frame sets, valid normal CO, demand and no priority override. Explicit Manual/Legacy/Shadow/Experiment selection cancels Auto resume; failures persist Manual where storage is writable. If storage cannot be updated, a visible error warns that a saved choice may survive a restart. No experiment or pending command is resumed. Hardware verification remains open.
 
 ### Learning storage capacity
 
 Auto response learning retains up to 1024 contexts in the existing `.adaptive-learning-two-v3.json` file (unchanged schema, up to 512 KiB on load). Dirty state is saved atomically at most once per 30 minutes per process; the first dirty save can be immediate if no file was loaded. The least recently updated context is evicted only when adding a new context at capacity. Existing valid learning records survive the update. A sudden outage may lose unsaved observations; an incomplete trial is not restored. The separate passive hysteresis observer retains its existing 128-cycle limit and five-minute save cadence.
+
+
+## Adaptive report
+
+In WWW v2 select **Raport Adaptive**, or open `/v2/adaptive-report`. It is an authenticated read-only page. Refresh on demand; JSON and CSV endpoints export observed daily groups, learned contexts and recent events. No SQLite and no external connection. Data is saved to `/opt/haier/.adaptive-report-v1.json` independently of the learning and hysteresis stores; dirty saves at most once per 30 minutes. Retains up to 90 UTC days/2048 daily groups, 512 recent events and cumulative scores since report initialization. A restart loses in-flight cycles and unsaved data, not saved aggregates. Existing learned contexts are shown immediately; new score counts start with the report.
+
+Performance sampling uses independent fresh four-frame sets in eligible normal CO, with demand and no protection/priority. It counts observed Fset starts, complete Fset runs confirmed by Fact, actual running time by preset/FLimit and observed coverage; preset or FLimit changes do not break a performance cycle. Gaps, priority or owner/target-band changes interrupt it. Counts are not whole-day meter totals. Weather/target comparison groups by 5 K outdoor and 3 K target bands, and displays only groups observed under both Legacy and Auto; sample counts and observation time remain visible. Historical Home Assistant exports are **not automatically imported** and owner attribution for old logs is not assumed. No causal savings/COP claim. Do not switch a working installation to Legacy solely to fill the report.
+
+Reporting is observational; controller behavior is unchanged. Hardware/browser verification still open. Functional commit `76eabc3f714f92c8606189e22ad5e8520c2ef27a`: [passing CI](https://github.com/petec999/hpi/actions/runs/45875592144).

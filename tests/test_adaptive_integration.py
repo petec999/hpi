@@ -371,6 +371,19 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(self.r.control,"manual")
         self.assertFalse(self.writes)
 
+    def test_report_view_readonly_and_learning_values(self):
+        self.r.learning.record("0:10:5:4",1,1,1,0)
+        self.r.learning.record("0:10:5:4",1,1,1,0)
+        self.r.learning.record("0:10:5:4",1,1,1,0)
+        d=self.r.report_view()
+        self.assertEqual(d["learning"]["contexts"],1)
+        self.assertEqual(d["learning"]["rows"][0]["down_confirm"],60)
+        self.assertEqual(d["scores"]["1"],3)
+        self.assertEqual(self.r.control,"legacy")
+        self.assertFalse(self.writes)
+        d["learning"]["rows"][0]["score"]=-1
+        self.assertEqual(self.r.report_view()["learning"]["rows"][0]["score"],1)
+
     def test_auto_disarm_on_lost_telemetry(self):
         self.r.choose("auto","legacy")
         for t in range(1090,1361,30):
@@ -399,6 +412,16 @@ class SourceIntegration(unittest.TestCase):
             html=ast.literal_eval(next(l for l in src.splitlines() if l.startswith("_WV_HTML = ")).split("=",1)[1].strip())
             self.assertNotIn('href="/curvecalc"',html)
             self.assertIn('id="am-owner"',html)
+            self.assertIn('href="/v2/adaptive-report"',html)
+            report_routes={n.name:n for n in ast.parse(src).body if isinstance(n,ast.FunctionDef) and n.name.startswith("_wv_adaptive_report_")}
+            self.assertEqual(set(report_routes),{"_wv_adaptive_report_page","_wv_adaptive_report_json","_wv_adaptive_report_csv"})
+            for name,n in report_routes.items():
+                self.assertTrue(any(isinstance(d,ast.Name) and d.id=="login_required" for d in n.decorator_list))
+                self.assertTrue(any(isinstance(d,ast.Call) and isinstance(d.func,ast.Attribute) and d.func.attr=="route" and any(k.arg=="methods" and ast.literal_eval(k.value)==["GET"] for k in d.keywords) for d in n.decorator_list))
+            report_html=ast.literal_eval(next(l for l in src.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = ")).split("=",1)[1].strip())
+            self.assertIn('id="compare"',report_html)
+            self.assertIn('/v2/api/adaptive-report.csv?kind=learning',report_html)
+            self.assertIn('id="events"',report_html)
             self.assertIn('activation_blocker',html)
             self.assertIn('id="am-curve-recalc"',html)
             self.assertIn('href="#am-curve-editor"',html)

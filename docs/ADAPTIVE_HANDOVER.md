@@ -88,3 +88,12 @@ Verified functional revision: `dde94a1fa23f2b772e55787597b09966389b63da` ([CI](h
 ### Learning storage capacity
 
 Auto response learning retains up to 1024 contexts in the existing `.adaptive-learning-two-v3.json` file (unchanged schema, up to 512 KiB on load). Dirty state is saved atomically at most once per 30 minutes per process; the first dirty save can be immediate if no file was loaded. The least recently updated context is evicted only when adding a new context at capacity. Existing valid learning records survive the update. A sudden outage may lose unsaved observations; an incomplete trial is not restored. The separate passive hysteresis observer retains its existing 128-cycle limit and five-minute save cadence.
+
+
+## Adaptive report
+
+In WWW v2 select **Raport Adaptive**, or open `/v2/adaptive-report`. It is an authenticated read-only page. Refresh on demand; JSON and CSV endpoints export observed daily groups, learned contexts and recent events. No SQLite and no external connection. Data is saved to `/opt/haier/.adaptive-report-v1.json` independently of the learning and hysteresis stores; dirty saves at most once per 30 minutes. Retains up to 90 UTC days/2048 daily groups, 512 recent events and cumulative scores since report initialization. A restart loses in-flight cycles and unsaved data, not saved aggregates. Existing learned contexts are shown immediately; new score counts start with the report.
+
+Performance sampling uses independent fresh four-frame sets in eligible normal CO, with demand and no protection/priority. It counts observed Fset starts, complete Fset runs confirmed by Fact, actual running time by preset/FLimit and observed coverage; preset or FLimit changes do not break a performance cycle. Gaps, priority or owner/target-band changes interrupt it. Counts are not whole-day meter totals. Weather/target comparison groups by 5 K outdoor and 3 K target bands, and displays only groups observed under both Legacy and Auto; sample counts and observation time remain visible. Historical Home Assistant exports are **not automatically imported** and owner attribution for old logs is not assumed. No causal savings/COP claim. Do not switch a working installation to Legacy solely to fill the report.
+
+Reporting is observational; controller behavior is unchanged. Hardware/browser verification still open. Functional commit `76eabc3f714f92c8606189e22ad5e8520c2ef27a`: [passing CI](https://github.com/petec999/hpi/actions/runs/45875592144).
