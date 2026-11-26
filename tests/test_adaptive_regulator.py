@@ -93,6 +93,14 @@ class TestPolicy(unittest.TestCase):
     def test_deficit_can_release_lowest_envelope(self):
         ds=self.series(Regulator(),level=0,supply=29,hz=40,end=300)
         self.assertEqual(ds[-1].proposed,1)
+    def test_native_stop_request_no_proposal(self):
+        ds=self.series(Regulator(),level=5,supply=36,ret=34,requested_hz=0,end=900)
+        self.assertTrue(all(d.current==d.proposed for d in ds))
+        self.assertTrue(all(d.risk=="paused" for d in ds))
+    def test_risk_visible_during_settling(self):
+        ds=self.series(Regulator(),level=0,supply=36,ret=34,end=120)
+        self.assertEqual(ds[-1].risk,"cycling_risk_at_minimum")
+        self.assertEqual(ds[-1].proposed,0)
     def test_balanced_low_frequency_no_probe(self):
         ds=self.series(Regulator(),hz=24,end=2400)
         self.assertTrue(all(d.proposed==1 for d in ds))
