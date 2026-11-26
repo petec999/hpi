@@ -60,23 +60,21 @@ jobs:
           pathlib.Path('/tmp/web-v2.js').write_text(html.split('<script>',1)[1].split('</script>',1)[0])
           PY
           node --check /tmp/web-v2.js
-      - name: Inspect original curve and scheduler contract
+      - name: Inspect curve formulas and schedule schema
         if: matrix.python-version == '3.11'
         run: |
           python - <<'PY'
           import ast,tarfile
           with tarfile.open('/tmp/stable.tar.gz') as t:
               src=t.extractfile(next(m for m in t.getmembers() if m.isfile() and m.name.removeprefix('./')=='main.py')).read().decode()
-              for m in t.getmembers():
-                  if m.isfile() and any(k in m.name.lower() for k in ('curvecalc','scheduler')) and '/site-packages/' not in m.name:
-                      print('FILE',m.name,m.size)
-                      if m.name.endswith('.html'):
-                          for l in t.extractfile(m).read().decode(errors='replace').splitlines():
-                              if any(k in l.lower() for k in ('input','select','socket.emit','fetch(','ajax','name=','form','schedule','curve')): print(l[:250])
-          tree=ast.parse(src)
-          for n in tree.body:
-              if isinstance(n,ast.FunctionDef) and n.name in ('curvecalc','curvecalc_route','scheduler_route','new_tempcompchange','change_tempcomp_route','new_heatcontrol_change','handle_client_message'):
-                  print('FUNCTION',n.name,ast.get_source_segment(src,n)[:18000])
+          for n in ast.parse(src).body:
+              if isinstance(n,ast.FunctionDef) and n.name in ('_load_schedule','empty_schedule','schedule_write','_scheduler_config','_normalize_schedule','saveconfig'):
+                  print('FUNCTION',n.name,ast.get_source_segment(src,n)[:10000])
+              if isinstance(n,ast.FunctionDef) and n.name=='curvecalc':
+                  lines=ast.get_source_segment(src,n).splitlines()
+                  for i,l in enumerate(lines):
+                      if any(k in l for k in ('heatingcurve == ', 'heatcurve =', 'heatcurve=', 'hcman','hcamp','pshift','slope')):
+                          print(i,l)
           for l in src.splitlines():
-              if ('HaierPi_Pd_act' in l or 'HaierPi_Ps_act' in l or 'HaierPi_Pd' in l or 'HaierPi_Ps' in l or "'pdps'" in l or '"pdps"' in l): print(l[:400])
+              if any(k in l for k in ('HaierPi_Pd_act','HaierPi_Ps_act','def _normalize','def _schedule','def normalize_schedule')): print(l[:300])
           PY
