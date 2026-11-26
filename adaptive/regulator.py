@@ -36,7 +36,7 @@ class Settings:
     urgent_confirm: float=60
     down_confirm: float=90
     early_down_confirm: float=60
-    early_surplus: float=1.2
+    early_surplus: float=0.9
     probe_after: float=900
     failed_retry: float=1800
     trial_window: float=900
@@ -210,6 +210,10 @@ class Regulator:
         elif (settled and (excess or stable_probe)) or (excess and forecast>=c.early_surplus and ts<-c.trend_band and tr<=c.trend_band and now-self.ready_since>=c.settle_hold and now-self.changed_at>=c.settle_hold):
             direction="down"
             risk="surplus" if excess else "efficiency_probe"
+        # A reduction while the inverter is already ramping down can overshoot
+        # in the opposite direction; let its own regulation settle first.
+        if direction=="down" and trend(rows,3)<-2 and trend(rows,4)<-2:
+            direction=None
         if direction is None:
             self.candidate=self.candidate_since=None
             self.last_offer=None
