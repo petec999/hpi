@@ -49,3 +49,9 @@ jobs:
           for a,b in [(2675,2788),(2575,2605)]:
               for i in range(a,b): print(f'{i+1}: {s[i]}')
           PY
+          PYTHONPATH=/tmp/stable-audit/env/lib/python3.9/site-packages python3 - <<'PY'
+          import PyHaier
+          for name in ('GetCHTemp','GetMode','GetTwiTwo','GetCompInfo','Get3way','GetDefrost','GetAntifreeze','GetError'):
+              assert callable(getattr(PyHaier,name,None)), name
+          PY
+          STABLE_ROOT=/tmp/stable-audit python3 -m unittest discover -s tests -p 'test_adaptive_integration.py' -v
