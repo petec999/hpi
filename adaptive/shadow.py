@@ -11,6 +11,8 @@ import queue
 import re
 import subprocess
 import threading
+from collections import deque
+from statistics import median
 import time
 from pathlib import Path
 
@@ -99,14 +101,51 @@ class Availability:
             fresh=all(self.states.values()) and self.last_live is not None and 0<=now-self.last_live<=MAX_HEARTBEAT_AGE
             return fresh,self.generation,dict(self.states)
 
-def describe(s,data,d,states):
+class Observation:
+    """Measure all six combinations; never infer their capacity ordering."""
+    def __init__(self):
+        self.history=deque()
+        self.context=None
+
+    def reset(self):
+        self.history.clear()
+        self.context=None
+
+    def update(self,s):
+        if not (s.fresh and s.heating and s.hz>0 and not s.defrost and
+                not s.dhw and not s.override and s.error==0):
+            self.reset()
+            return {}
+        context=(s.mode,s.relay,s.target)
+        if context!=self.context or (self.history and
+                not 0<s.now-self.history[-1][0]<=65):
+            self.reset()
+        self.context=context
+        self.history.append((s.now,s.target-s.return_temp,s.target-s.supply_temp,s.hz))
+        while self.history and s.now-self.history[0][0]>300:
+            self.history.popleft()
+        h=list(self.history)
+        result={"return_deficit":round(h[-1][1],2),"supply_deficit":round(h[-1][2],2),
+                "water_delta":round(s.supply_temp-s.return_temp,2),
+                "observed_seconds":round(h[-1][0]-h[0][0]),
+                "median_hz":median(x[3] for x in h),"return_trend_k_min":None}
+        if len(h)>=3 and h[-1][0]-h[0][0]>=90:
+            n=len(h)//2
+            first,last=h[:n],h[n:]
+            dt=median(x[0] for x in last)-median(x[0] for x in first)
+            if dt>0:
+                result["return_trend_k_min"]=round((median(x[1] for x in last)-median(x[1] for x in first))*60/dt,3)
+        return result
+
+def describe(s,data,d,states,observed=None):
     label=lambda x: None if x is None else LEVELS[x][0]+("+FLimit" if LEVELS[x][1] else "")
     return dict(actual=s.mode+("+FLimit" if s.relay else ""),
                 proposed=label(d.proposed),reason=d.reason,target=s.target,
                 twi=s.return_temp,two=s.supply_temp,hz=s.hz,fset=s.requested_hz,
                 delta=d.delta,trend_k_min=None if d.trend is None else round(d.trend,3),
                 fresh=s.fresh,availability=states,zone=data.get("tempzone"),
-                legacy_antionoff=data.get("antionoff"),control="shadow")
+                legacy_antionoff=data.get("antionoff"),control="shadow",
+                observation=observed or {})
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -154,6 +193,7 @@ def main():
                     a.reset()  # dropped data => restart policy history
         threading.Thread(target=read,daemon=True).start()
         r=Regulator()
+        obs=Observation()
         generation=None
         invocation=None
         last_snapshot=time.monotonic()
@@ -166,6 +206,7 @@ def main():
                     raise RuntimeError("journalctl exited")
                 if time.monotonic()-last_snapshot>MAX_AGE:
                     r.reset()
+                    obs.reset()
                     print("SHADOW paused: no recent snapshot",flush=True)
                     last_snapshot=time.monotonic()
                 continue
@@ -178,6 +219,7 @@ def main():
                 fresh,gen,states=a.status(now)
                 if generation!=gen or invocation!=identity:
                     r=Regulator()
+                    obs.reset()
                     generation=gen
                     invocation=identity
                 parsed=decode(record,now,fresh,time.time())
@@ -185,10 +227,11 @@ def main():
                     continue
                 s,data=parsed
                 d=r.step(s,control="shadow")
-                print(json.dumps(describe(s,data,d,states),allow_nan=False),flush=True)
+                print(json.dumps(describe(s,data,d,states,obs.update(s)),allow_nan=False),flush=True)
                 last_snapshot=now
             except (ValueError,KeyError,TypeError,IndexError,OverflowError):
                 r=Regulator()
+                obs.reset()
                 print("SHADOW paused: invalid or stale snapshot",flush=True)
     except KeyboardInterrupt:
         pass
