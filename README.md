@@ -1,4 +1,21 @@
-# HaierPi — Stable 1.4.5 + RAM diagnostics + MQTT watchdog
+# HaierPi Android companion
+
+**Current preview: 0.2.0** — native Android dashboard, Adaptive/experiment readings, session charts, confirmed basic controls and offline demo. Requires a compatible HaierPi v2 API for live use. No pump firmware changes.
+
+[Download APK ZIP from successful CI (GitHub login required)](https://github.com/petec999/hpi/actions/runs/45868217263) · [Installation, build and limitations](android-app/README.md) · [Current Adaptive server](https://github.com/petec999/hpi/tree/feature/adaptive-learning)
+
+The Android branch is independent of the live Adaptive branch. Its inherited server sources are a historical baseline, **not** the current recommended controller installer.
+
+## Test checklist
+
+- Install on Android 8+; uninstall the old preview if its signing key differs.
+- Open demo, check all four tabs and rotation.
+- Connect to the real host, log in through WWW, return to the native dashboard, confirm live JSON.
+- Test disconnection/session expiry: no writes on missing/stale state.
+- Verify confirmed controls against actual server readback; never test disruptive operations solely for UI verification.
+- Pending before Play: stable signing, AAB, current target API review, privacy/data-safety disclosure, store graphics and device tests. No production release or Play submission yet.
+
+## Historical inherited server README
 
 Current distribution: **[1.4.5_3 (prerelease)](https://github.com/petec999/hpi/releases/tag/v1.4.5_3)**. This branch contains the complete installation sources, not a replacement for upstream Stable 1.4.5.
 
