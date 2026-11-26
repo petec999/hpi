@@ -58,6 +58,12 @@ class RuntimeTest(unittest.TestCase):
             self.r.snapshot()
         with self.assertRaises(ValueError):
             self.r.choose("auto","legacy")
+    def test_gpio_failure_not_a_valid_off_state(self):
+        with patch.object(FakeGPIO,"input",return_value=False):
+            with self.assertRaises(ValueError):
+                self.r.snapshot()
+            with self.assertRaises(ValueError):
+                self.r.choose("auto","legacy")
     def test_manual_ownership(self):
         self.r.choose("manual","legacy")
         self.r.legacy("preset","eco","normal")
