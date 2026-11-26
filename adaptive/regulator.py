@@ -424,3 +424,175 @@ class Learning:
     def summary(self):
         return {"contexts":len(self.rows),"observations":sum(v["n"] for v in self.rows.values()),
                 "trial":self.trial is not None,"unsaved":self.dirty,"storage_error":self.storage_error}
+
+
+class HysteresisObserver:
+    """Passive, bounded evidence of native CO transitions; never controls outputs.
+
+    Thresholds are brackets between consecutive samples, not exact firmware
+    thresholds. Discard interrupted cycles and keep contexts separate.
+    """
+    LIMIT = 128
+    MIN_PHASE = 300
+    POST_STOP = 120
+    MAX_GAP = 65
+    SAVE_INTERVAL = 300
+
+    def __init__(self, path=None, logger=None):
+        self.path = Path(path) if path is not None else None
+        self.logger = logger
+        self.rows = []
+        self.since = None
+        self.change = None
+        self.last = None
+        self.context = None
+        self.phase_since = None
+        self.start = None
+        self.stop = None
+        self.ran = False
+        self.dirty = False
+        self.last_save = None
+        self.storage_error = None
+        self.load()
+
+    def load(self):
+        if self.path is None:
+            return
+        try:
+            if self.path.is_symlink() or self.path.stat().st_size > 262144:
+                raise ValueError("invalid observer file")
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if data["schema"] != 1 or not isinstance(data["cycles"], list) or len(data["cycles"]) > self.LIMIT:
+                raise ValueError("invalid observer schema")
+            def numeric(x, lo, hi):
+                return type(x) in (float, int) and math.isfinite(x) and lo <= x <= hi
+            for row in data["cycles"]:
+                ctx = row["context"]
+                if (len(ctx) != 4 or ctx[0] not in ("legacy", "manual", "shadow", "auto")
+                        or ctx[1] not in PRESETS or type(ctx[2]) is not bool
+                        or not numeric(ctx[3], 10, 65)):
+                    raise ValueError("invalid context")
+                for event in (row["start"], row["stop"]):
+                    if not numeric(event["at"], 0, 1e11):
+                        raise ValueError("invalid event time")
+                    for k in ("twi", "two"):
+                        if len(event[k]) != 2 or not all(numeric(v, -100, 100) for v in event[k]):
+                            raise ValueError("invalid temperature bracket")
+                if row["stop"]["at"] < row["start"]["at"]:
+                    raise ValueError("invalid event order")
+            if data["since"] is not None and not numeric(data["since"], 0, 1e11):
+                raise ValueError("invalid collection start")
+            self.rows = data["cycles"]
+            self.since = data["since"]
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError, OverflowError) as e:
+            self.storage_error = type(e).__name__
+            self.last_save = time.monotonic()
+
+    def interrupt(self):
+        self.last = None
+        self.phase_since = None
+        self.start = self.stop = None
+        self.ran = False
+
+    @staticmethod
+    def edge(before, after, wall):
+        return {"at": wall,
+                "twi": [round(before.return_temp-before.target, 3), round(after.return_temp-after.target, 3)],
+                "two": [round(before.supply_temp-before.target, 3), round(after.supply_temp-after.target, 3)]}
+
+    def observe(self, s, control, eligible, wall):
+        if self.since is None:
+            self.since = wall
+            self.dirty = True
+        if not (eligible and s.fresh and not s.defrost and not s.dhw and not s.override and not s.error
+                and all(type(v) in (int,float) and math.isfinite(v) for v in
+                        (s.now,s.target,s.return_temp,s.supply_temp,s.hz,s.requested_hz,wall))
+                and 10 <= s.target <= 65 and -10 <= s.return_temp <= 85
+                and -10 <= s.supply_temp <= 85 and min(s.hz,s.requested_hz) >= 0):
+            self.interrupt()
+            return
+        context = (control, s.mode, s.relay, s.target)
+        if context != self.context:
+            self.interrupt()
+            self.context = context
+            self.change = wall
+        before = self.last
+        if before is not None and not 0 < s.now-before.now <= self.MAX_GAP:
+            self.interrupt()
+            before = None
+        self.last = s
+        active = s.requested_hz > 0
+        if before is None:
+            self.phase_since = s.now if not active and s.hz == 0 else None
+            return
+        if active and not before.requested_hz:
+            if self.stop is not None or self.phase_since is None or s.now-self.phase_since < self.MIN_PHASE or before.hz != 0:
+                self.start = None
+            else:
+                self.start = self.edge(before, s, wall)
+            self.phase_since = s.now
+            self.stop = None
+            self.ran = s.hz > 0
+        elif not active and before.requested_hz > 0:
+            self.stop = (self.edge(before,s,wall), s.now) if (
+                self.start is not None and self.ran and self.phase_since is not None
+                and s.now-self.phase_since >= self.MIN_PHASE) else None
+            self.phase_since = None
+        if active:
+            self.ran = self.ran or s.hz > 0
+        elif s.hz == 0:
+            if self.phase_since is None:
+                self.phase_since = s.now
+            if self.stop is not None and s.now-self.phase_since >= self.POST_STOP:
+                self.rows.append({"context":list(context), "start":self.start, "stop":self.stop[0]})
+                self.rows = self.rows[-self.LIMIT:]
+                self.start = self.stop = None
+                self.dirty = True
+                if self.logger:
+                    self.logger.info("Hysteresis observer: accepted CO cycle (%s stored)",len(self.rows))
+
+    def save_if_due(self, now):
+        if not self.dirty or self.path is None or (self.last_save is not None and now-self.last_save < self.SAVE_INTERVAL):
+            return
+        self.last_save = now
+        tmp = None
+        try:
+            if self.path.is_symlink():
+                raise ValueError("symlink observer path")
+            fd,tmp = tempfile.mkstemp(prefix=".hysteresis-",dir=str(self.path.parent))
+            with os.fdopen(fd,"w",encoding="utf-8") as f:
+                json.dump({"schema":1,"since":self.since,"cycles":self.rows},f,allow_nan=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp,self.path)
+            tmp = None
+            self.dirty = False
+            self.storage_error = None
+        except (OSError,ValueError,TypeError) as e:
+            self.storage_error = type(e).__name__
+        finally:
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+    def summary(self):
+        # Never combine unlike setpoints, presets, relay states or owners.
+        group = [r for r in self.rows if tuple(r["context"]) == self.context]
+        result = {"total":len(self.rows),"cycles":len(group),"since":self.since,
+                  "changed":self.change,"context":self.context,"storage_error":self.storage_error,
+                  "unsaved":self.dirty,"enough_samples":len(group)>=20,"last_cycle":group[-1] if group else None}
+        for sensor in ("twi","two"):
+            stats={}
+            for edge in ("start","stop"):
+                pairs=[r[edge][sensor] for r in group]
+                mids=[sum(p)/2 for p in pairs]
+                center=median(mids) if mids else None
+                stats[edge]={"offset":round(center,2),"mad":round(median(abs(x-center) for x in mids),2),
+                             "sample_span":round(median(abs(p[1]-p[0]) for p in pairs),2)} if mids else None
+            stats["width"]=round(stats["stop"]["offset"]-stats["start"]["offset"],2) if group else None
+            result[sensor]=stats
+        return result

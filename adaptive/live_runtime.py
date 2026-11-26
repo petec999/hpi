@@ -5,7 +5,7 @@ import math
 import os
 import tempfile
 from pathlib import Path
-from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS
+from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver
 
 class SelectionBlocked(ValueError):
     """Safe, fixed activation reason exposed to authenticated UI."""
@@ -24,6 +24,9 @@ class Runtime:
         self.reg=Regulator()
         self.learning=Learning(learning_path,g.get("logging"))
         self.learning_before=None
+        observer_path=Path(learning_path).with_name(".adaptive-hysteresis-v1.json") if learning_path else None
+        self.observer=HysteresisObserver(observer_path,g.get("logging"))
+        self.observer_frames=None
         self.last_tick=0
         self.pending=None
         self.status={"reason":"Legacy; no adaptive writes","risk":"paused"}
@@ -314,6 +317,28 @@ class Runtime:
             self.g["logging"].info("Adaptive idle preparation issued: %s / FLimit %s",mode,relay)
         return True
 
+    def observe_hysteresis(self):
+        # Separate from regulation; failures must never influence commands.
+        try:
+            s,zone,curve,_=self.snapshot()
+            with self.frames_lock:
+                stamps=tuple(self.frames[k][0] for k in ("R101","R141","R201","R241"))
+                power=int(self.frames["R101"][1][0])&255
+            if self.observer_frames is not None and not all(a>b for a,b in zip(stamps,self.observer_frames)):
+                if max(stamps)-min(stamps)>self.MAX_AGE:
+                    self.observer.interrupt()
+                return
+            self.observer_frames=stamps
+            eligible=(self.activation_reason(s,zone,curve) is None
+                      and bool(power&1 and power&4 and not power&2)
+                      and self.flag(self.raw("pch")) and self.gpio("heatdemandpin")
+                      and self.pending is None)
+            self.observer.observe(s,self.control,eligible,time.time())
+        except Exception:
+            self.observer.interrupt()
+        finally:
+            self.observer.save_if_due(time.monotonic())
+
     def tick(self):
         now=time.monotonic()
         if now-self.last_tick<self.PERIOD:
@@ -337,6 +362,7 @@ class Runtime:
                     self.g["logging"].info("Adaptive integration: four complete recent frames")
                     self.ready_log_frames=stamps
                     self.ready_log_count+=1
+            self.observe_hysteresis()
             if self.control=="legacy" and self.pending is None:
                 return
             try:
@@ -539,4 +565,4 @@ class Runtime:
                 blocker="Oczekiwanie na potwierdzenie poprzedniego polecenia"
             return dict(self.status,control=self.control,mode=actual,relay=relay,
                         ready=blocker is None,activation_blocker=blocker,curve=curve,zone=zone,pending=self.pending is not None,fault=self.fault,
-                        curve_settings=self.curve_settings(),learning=self.learning.summary())
+                        curve_settings=self.curve_settings(),learning=self.learning.summary(),hysteresis=self.observer.summary())

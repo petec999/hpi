@@ -290,6 +290,15 @@ def status_ui(html):
  $("am-stop-target").textContent=fmt(v.stop_target)+" °C";
  $("am-stop-margin").textContent=fmt(v.stop_margin)+" K";
  $("am-return-trend").textContent=fmt(v.return_trend)+" K/min";''')
+    if 'id="am-hysteresis"' not in html:
+        html=once(html,'<p id="am-reason"', '<div class="metric"><span>Obserwator histerezy CO (tylko odczyt)</span><strong id="am-hysteresis">—</strong></div><p id="am-hysteresis-time"></p><p id="am-hysteresis-twi"></p><p id="am-hysteresis-two"></p><small>Progi orientacyjne, względem nastawy, z przejść Fset. Oddzielne grupy nastawy, trybu, FLimit i sterowania; bez automatycznej zmiany progów.</small><p id="am-reason"')
+        html=once(html,' $("am-reason").textContent=v.fault||v.reason_pl||v.reason||"Brak odczytu.";', ''' const h=v.hysteresis;
+ $("am-hysteresis").textContent=h?h.cycles+" / 20 w bieżącym kontekście · "+h.total+" zapisanych łącznie"+(h.storage_error?" · błąd zapisu":""):"—";
+ $("am-hysteresis-time").textContent=h?"Od: "+(h.since?new Date(h.since*1000).toLocaleString():"—")+" · zmiana kontekstu: "+(h.changed?new Date(h.changed*1000).toLocaleString():"—"):"—";
+ const hs=(x)=>x&&x.start&&x.stop?"START "+fmt(x.start.offset)+" K / STOP "+fmt(x.stop.offset)+" K / pasmo "+fmt(x.width)+" K; MAD STOP "+fmt(x.stop.mad)+" K":"brak pełnych cykli";
+ $("am-hysteresis-twi").textContent="Twi: "+hs(h&&h.twi);
+ $("am-hysteresis-two").textContent="Two: "+hs(h&&h.two);
+ $("am-reason").textContent=v.fault||v.reason_pl||v.reason||"Brak odczytu.";''')
     return html
 
 def learning_block():
