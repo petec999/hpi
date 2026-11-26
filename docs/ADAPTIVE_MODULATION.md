@@ -44,3 +44,10 @@ Limitations: Stable's availability flags have a 180-second source freshness thre
 ## Real trace regression
 
 The user-provided Turbo+FLimit trace: supply target 32 C, Two 32.2 to 33.1 C, Twi 29.1 to 29.9 C, actual/requested frequency 45 Hz. The manual change to Eco+FLimit produced 40 Hz in the observed samples. This does not establish a universal frequency ceiling or prove energy savings. Regression replay checks the policy proposes Eco+FLimit during the observed surplus, rather than treating the normal return deficit as a power shortage. Additional tests cover persistent small deficits, urgent release, a failed reduction followed by restoration, deadband noise, manual/legacy modes and stale telemetry.
+
+## Manufacturer reference (model family, not confirmed installed model)
+
+Haier Super Aqua service manual 2023, pp. 1–2, 27–31, 62–63, 120–121 and 132:
+https://www.haier-ac.pl/wp-content/uploads/materialy/instrukcje/pompy_ciepla/2023_haier_instrukcja_serwisowa_pompa_ciepla_super_aqua_co_cwu.pdf
+
+The manual describes the ATW-A01 CN23 dry contact as reducing the maximum operating frequency by 50%; this is not a promise of half the heat output or lower minimum frequency. It lists separate requested and actual compressor frequency service values. The heating capacity tables depend on outdoor and water temperature, with minimum/nominal/maximum output; models use different compressors. It also specifies minimum active water volume to reduce cycling. Do not extrapolate a fixed Hz-to-kW conversion or exact minimum frequency from these tables. No model-specific numbers are embedded in the control policy until the exact installed model and applicable manual are confirmed. The regulator also suppresses a downward move if both requested and actual frequency are already falling rapidly. Early surplus forecast threshold 0.9 K is experimental, not a factory trip threshold.
