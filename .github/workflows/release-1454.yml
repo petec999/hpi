@@ -47,6 +47,7 @@ jobs:
         env:
           STABLE_ROOT: /tmp/stable-src
         run: |
+          curl -fLSs --retry 3 https://raw.githubusercontent.com/kamilostatek/hpi/93887c747d5c7171752032341319bd3eccebe1ab/1.4.5_stable.tar.gz -o 1.4.5_stable.tar.gz
           printf '%s  %s\n' ca803a3f8777efa75a40739d2efeb0362365ffa4291d3eb76d9a231c6cb53976 1.4.5_stable.tar.gz | sha256sum -c -
           mkdir -p /tmp/stable-src
           tar -xzf 1.4.5_stable.tar.gz -C /tmp/stable-src
