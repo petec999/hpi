@@ -1090,6 +1090,9 @@ class RegisterWatch:
     KNOWN={"heater_command":("R101",0,8),"heater_readback":("R141",3,256),
            "valve_dhw":("R141",0,512),"valve_ch":("R141",0,1024)}
     FLAGS=tuple(KNOWN)+("pdhw","dhw_heating","dhw_heater_assist_active","anti_legionella_active","dhw_enabled")
+    # Unidentified discrete fields reported by independent YR-E27 capture.
+    # These are investigation candidates, NOT decoded heater signals.
+    CANDIDATES={"R141":{3:0xff00,9:0x0100,10:0x0100,14:0x001f,15:0xffff}}
 
     def __init__(self,path=None):
         self.path=Path(path) if path else None
@@ -1116,7 +1119,8 @@ class RegisterWatch:
     @classmethod
     def flags(cls,f,c):
         d={k:bool(f[reg][i]&mask) for k,(reg,i,mask) in cls.KNOWN.items()}
-        d["dhw_enabled"]=bool(f["R101"][0]&2)
+        # Bit 1 is COOL; bit 7 selects TANK (PyHaier.GetState).
+        d["dhw_enabled"]=bool(f["R101"][0]&0x0080)
         for k in cls.FLAGS:
             if k not in d:
                 v=c.get(k)
@@ -1133,7 +1137,7 @@ class RegisterWatch:
             if d["schema"]!=1 or not isinstance(d["events"],list) or len(d["events"])>self.LIMIT:
                 raise ValueError("invalid watch schema")
             for e in d["events"]:
-                if set(e)!={"at","kind","before","after","context_before","context_after","flags"} or not AdaptiveReport.number(e["at"]) or e["kind"] not in ("baseline","edge","dhw_sample") or not self.valid(e["after"]) or (e["before"] is not None and not self.valid(e["before"])):
+                if set(e)!={"at","kind","before","after","context_before","context_after","flags"} or not AdaptiveReport.number(e["at"]) or e["kind"] not in ("baseline","edge","dhw_sample","candidate") or not self.valid(e["after"]) or (e["before"] is not None and not self.valid(e["before"])):
                     raise ValueError("invalid watch row")
                 for c in (e["context_before"],e["context_after"]):
                     if not isinstance(c,dict) or c!=self.context(c):
@@ -1142,7 +1146,14 @@ class RegisterWatch:
                     raise ValueError("invalid flags")
             if not AdaptiveReport.number(d["saved_at"]):
                 raise ValueError("invalid timestamp")
+            # Recompute historical labels from raw samples: early preview
+            # used COOL bit as TANK bit. Keep raw measurements intact.
             self.events=d["events"]
+            for e in self.events:
+                if e["before"] is not None:
+                    a=self.flags(e["before"],e["context_before"])
+                    b=self.flags(e["after"],e["context_after"])
+                    e["flags"]=[k for k in self.FLAGS if a[k] is not None and b[k] is not None and a[k]!=b[k]]
             self.saved_at=d["saved_at"]
             self.last_save=time.monotonic()
         except FileNotFoundError:
@@ -1178,10 +1189,16 @@ class RegisterWatch:
         if changed:
             self.add(wall,"edge",old,f,oldctx,c,changed)
             self.last_sample=now
-        elif flags["dhw_enabled"] and (self.last_sample is None or now-self.last_sample>=120):
-            # Even a tank-only heater transition may change none of our known flags.
-            self.add(wall,"dhw_sample",old,f,oldctx,c,[])
-            self.last_sample=now
+        elif flags["dhw_enabled"]:
+            candidate=any((old[bank][i]^f[bank][i])&mask
+                          for bank,indices in self.CANDIDATES.items() for i,mask in indices.items())
+            if candidate:
+                self.add(wall,"candidate",old,f,oldctx,c,[])
+                self.last_sample=now
+            elif self.last_sample is None or now-self.last_sample>=120:
+                # Tank-only heater transitions may not change known flags.
+                self.add(wall,"dhw_sample",old,f,oldctx,c,[])
+                self.last_sample=now
 
     def add(self,wall,kind,before,after,oldctx,c,flags):
         self.events.append({"at":wall,"kind":kind,"before":before,"after":after,

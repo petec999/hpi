@@ -14,7 +14,7 @@ class RegisterWatchTest(unittest.TestCase):
         a["R241"][3]=4
         w.observe(a,(30,)*4,{"tank":47.9},30,1030)
         self.assertEqual(len(w.events),1)
-        a["R101"][0]=2
+        a["R101"][0]=0x85
         a["R141"][3]=256
         a["R241"][3]=12
         w.observe(a,(60,)*4,{"tank":47.8},60,1060)
@@ -27,6 +27,25 @@ class RegisterWatchTest(unittest.TestCase):
         self.assertEqual(w.events[-1]["kind"],"dhw_sample")
         self.assertEqual(len(w.events),3)
         self.assertFalse(w.summary(250)["fresh"])
+
+    def test_tank_bit_and_candidate_edges(self):
+        w=RegisterWatch()
+        a=frames()
+        a["R101"][0]=0x03
+        w.observe(a,(0,)*4,{},0,1000)
+        self.assertFalse(w.summary(0)["flags"]["dhw_enabled"])
+        for t in (30,60,90,120):
+            w.observe(a,(t,)*4,{},t,1000+t)
+        self.assertEqual(len(w.events),1)
+        a["R101"][0]=0x85
+        w.observe(a,(150,)*4,{},150,1150)
+        self.assertTrue(w.summary(150)["flags"]["dhw_enabled"])
+        self.assertIn("dhw_enabled",w.events[-1]["flags"])
+        a["R141"][9]=0x0100
+        a["R141"][10]=0x0100
+        w.observe(a,(180,)*4,{},180,1180)
+        self.assertEqual(w.events[-1]["kind"],"candidate")
+        self.assertEqual([x["register"] for x in w.summary(180)["events"][-1]["changes"]],[150,151])
 
     def test_persistence_and_gap(self):
         with tempfile.TemporaryDirectory() as d:
