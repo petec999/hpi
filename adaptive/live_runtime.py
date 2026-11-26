@@ -281,6 +281,7 @@ class Runtime:
                 # Disarm immediately, but do not send competing commands.
                 if mode in ("manual","shadow"):
                     self.control="manual"
+                    self.resume_requested=False
                     self.persist_owner("manual")
                     return
                 raise SelectionBlocked("Oczekiwanie na potwierdzenie poprzedniego polecenia")
@@ -294,6 +295,14 @@ class Runtime:
                     raise SelectionBlocked(reason)
                 # The Adaptive owner gates legacy CO writers. Stored legacy
                 # preset/FLimit policies remain untouched for a return to Legacy.
+            # Manual hold must take effect in RAM even if disk is read-only.
+            # Do not keep actuating just because the user cannot persist a stop.
+            if mode!="auto":
+                self.control="manual"
+                self.resume_requested=False
+                self.learning.cancel()
+                self.learning_before=None
+                self.reg.reset()
             self.persist_owner(mode)
             self.control=mode
             self.observer.interrupt()

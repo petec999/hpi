@@ -362,6 +362,15 @@ class RuntimeTest(unittest.TestCase):
             self.r.choose("manual","manual")
             self.assertFalse(Runtime(self.g,path).resume_requested)
 
+    def test_manual_hold_even_if_storage_fails(self):
+        from adaptive.live_runtime import SelectionBlocked
+        self.r.choose("auto","legacy")
+        with patch.object(self.r,"persist_owner",side_effect=SelectionBlocked("read-only")):
+            with self.assertRaises(SelectionBlocked):
+                self.r.choose("manual","auto")
+        self.assertEqual(self.r.control,"manual")
+        self.assertFalse(self.writes)
+
     def test_auto_disarm_on_lost_telemetry(self):
         self.r.choose("auto","legacy")
         for t in range(1090,1361,30):

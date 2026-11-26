@@ -24,6 +24,15 @@ class LearningTest(unittest.TestCase):
         self.assertEqual(l.settings(sample(0,level=4),1),Settings())
         self.assertEqual(l.settings(sample(0,target=36),1),Settings())
 
+    def test_supply_risk_learns_before_next_reduction_even_with_cold_return(self):
+        l=Learning()
+        for i in range(3):
+            l.start(sample(0),sample(30,4,supply=36.8,return_temp=29),1)
+            for t in range(60,211,30):
+                l.observe(sample(t,4,supply=36.8,return_temp=29),1)
+        self.assertEqual(l.summary()["observations"],3)
+        self.assertLess(l.settings(sample(0),1).down_confirm,90)
+
     def test_failed_reductions_adjust_conservatively(self):
         l=Learning()
         for i in range(3):

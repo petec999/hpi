@@ -293,11 +293,14 @@ def status_ui(html):
     if 'id="am-supply-forecast"' not in html:
         html=once(html,'<span>Próg STOP (założenie)</span>','<span>Próg STOP Two (model +5 K)</span>')
         html=once(html,'<span>Do progu STOP</span>','<span>Do progu STOP Two</span>')
-        html=once(html,'<div class="metric"><span>Trend Twi</span>', '<div class="metric"><span>Two – zasilanie</span><strong id="am-supply-temp">—</strong></div><div class="metric"><span>Prognoza Two względem nastawy</span><strong id="am-supply-forecast">—</strong></div><div class="metric"><span>Auto po restarcie</span><strong id="am-resume">—</strong></div><div class="metric"><span>Trend Twi</span>')
+        html=once(html,'<div class="metric"><span>Trend Twi</span>', '<div class="metric"><span>Two – zasilanie</span><strong id="am-supply-temp">—</strong></div><div class="metric"><span>Prognoza Two względem nastawy</span><strong id="am-supply-forecast">—</strong></div><div class="metric"><span>Auto po restarcie</span><strong id="am-resume">—</strong></div><button id="am-cancel-resume" disabled>Anuluj wznowienie Auto</button><div class="metric"><span>Trend Twi</span>')
         html=once(html,' $("am-return-temp").textContent=fmt(v.return_temp)+" °C";', ''' $("am-return-temp").textContent=fmt(v.return_temp)+" °C";
  $("am-supply-temp").textContent=fmt(v.supply_temp)+" °C";
  $("am-supply-forecast").textContent=fmt(v.supply_forecast)+" K";
- $("am-resume").textContent=v.owner_storage_error|| (v.auto_resume_pending?"Oczekuje na dane":v.control==="auto"?"Zapamiętane":"Wyłączone");''')
+ $("am-resume").textContent=v.owner_storage_error|| (v.auto_resume_pending?"Oczekuje na dane":v.control==="auto"?"Zapamiętane":"Wyłączone");
+ $("am-cancel-resume").disabled=!amState||amBusy||!v.auto_resume_pending;''')
+        html=once(html,' if(expected===value||expected===null)return;', ' if(expected===null||(expected===value&&!(key==="adaptive_control"&&value==="manual"&&amState.auto_resume_pending)))return;')
+        html=once(html,'$("am-save").addEventListener("click",()=>amSend("adaptive_control",', '$("am-cancel-resume").addEventListener("click",()=>amSend("adaptive_control","manual"));\n$("am-save").addEventListener("click",()=>amSend("adaptive_control",')
     if 'id="am-hysteresis"' not in html:
         html=once(html,'<p id="am-reason"', '<div class="metric"><span>Obserwator histerezy CO (tylko odczyt)</span><strong id="am-hysteresis">—</strong></div><p id="am-hysteresis-time"></p><p id="am-hysteresis-twi"></p><p id="am-hysteresis-two"></p><small>Progi orientacyjne, względem nastawy, z przejść Fset. Oddzielne grupy nastawy, trybu, FLimit i sterowania; bez automatycznej zmiany progów.</small><p id="am-reason"')
         html=once(html,' $("am-reason").textContent=v.fault||v.reason_pl||v.reason||"Brak odczytu.";', ''' const h=v.hysteresis;
@@ -326,6 +329,9 @@ def status_ui(html):
 def experiment_api(source):
     old='choices=("legacy","manual","shadow","auto") if key=="adaptive_control"'
     new='choices=("legacy","manual","shadow","auto","experiment") if key=="adaptive_control"'
+    source=source if new in source else once(source,old,new)
+    old='if current==value:'
+    new='if current==value and not (key=="adaptive_control" and value=="manual" and _am.view()["auto_resume_pending"]):'
     return source if new in source else once(source,old,new)
 
 def learning_block():

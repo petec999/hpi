@@ -371,13 +371,16 @@ class Learning:
         urgent=e>=2 and rate<=.08 and all(x[1]>1.5 and x[3]>1.5 for x in t["samples"])
         if s.now-t["start"]<180 and not urgent:
             return
-        if not shortage and s.now-t["start"]<300:
+        # A persistent supply risk can justify another reduction after the
+        # 180 s settling period. Record that observation before it is lost.
+        supply_surplus=-median(x[3] for x in t["samples"])
+        supply_rise=max(0,min(.5,-trend(t["samples"],3)))
+        supply_risk=supply_surplus+supply_rise*3>=4
+        if not shortage and not supply_risk and s.now-t["start"]<300:
             return
         # Positive score means thermal surplus or persistent supply STOP risk.
         # It is not a measurement of savings or a prevented stop.
-        supply_surplus=-median(x[3] for x in t["samples"])
-        supply_rise=max(0,min(.5,-trend(t["samples"],3)))
-        score=-1 if shortage else 1 if supply_surplus+supply_rise*3>=4 or -e>=1.5 or (-e>=0 and -e+max(0,rate)*3>=2.5) else 0
+        score=-1 if shortage else 1 if supply_risk or -e>=1.5 or (-e>=0 and -e+max(0,rate)*3>=2.5) else 0
         self.record(t["key"],score,hz-t["before"].hz,e-(t["before"].target-t["before"].return_temp),rate)
         self.cancel()
 
