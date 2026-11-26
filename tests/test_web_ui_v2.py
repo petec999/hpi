@@ -155,8 +155,12 @@ class Tests(unittest.TestCase):
         g["_wv_system"]=fail
         g["_wv_curve"]=fail
         state=g["_wv_state"](g,time.monotonic())
-        self.assertEqual(state["system"],{})
-        self.assertEqual(state["curve"],{})
+        self.assertNotIn("system",state)
+        self.assertNotIn("curve",state)
+        self.assertEqual(self.client.get("/v2/api/diagnostics").status_code,401)
+        self.login()
+        self.assertEqual(self.client.get("/v2/api/diagnostics").json,{"system":{},"curve":{}})
+        self.assertEqual(self.client.get("/v2/api/state").status_code,200)
         self.assertEqual(state["values"]["pd"],23.5)
         self.assertEqual(state["values"]["pressure_delta"],16.5)
         self.assertEqual(g["on_message"](None,None,None),"original")
