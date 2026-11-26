@@ -31,6 +31,7 @@ class Runtime:
         self.invalid_since=None
         self.ready_log_frames=None
         self.ready_log_count=0
+        self.idle_frame=None
 
     def note(self,key,regs):
         # Separate lock: never hold controller lock in the serial reader.
@@ -127,6 +128,7 @@ class Runtime:
             # Explicit outdoor-zone presets remain authoritative.
             if self.control in ("legacy","shadow") or zone in ("frost","warm"):
                 if zone in ("frost","warm") and self.control=="auto":
+                    self.idle_frame=None
                     self.pending=None
                     self.learning.cancel()
                     self.learning_before=None
@@ -137,6 +139,7 @@ class Runtime:
     def priority_write(self,kind,value):
         with self.lock:
             if self.control=="auto":
+                self.idle_frame=None
                 self.pending=None
                 self.learning.cancel()
                 self.learning_before=None
@@ -154,6 +157,7 @@ class Runtime:
                 if self.priority() or self.pending is not None:
                     return ("Priority operation or pending readback",False if kind=="preset" else "error")
                 self.control="manual"
+                self.idle_frame=None
                 self.learning.cancel()
                 self.learning_before=None
                 self.reg=Regulator()
@@ -203,6 +207,7 @@ class Runtime:
             self.fault=None
             self.invalid_since=None
             self.reg=Regulator()
+            self.idle_frame=None
             self.status={"reason":"control selected: "+mode,"risk":"paused"}
 
     def fail(self,reason):
@@ -242,6 +247,71 @@ class Runtime:
             return "Brak aktywnego ogrzewania CO"
         return "Oczekiwanie na poprawny stan pracy pompy"
 
+    def idle_snapshot_valid(self,s,zone,curve):
+        # A stopped compressor is not necessarily a stopped heating system.
+        # Require CH enabled (R101 + core status), but not heat demand GPIO.
+        # Never change mode in cooling, off, DHW, protection or priority zones.
+        with self.frames_lock:
+            stamp,frame=self.frames["R101"]
+            idle_stamp=self.frames["R241"][0]
+        power=int(frame[0])&255
+        return (self.activation_reason(s,zone,curve) is None and s.fresh
+                and s.hz==0 and s.requested_hz==0
+                and bool(power&1 and power&4 and not power&2)
+                and self.flag(self.raw("ch_heating"))
+                and 0<=time.monotonic()-stamp<=self.MAX_AGE
+                and 0<=time.monotonic()-idle_stamp<=self.MAX_AGE)
+
+    def prepare_idle(self,s,zone,curve):
+        # Only called in Auto/Shadow, before the normal running policy.
+        # Two distinct consecutive stopped samples; one output per command.
+        # Native compressor start/stop, setpoint and demand remain untouched.
+        if not self.idle_snapshot_valid(s,zone,curve):
+            self.idle_frame=None
+            return False
+        with self.frames_lock:
+            frame=self.frames["R241"][0]
+        previous=self.idle_frame
+        self.idle_frame=frame
+        self.learning.cancel()
+        self.learning_before=None
+        self.reg.reset()
+        mode,relay=("quiet",True)
+        actual=s.mode+("+FLimit" if s.relay else "")
+        proposed="quiet+FLimit"
+        reason="Postój sprężarki – przygotowanie Quiet + FLimit"
+        if (s.mode,s.relay)==(mode,relay):
+            reason="Postój sprężarki – Quiet + FLimit gotowe do startu"
+        elif previous is None or not 0<frame-previous<=self.MAX_AGE:
+            reason="Postój sprężarki – potwierdzanie postoju przed przygotowaniem"
+        self.status={"reason":"idle startup preparation","reason_pl":reason,
+                     "risk":"paused","actual":actual,"proposed":proposed,
+                     "target":s.target,"down_confirm":self.reg.cfg.down_confirm,
+                     "surplus_band":self.reg.cfg.surplus_band}
+        if self.control!="auto" or (s.mode,s.relay)==(mode,relay) or previous is None or not 0<frame-previous<=self.MAX_AGE:
+            return True
+        with self.serial_lock:
+            current,z,actual_target,_=self.snapshot()
+            if (not self.idle_snapshot_valid(current,z,actual_target)
+                    or (current.mode,current.relay)!=(s.mode,s.relay)
+                    or abs(current.target-s.target)>0.25 or self.g.get("newframe")):
+                return True
+            # Enable frequency limit first; only then set Quiet.
+            # Do not train the running policy on changes made at zero Hz.
+            mode,relay=(current.mode,True) if not current.relay else ("quiet",True)
+            issued=time.monotonic()
+            self.pending=(mode,relay,issued+90,issued)
+            if not current.relay:
+                _,ok=self.g["flimitchange"]("1")
+                if ok!="success" or self.gpio("freqlimitpin")!=relay:
+                    self.fail("idle FLimit GPIO readback mismatch")
+            else:
+                _,ok=self.g["new_presetchange"](mode)
+                if ok is not True:
+                    self.fail("idle preset write not acknowledged")
+            self.g["logging"].info("Adaptive idle preparation issued: %s / FLimit %s",mode,relay)
+        return True
+
     def tick(self):
         now=time.monotonic()
         if now-self.last_tick<self.PERIOD:
@@ -251,6 +321,8 @@ class Runtime:
         try:
             self.last_tick=now
             self.learning.save_if_due(now)
+            if self.control not in ("auto","shadow"):
+                self.idle_frame=None
             if self.control!="auto":
                 self.learning.cancel()
                 self.learning_before=None
@@ -268,6 +340,7 @@ class Runtime:
             try:
                 s,zone,curve,stamp=self.snapshot()
             except Exception as e:
+                self.idle_frame=None
                 self.learning.cancel()
                 self.learning_before=None
                 self.reg.reset()
@@ -305,10 +378,13 @@ class Runtime:
                     self.status={"reason":"manual control; no adaptive writes","risk":"paused"}
                 return
             if zone!="normal" or s.dhw or s.defrost or s.override or s.error or abs(curve-s.target)>1:
+                self.idle_frame=None
                 self.learning.cancel()
                 self.learning_before=None
                 self.reg.reset()
                 self.status={"reason":"priority zone, protection, DHW or setpoint mismatch","risk":"paused"}
+                return
+            if self.prepare_idle(s,zone,curve):
                 return
             if self.control=="auto":
                 outdoor=self.number(self.raw("outtemp"))

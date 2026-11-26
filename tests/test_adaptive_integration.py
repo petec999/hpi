@@ -138,6 +138,72 @@ class RuntimeTest(unittest.TestCase):
         self.assertIn("Zbieranie pomiarów",self.r.status["reason_pl"])
         self.assertEqual(self.r.control,"auto")
 
+    def test_idle_preparation_limits_then_quiet_and_does_not_learn(self):
+        self.r.choose("auto","legacy")
+        def relay_write(v):
+            self.writes.append(("relay",v))
+            FakeGPIO.values[1]=v
+            return "limit","success"
+        self.g["flimitchange"]=relay_write
+        with patch.dict(FakeGPIO.values,{1:"0",2:"0"}):
+            with patch.object(Decoder,"GetCompInfo",return_value=[0,0,2,320,30]), patch.object(Decoder,"GetMode",return_value="turbo") as mode:
+                self.r.tick()
+                self.assertFalse(self.writes)
+                self.assertEqual(self.r.status["proposed"],"quiet+FLimit")
+                self.now.return_value+=30
+                self.refresh()
+                self.r.tick()
+                self.assertEqual(self.writes,[("relay","1")])
+                self.now.return_value+=30
+                self.refresh()
+                self.r.tick()
+                self.assertEqual(self.writes,[("relay","1"),("preset","quiet")])
+                mode.return_value="quiet"
+                self.now.return_value+=30
+                self.refresh()
+                self.r.tick()
+                self.assertIsNone(self.r.pending)
+                self.assertIn("gotowe do startu",self.r.status["reason_pl"])
+                self.assertEqual(self.r.learning.summary()["observations"],0)
+                self.assertIsNone(self.r.learning.trial)
+                self.assertEqual(self.r.control,"auto")
+                self.now.return_value+=30
+                self.refresh()
+                self.r.tick()
+                self.assertEqual(len(self.writes),2)
+
+    def test_idle_no_writes_when_off_priority_or_starting(self):
+        self.r.choose("auto","legacy")
+        with patch.object(Decoder,"GetCompInfo",return_value=[0,0,2,320,30]) as comp:
+            self.r.tick()
+            self.g["statusdict"]["ch_heating"]["value"]="off"
+            self.now.return_value+=30
+            self.refresh()
+            self.r.tick()
+            self.assertFalse(self.writes)
+            self.g["statusdict"]["ch_heating"]["value"]="on"
+            self.g["get_temp_zone"]=lambda v:"frost"
+            self.now.return_value+=30
+            self.refresh()
+            self.r.tick()
+            self.assertFalse(self.writes)
+            self.g["get_temp_zone"]=lambda v:"normal"
+            comp.return_value=[30,0,2,320,30]
+            self.now.return_value+=30
+            self.refresh()
+            self.r.tick()
+            self.assertFalse(self.writes)
+
+    def test_idle_shadow_never_writes(self):
+        self.r.choose("shadow","legacy")
+        with patch.object(Decoder,"GetCompInfo",return_value=[0,0,2,320,30]):
+            for offset in (0,30,60):
+                self.now.return_value=1000+offset
+                self.refresh()
+                self.r.tick()
+            self.assertFalse(self.writes)
+            self.assertEqual(self.r.status["proposed"],"quiet+FLimit")
+
     def test_pause_reason_does_not_hide_bad_data(self):
         from dataclasses import replace
         s,_,_,_=self.r.snapshot()

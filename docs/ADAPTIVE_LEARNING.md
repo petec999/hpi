@@ -15,3 +15,5 @@ The curve calculator in v2 is an authenticated POST with expected-state validati
 WWW v2 includes native curve configuration editor with 14-point table/plot, manual/static/auto selection and coefficients. It edits the existing configuration, not a second curve. Direct mode is read-only. Save is explicit, validated, conflict-checked and atomic; regular core calculation applies the new settings. Adaptive learning is reset for interrupted trial but stored model is retained.
 
 Status presentation: WWW uses a Polish reason for normal compressor stops, requested stop, collecting samples and invalid measurement conditions. The underlying policy decision, timing, safeguards and machine-readable reason/risk remain unchanged.
+
+Normal CO idle preparation: after two distinct fresh zero-Hz (actual and requested) observations, Auto enables FLimit then selects Quiet, each with existing confirmation. Only with CH enabled and normal zone, no protection or priority. Shadow does not write. The running policy takes over when the compressor starts; idle changes are excluded from learning. Native minimum startup frequency remains firmware-controlled.
