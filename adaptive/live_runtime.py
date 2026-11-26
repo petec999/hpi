@@ -21,6 +21,7 @@ class Runtime:
         self.status={"reason":"Legacy; no adaptive writes","risk":"paused"}
         self.fault=None
         self.invalid_since=None
+        self.reported_ready=False
 
     def note(self,key,regs):
         # Separate lock: never hold controller lock in the serial reader.
@@ -174,6 +175,12 @@ class Runtime:
             return
         try:
             self.last_tick=now
+            if not self.reported_ready:
+                with self.frames_lock:
+                    good=set(self.frames)==set(self.SIZES) and all(0<=now-t<=self.MAX_AGE for t,_ in self.frames.values())
+                if good:
+                    self.g["logging"].info("Adaptive integration: four complete recent frames")
+                    self.reported_ready=True
             if self.control=="legacy" and self.pending is None:
                 return
             try:
