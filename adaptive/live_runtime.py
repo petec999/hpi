@@ -20,6 +20,7 @@ class Runtime:
         self.pending=None
         self.status={"reason":"Legacy; no adaptive writes","risk":"paused"}
         self.fault=None
+        self.invalid_since=None
 
     def note(self,key,regs):
         # Separate lock: never hold controller lock in the serial reader.
@@ -109,8 +110,18 @@ class Runtime:
         with self.lock:
             # Explicit outdoor-zone presets remain authoritative.
             if self.control in ("legacy","shadow") or zone in ("frost","warm"):
+                if zone in ("frost","warm") and self.control=="auto":
+                    self.pending=None
+                    self.reg.reset()
                 return self.g["new_presetchange" if kind=="preset" else "flimitchange"](value)
             return ("Adaptive owns output",False if kind=="preset" else "error")
+
+    def priority_write(self,kind,value):
+        with self.lock:
+            if self.control=="auto":
+                self.pending=None
+                self.reg.reset()
+            return self.g["new_presetchange" if kind=="preset" else "flimitchange"](value)
 
     def legacy_tick(self,name,*args):
         with self.lock:
@@ -144,6 +155,7 @@ class Runtime:
                     raise ValueError("set original FLimit and preset policy to auto first")
             self.control=mode
             self.fault=None
+            self.invalid_since=None
             self.reg=Regulator()
             self.status={"reason":"control selected: "+mode,"risk":"paused"}
 
@@ -168,12 +180,17 @@ class Runtime:
                 s,zone,curve,stamp=self.snapshot()
             except Exception as e:
                 self.reg.reset()
+                if self.invalid_since is None:
+                    self.invalid_since=now
                 if self.pending and now>self.pending[2]:
                     self.pending=None
                     self.fail("command readback unavailable")
+                elif self.control=="auto" and now-self.invalid_since>=180:
+                    self.fail("telemetry lost; manual hold")
                 else:
                     self.status={"reason":str(e),"risk":"paused"}
                 return
+            self.invalid_since=None
             if self.pending:
                 mode,relay,deadline,issued=self.pending
                 if (s.mode,s.relay)==(mode,relay) and stamp>issued:
@@ -186,6 +203,8 @@ class Runtime:
                     self.status={"reason":"waiting for confirmed preset and relay","risk":"paused"}
                     return
             if self.control=="manual":
+                if self.fault is None:
+                    self.status={"reason":"manual control; no adaptive writes","risk":"paused"}
                 return
             if zone!="normal" or s.dhw or s.defrost or s.override or s.error or abs(curve-s.target)>1:
                 self.reg.reset()
@@ -206,7 +225,7 @@ class Runtime:
             # Re-read immediately, and serialize against legacy set_newframe callers.
             with self.serial_lock:
                 current,z,actual_target,_=self.snapshot()
-                if z!="normal" or current.override or current.defrost or current.dhw or current.error or not current.heating or current.hz<=0 or current.requested_hz<=0 or (current.mode,current.relay)!=(s.mode,s.relay) or abs(current.target-s.target)>0.25 or self.g.get("newframe"):
+                if z!="normal" or current.override or current.defrost or current.dhw or current.error or not current.heating or current.hz<=0 or current.requested_hz<=0 or (current.mode,current.relay)!=(s.mode,s.relay) or abs(current.target-s.target)>0.25 or abs(actual_target-current.target)>1 or self.g.get("newframe"):
                     return
                 mode,relay=LEVELS[d.proposed]
                 issued=time.monotonic()
