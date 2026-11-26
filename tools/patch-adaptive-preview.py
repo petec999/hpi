@@ -283,6 +283,13 @@ def status_ui(html):
     new=' $("am-risk").textContent=({paused:"Oczekiwanie",balanced:"Stabilizacja / obserwacja",surplus:"Nadwyżka mocy",shortfall:"Niedobór mocy",cycling_risk:"Ryzyko taktowania",cycling_risk_at_minimum:"Ryzyko taktowania przy minimum",surplus_at_minimum:"Nadwyżka przy minimum",efficiency_probe:"Próba redukcji mocy"})[v.risk]||v.risk||"—";'
     if new not in html:
         html=once(html,old,new)
+    if 'id="am-return-temp"' not in html:
+        html=once(html,'<div class="metric"><span>Prognozowana nadwyżka</span>', '<div class="metric"><span>Twi – powrót</span><strong id="am-return-temp">—</strong></div><div class="metric"><span>Próg STOP (założenie)</span><strong id="am-stop-target">—</strong></div><div class="metric"><span>Do progu STOP</span><strong id="am-stop-margin">—</strong></div><div class="metric"><span>Trend Twi</span><strong id="am-return-trend">—</strong></div><div class="metric"><span>Prognoza Twi względem nastawy</span>')
+        html=once(html,' $("am-forecast").textContent=fmt(v.forecast)+" K";', ''' $("am-forecast").textContent=fmt(v.forecast)+" K";
+ $("am-return-temp").textContent=fmt(v.return_temp)+" °C";
+ $("am-stop-target").textContent=fmt(v.stop_target)+" °C";
+ $("am-stop-margin").textContent=fmt(v.stop_margin)+" K";
+ $("am-return-trend").textContent=fmt(v.return_trend)+" K/min";''')
     return html
 
 def learning_block():
@@ -291,7 +298,7 @@ def learning_block():
     block=MARK+"\nimport sys as _am_sys, types as _am_types\n"
     for name,code in (("_hpi_adaptive_policy",policy),("_hpi_adaptive_runtime",runtime)):
         block+=f'_am_module = _am_types.ModuleType({name!r})\n_am_sys.modules[{name!r}] = _am_module\nexec(compile({code!r}, {name!r}, "exec"), _am_module.__dict__)\n'
-    block+='_am = _am_module.Runtime(globals(), learning_path="/opt/haier/.adaptive-learning.json")\n# HOME-IOT ADAPTIVE MODULATION END'
+    block+='_am = _am_module.Runtime(globals(), learning_path="/opt/haier/.adaptive-learning-twi-v2.json")\n# HOME-IOT ADAPTIVE MODULATION END'
     return block
 
 def learning_ui(source):

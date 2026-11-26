@@ -4,12 +4,12 @@ from pathlib import Path
 from dataclasses import replace
 from adaptive.regulator import Learning, Sample, LEVELS, Settings
 
-def sample(t,level=5,supply=33,hz=45,**kw):
+def sample(t,level=5,supply=38,hz=45,**kw):
     mode,relay=LEVELS[level]
-    return replace(Sample(t,32,29,supply,hz,hz,mode,relay,True,False,True),**kw)
+    return replace(Sample(t,32,34 if supply>=34 else 29,supply,hz,hz,mode,relay,True,False,True),**kw)
 
 class LearningTest(unittest.TestCase):
-    def trial(self,l,supply=33,hz=40,outdoor=1):
+    def trial(self,l,supply=38,hz=40,outdoor=1):
         l.start(sample(0),sample(30,4,supply,hz),outdoor)
         for t in range(60,331,30):
             l.observe(sample(t,4,supply,hz),outdoor)
@@ -60,6 +60,14 @@ class LearningTest(unittest.TestCase):
             p.write_text("corrupt")
             self.assertEqual(Learning(p).summary()["observations"],0)
 
+    def test_old_schema_does_not_tune_return_policy(self):
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)/"old.json"
+            p.write_text(json.dumps({"schema":1,"contexts":{}}))
+            l=Learning(p)
+            self.assertEqual(l.settings(sample(0),1),Settings())
+            self.assertFalse(l.rows)
     def test_no_learning_on_wrong_transition(self):
         l=Learning()
         l.start(sample(0,4),sample(30,5),1)

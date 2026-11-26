@@ -28,7 +28,7 @@ class TestPolicy(unittest.TestCase):
         self.assertGreater(ds[-1].deficit_integral,4)
     def test_recovering_shortfall(self):
         r=Regulator()
-        ds=[r.step(sample(t,supply=min(32,30+t/120))) for t in range(0,600,30)]
+        ds=[r.step(sample(t,supply=min(32,30+t/120),ret=min(32,29+t/120))) for t in range(0,600,30)]
         self.assertTrue(all(d.proposed==1 for d in ds))
     def test_urgent_release(self):
         ds=self.series(Regulator(),level=5,supply=29,end=180)
@@ -38,8 +38,21 @@ class TestPolicy(unittest.TestCase):
         twi=[29.1,29.0,29.2,29.1,29.3,29.3,29.3,29.4,29.6,29.7,29.7,29.7,29.9]
         two=[32.2,32.3,32.3,32.3,32.4,32.6,32.6,32.6,32.8,32.8,32.9,33.1,32.8]
         ds=[r.step(sample(i*30,level=5,supply=b,ret=a,hz=45)) for i,(a,b) in enumerate(zip(twi,two))]
+        self.assertTrue(all(d.proposed==5 for d in ds))
+    def test_return_near_stop_even_when_supply_is_not_primary(self):
+        ds=self.series(Regulator(),level=5,supply=38,ret=36.2,end=360)
+        self.assertEqual(ds[-1].risk,"cycling_risk")
+        self.assertEqual(ds[-1].proposed,4)
+        self.assertAlmostEqual(ds[-1].predicted_surplus,4.2)
+    def test_rising_return_forecast(self):
+        r=Regulator()
+        ds=[r.step(sample(t,level=5,supply=36+t/120,ret=32+t/120)) for t in range(0,301,30)]
+        self.assertTrue(any(d.risk=="cycling_risk" for d in ds))
         self.assertTrue(any(d.proposed==4 for d in ds))
-        self.assertTrue(all(d.proposed in (4,5) for d in ds))
+    def test_supply_surplus_alone_is_not_return_stop_risk(self):
+        ds=self.series(Regulator(),level=5,supply=36,ret=29,end=900)
+        self.assertTrue(all(d.proposed==5 for d in ds))
+        self.assertAlmostEqual(ds[-1].predicted_surplus,-3)
     def test_noisy_deadband(self):
         r=Regulator()
         ds=[r.step(sample(t,supply=32+(.2 if t%60==0 else -.2),hz=25)) for t in range(0,1800,30)]
@@ -67,17 +80,17 @@ class TestPolicy(unittest.TestCase):
     def test_reduction_failure_and_cooldown(self):
         r=Regulator()
         # turbo+FLimit -> eco+FLimit; actual change observed after proposal
-        ds=self.series(r,level=5,supply=33,end=450)
+        ds=self.series(r,level=5,supply=38,ret=34,end=450)
         self.assertEqual(ds[-1].proposed,4)
         ds=self.series(r,level=4,start=480,end=780,supply=29.8)
         self.assertEqual(ds[-1].proposed,5)
         self.assertIn("failed",ds[-1].reason)
-        ds=self.series(r,level=5,start=810,end=1500,supply=33)
+        ds=self.series(r,level=5,start=810,end=1500,supply=38,ret=34)
         self.assertEqual(ds[-1].proposed,5)
         self.assertGreater(ds[-1].blocked_seconds,0)
     def test_unobserved_proposal_does_not_change_state(self):
         r=Regulator()
-        ds=self.series(r,level=5,supply=33,end=600)
+        ds=self.series(r,level=5,supply=38,ret=34,end=600)
         self.assertEqual(ds[-1].proposed,4)
         self.assertTrue(all(d.current==5 for d in ds))
         self.assertIsNone(r.trial)
@@ -87,7 +100,7 @@ class TestPolicy(unittest.TestCase):
             d=r.step(sample(t,supply=29),allowed={0,1})
             self.assertEqual(d.proposed,1)
     def test_surplus_at_lowest_envelope_does_not_force_stop_or_raise_power(self):
-        ds=self.series(Regulator(),level=0,supply=36,ret=33.5,hz=40,end=900)
+        ds=self.series(Regulator(),level=0,supply=40,ret=36.2,hz=40,end=900)
         self.assertTrue(all(d.proposed==0 for d in ds))
         self.assertEqual(ds[-1].risk,"cycling_risk_at_minimum")
     def test_deficit_can_release_lowest_envelope(self):
@@ -98,7 +111,7 @@ class TestPolicy(unittest.TestCase):
         self.assertTrue(all(d.current==d.proposed for d in ds))
         self.assertTrue(all(d.risk=="paused" for d in ds))
     def test_risk_visible_during_settling(self):
-        ds=self.series(Regulator(),level=0,supply=36,ret=34,end=120)
+        ds=self.series(Regulator(),level=0,supply=40,ret=36.2,end=120)
         self.assertEqual(ds[-1].risk,"cycling_risk_at_minimum")
         self.assertEqual(ds[-1].proposed,0)
     def test_balanced_low_frequency_no_probe(self):

@@ -5,7 +5,7 @@ import math
 import os
 import tempfile
 from pathlib import Path
-from adaptive.regulator import Regulator, Sample, LEVELS, Learning
+from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS
 
 class SelectionBlocked(ValueError):
     """Safe, fixed activation reason exposed to authenticated UI."""
@@ -287,7 +287,8 @@ class Runtime:
             reason="Postój sprężarki – potwierdzanie postoju przed przygotowaniem"
         self.status={"reason":"idle startup preparation","reason_pl":reason,
                      "risk":"paused","actual":actual,"proposed":proposed,
-                     "target":s.target,"down_confirm":self.reg.cfg.down_confirm,
+                     "target":s.target,"return_temp":s.return_temp,"stop_target":s.target+STOP_HYSTERESIS,
+                     "stop_margin":s.target+STOP_HYSTERESIS-s.return_temp,"down_confirm":self.reg.cfg.down_confirm,
                      "surplus_band":self.reg.cfg.surplus_band}
         if self.control!="auto" or (s.mode,s.relay)==(mode,relay) or previous is None or not 0<frame-previous<=self.MAX_AGE:
             return True
@@ -396,6 +397,8 @@ class Runtime:
             self.status={"reason":d.reason,"reason_pl":self.display_reason(s,d.reason),"risk":d.risk,"actual":label(d.current),
                          "proposed":label(d.proposed),"target":s.target,
                          "supply_error":d.supply_error,"forecast":d.predicted_surplus,
+                         "return_temp":s.return_temp,"return_trend":None if d.trend is None else -d.trend,
+                         "stop_target":s.target+STOP_HYSTERESIS,"stop_margin":s.target+STOP_HYSTERESIS-s.return_temp,
                          "deficit_integral":d.deficit_integral,
                          "down_confirm":self.reg.cfg.down_confirm,
                          "surplus_band":self.reg.cfg.surplus_band}

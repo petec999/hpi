@@ -18,7 +18,7 @@ class FakeGPIO:
 
 class Decoder:
     GetCHTemp=staticmethod(lambda r:32)
-    GetTwiTwo=staticmethod(lambda r:[29,32.9])
+    GetTwiTwo=staticmethod(lambda r:[34,38])
     GetCompInfo=staticmethod(lambda r:[45,45,2,320,30])
     GetMode=staticmethod(lambda r:"turbo")
     Get3way=staticmethod(lambda r:"CH")
@@ -313,6 +313,8 @@ class SourceIntegration(unittest.TestCase):
             self.assertIn('href="#am-curve-editor"',html)
             self.assertIn('id="am-c-save"',html)
             self.assertIn('v.reason_pl||v.reason',html)
+            self.assertIn('id="am-return-temp"',html)
+            self.assertIn('id="am-stop-margin"',html)
             self.assertIn('paused:"Oczekiwanie"',html)
             self.assertEqual(html.count('id="am-curve-editor"'),1)
             self.assertTrue(all('id="am-cp-'+str(i)+'"' in html for i in range(14)))
@@ -328,12 +330,12 @@ class SourceIntegration(unittest.TestCase):
             (d/"main.py").write_text(src)
 
             self.assertEqual(installer["plan"](d),[])
-            self.assertIn('learning_path="/opt/haier/.adaptive-learning.json"',src)
+            self.assertIn('learning_path="/opt/haier/.adaptive-learning-twi-v2.json"',src)
             self.assertIn('STABLE MQTT RECONNECT v2',src)
             self.assertIn('HOME-IOT MQTT WATCHDOG v2',src)
             # Simulate the previous embedded module: migration must keep all
             # core patches and leave the installed version idempotent.
-            old=src.replace('learning_path="/opt/haier/.adaptive-learning.json"','learning_path=None',1)
+            old=src.replace('learning_path="/opt/haier/.adaptive-learning-twi-v2.json"','learning_path=None',1)
             (d/"main.py").write_text(old)
             planned=installer["plan"](d)
             self.assertEqual(len(planned),1)

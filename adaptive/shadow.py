@@ -147,7 +147,7 @@ def describe(s,data,d,states,observed=None):
                 legacy_antionoff=data.get("antionoff"),control="shadow",
                 risk=d.risk,supply_error=d.supply_error,
                 supply_trend_k_min=None if d.supply_trend is None else round(d.supply_trend,3),
-                predicted_surplus=d.predicted_surplus,deficit_k_min=round(d.deficit_integral,2),
+                predicted_surplus=d.predicted_surplus,prediction_basis="Twi",deficit_k_min=round(d.deficit_integral,2),
                 retry_block_seconds=round(d.blocked_seconds),observation=observed or {})
 
 def main():

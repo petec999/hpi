@@ -13,6 +13,8 @@ import math
 LEVELS=(("quiet",True),("quiet",False),("eco",False),("turbo",False),
         ("eco",True),("turbo",True))
 PRESETS=("quiet","eco","turbo")
+# User-confirmed operating assumption for this installation, not a safety limit.
+STOP_HYSTERESIS=5.0
 
 @dataclass(frozen=True)
 class Sample:
@@ -41,18 +43,17 @@ class Settings:
     urgent_confirm: float=60
     down_confirm: float=90
     early_down_confirm: float=60
-    early_surplus: float=0.9
+    early_surplus: float=2.5
     probe_after: float=900
     failed_retry: float=1800
     trial_window: float=900
     forecast_min: float=3
     deficit_band: float=0.5
-    surplus_band: float=0.6
+    surplus_band: float=1.5
     urgent_deficit: float=2
     integral_limit: float=4  # K*min, not thermal energy
     trend_band: float=0.08
-    stop_risk_supply: float=3.0  # empirical warning, NOT a factory trip threshold
-    stop_risk_return: float=0.5  # supporting return-temperature overshoot
+    stop_margin: float=1.0  # provisional warning margin below assumed STOP
     probe_hz: float=30  # experimental opt-out threshold, not factory minimum
 
 @dataclass(frozen=True)
@@ -60,11 +61,11 @@ class Decision:
     current: int
     proposed: int
     reason: str
-    delta: float=None  # legacy return deficit, diagnostic only
+    delta: float=None  # median target minus Twi
     trend: float=None  # return deficit K/min
     supply_error: float=None
     supply_trend: float=None
-    predicted_surplus: float=None
+    predicted_surplus: float=None  # predicted Twi minus target
     deficit_integral: float=0
     risk: str="paused"
     blocked_seconds: float=0
@@ -184,25 +185,29 @@ class Regulator:
         rows=list(self.history)
         es=median(x[1] for x in rows)
         er=median(x[2] for x in rows)
-        # Leaky deficit integral; normal water-side delta T is not a deficit.
-        self.integral=max(0,min(30,self.integral+(max(0,es-0.2) if es>0.2 else -0.8)*dt))
+        # Twi tracks the native heating band. Two only corroborates a
+        # shortage: a cold return with adequately warm supply is normal.
+        self.integral=max(0,min(30,self.integral+(max(0,er-0.2) if er>0.2 and es>0.2 else -0.8)*dt))
         if len(rows)<3 or now-rows[0][0]<90:
             return Decision(level,level,"collecting samples",er,supply_error=es,deficit_integral=self.integral)
         ts=trend(rows,1)
         tr=trend(rows,2)
-        forecast=-es-max(-0.5,min(0.5,ts))*c.forecast_min
+        forecast=-er-max(-0.5,min(0.5,tr))*c.forecast_min
         def decision(proposed,reason,risk,blocked=0):
             return Decision(level,proposed,reason,er,tr,es,ts,forecast,self.integral,risk,blocked)
-        urgent=es>=c.urgent_deficit and ts>=-c.trend_band
-        shortfall=(es>c.deficit_band and ts>=-c.trend_band) or (es>0.3 and self.integral>=c.integral_limit)
-        # Rising supply above/near target, supported by the return trend.
-        # This is an overshoot proxy, not a known factory shutoff threshold.
-        excess=(es<=-c.surplus_band and ts<=c.trend_band) or (
-            es<=0.2 and forecast>=c.surplus_band and ts<-c.trend_band and tr<=c.trend_band)
-        stop_risk=(forecast>=c.stop_risk_supply and -er>=c.stop_risk_return
-                   and ts<=c.trend_band and tr<=c.trend_band)
+        urgent=er>=c.urgent_deficit and es>=c.urgent_deficit and tr>=-c.trend_band and ts>=-c.trend_band
+        shortfall=er>c.deficit_band and tr>=-c.trend_band and (
+            (es>c.deficit_band and ts>=-c.trend_band) or (es>0.2 and self.integral>=c.integral_limit))
+        # Reduce well before the expected native return-temperature stop.
+        # Two surplus alone is never a reason to reduce.
+        excess=(er<=-c.surplus_band and tr<=c.trend_band) or (
+            er<=0 and forecast>=c.early_surplus and tr<-c.trend_band)
+        stop_risk=max(s.return_temp-s.target,forecast)>=STOP_HYSTERESIS-c.stop_margin
+        # Close to STOP, never increase capacity even if the median lags.
+        if stop_risk:
+            urgent=shortfall=False
         settled=now-self.ready_since>=c.startup_hold and now-self.changed_at>=c.settle_hold
-        stable_probe=(now-self.ready_since>=c.probe_after and abs(es)<=0.3 and
+        stable_probe=(now-self.ready_since>=c.probe_after and abs(er)<=0.3 and es<=0.3 and
                       abs(ts)<=c.trend_band and abs(tr)<=c.trend_band and
                       median(x[3] for x in rows)>=c.probe_hz and
                       abs(median(x[3]-x[4] for x in rows))<=2)
@@ -216,7 +221,7 @@ class Regulator:
             # Urgent deficits may bypass the normal settling hold but still need confirmation.
             if not urgent and now-self.changed_at<c.settle_hold:
                 direction=None
-        elif (settled and (excess or stable_probe)) or (excess and forecast>=c.early_surplus and ts<-c.trend_band and tr<=c.trend_band and now-self.ready_since>=c.settle_hold and now-self.changed_at>=c.settle_hold):
+        elif (settled and (excess or stable_probe or stop_risk)) or ((stop_risk or (excess and forecast>=c.early_surplus and tr<-c.trend_band)) and now-self.ready_since>=c.settle_hold and now-self.changed_at>=c.settle_hold):
             direction="down"
             risk="cycling_risk" if stop_risk else "surplus" if excess else "efficiency_probe"
         # A reduction while the inverter is already ramping down can overshoot
@@ -245,7 +250,7 @@ class Regulator:
         if key!=self.candidate:
             self.candidate=key
             self.candidate_since=now
-        required=c.urgent_confirm if direction=="up" and urgent else c.up_confirm if direction=="up" else c.early_down_confirm if excess and forecast>=c.early_surplus and ts<-c.trend_band else c.down_confirm
+        required=c.urgent_confirm if direction=="up" and urgent else c.up_confirm if direction=="up" else c.early_down_confirm if stop_risk or (excess and forecast>=c.early_surplus and tr<-c.trend_band) else c.down_confirm
         if now-self.candidate_since<required:
             self.last_offer=None
             return decision(level,"confirming "+risk,risk)
@@ -253,7 +258,7 @@ class Regulator:
             self.blocked[(self.trial[0],level)]=now+c.failed_retry
             reason="restore previous capacity; reduction failed"
         else:
-            reason="increase available capacity" if direction=="up" else "reduce before overshoot" if excess else "probe lower capacity"
+            reason="increase available capacity" if direction=="up" else "reduce before overshoot" if excess or stop_risk else "probe lower capacity"
         self.last_offer=(level,proposed,direction,now)
         return decision(proposed,reason,risk)
 
@@ -285,18 +290,18 @@ class Learning:
             if self.path.is_symlink() or self.path.stat().st_size > 65536:
                 raise ValueError("invalid learning file")
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            if data["schema"] != 1 or not isinstance(data["contexts"], dict) or len(data["contexts"]) > self.MAX_CONTEXTS:
+            if data["schema"] != 2 or not isinstance(data["contexts"], dict) or len(data["contexts"]) > self.MAX_CONTEXTS:
                 raise ValueError("invalid learning schema")
             rows = {}
             for k, v in data["contexts"].items():
                 a,b,c,d = map(int,k.split(":"))
                 if not (-8 <= a <= 9 and 3 <= b <= 21 and 0 <= c < 6 and 0 <= d < 6 and adjacent(c,"down")==d and c!=d):
                     raise ValueError("invalid context")
-                if set(v) != {"n","score","delta_hz","delta_error","last"} or type(v["n"]) is not int or not 1<=v["n"]<=1000000:
+                if set(v) != {"n","score","delta_hz","delta_error","return_trend","last"} or type(v["n"]) is not int or not 1<=v["n"]<=1000000:
                     raise ValueError("invalid observation")
-                if not all(type(v[x]) in (int,float) and math.isfinite(v[x]) for x in ("score","delta_hz","delta_error","last")):
+                if not all(type(v[x]) in (int,float) and math.isfinite(v[x]) for x in ("score","delta_hz","delta_error","return_trend","last")):
                     raise ValueError("invalid numeric observation")
-                if not (-1<=v["score"]<=1 and abs(v["delta_hz"])<=150 and abs(v["delta_error"])<=30 and v["last"]>=0):
+                if not (-1<=v["score"]<=1 and abs(v["delta_hz"])<=150 and abs(v["delta_error"])<=30 and abs(v["return_trend"])<=10 and v["last"]>=0):
                     raise ValueError("out of range observation")
                 rows[k]=v
             self.rows=rows
@@ -319,8 +324,8 @@ class Learning:
         score=row["score"]
         return replace(base,
                        down_confirm=max(60,min(120,90-30*score)),
-                       surplus_band=max(.4,min(.8,.6-.2*score)),
-                       early_surplus=max(.7,min(1.1,.9-.2*score)),
+                       surplus_band=max(1.0,min(2.0,1.5-.5*score)),
+                       early_surplus=max(2.0,min(3.0,2.5-.5*score)),
                        forecast_min=max(2.5,min(3.5,3+.5*score)))
 
     def cancel(self):
@@ -345,38 +350,41 @@ class Learning:
             or s.hz<=0 or s.requested_hz<=0 or abs(s.target-t["before"].target)>=.25
             or abs(outdoor-t["outdoor"])>1.5 or LEVELS.index((s.mode,s.relay))!=t["new"]
             or not 0<=s.now-t["last"]<=65
-            or not all(math.isfinite(x) for x in (s.now,s.target,s.supply_temp,s.hz,outdoor))):
+            or not all(math.isfinite(x) for x in (s.now,s.target,s.supply_temp,s.return_temp,s.hz,outdoor))):
             self.cancel()
             return
         if s.now==t["last"]:
             return
         t["last"]=s.now
-        t["samples"].append((s.now,s.target-s.supply_temp,s.hz))
+        t["samples"].append((s.now,s.target-s.return_temp,s.hz,s.target-s.supply_temp))
         t["samples"]=[x for x in t["samples"] if s.now-x[0]<=120]
         if s.now-t["start"]<90 or len(t["samples"])<3:
             return
         e=median(x[1] for x in t["samples"])
         hz=median(x[2] for x in t["samples"])
-        shortage=e>.5 and all(x[1]>.3 for x in t["samples"])
-        urgent=e>=2 and all(x[1]>1.5 for x in t["samples"])
+        rate=-trend(t["samples"],1)
+        shortage=e>.5 and rate<=.08 and all(x[1]>.3 and x[3]>.3 for x in t["samples"])
+        urgent=e>=2 and rate<=.08 and all(x[1]>1.5 and x[3]>1.5 for x in t["samples"])
         if s.now-t["start"]<180 and not urgent:
             return
         if not shortage and s.now-t["start"]<300:
             return
-        score=-1 if shortage else 1 if e<-.6 else 0
-        self.record(t["key"],score,hz-t["before"].hz,e-(t["before"].target-t["before"].supply_temp))
+        # Positive score means the return is still too warm/rising after
+        # reduction, not measured savings or proof of a prevented stop.
+        score=-1 if shortage else 1 if -e>=1.5 or (-e>=0 and -e+max(0,rate)*3>=2.5) else 0
+        self.record(t["key"],score,hz-t["before"].hz,e-(t["before"].target-t["before"].return_temp),rate)
         self.cancel()
 
-    def record(self,key,score,dhz,de):
-        if not all(math.isfinite(x) for x in (score,dhz,de)) or abs(dhz)>150 or abs(de)>30:
+    def record(self,key,score,dhz,de,rate=0):
+        if not all(math.isfinite(x) for x in (score,dhz,de,rate)) or abs(dhz)>150 or abs(de)>30 or abs(rate)>10:
             return
         if key not in self.rows and len(self.rows)>=self.MAX_CONTEXTS:
             del self.rows[min(self.rows,key=lambda k:self.rows[k]["last"])]
         row=self.rows.get(key)
         alpha=1 if row is None else .25
-        row=row or {"n":0,"score":0,"delta_hz":0,"delta_error":0}
+        row=row or {"n":0,"score":0,"delta_hz":0,"delta_error":0,"return_trend":0}
         updated={"n":min(1000000,row["n"]+1),"last":max(0,time.time())}
-        for name,value in (("score",score),("delta_hz",dhz),("delta_error",de)):
+        for name,value in (("score",score),("delta_hz",dhz),("delta_error",de),("return_trend",rate)):
             updated[name]=round((1-alpha)*row[name]+alpha*value,4)
         self.rows[key]=updated
         self.dirty=True
@@ -393,7 +401,7 @@ class Learning:
                 raise ValueError("symlink learning path")
             fd,temp=tempfile.mkstemp(prefix=".adaptive-learning-",dir=str(self.path.parent))
             with os.fdopen(fd,"w",encoding="utf-8") as f:
-                json.dump({"schema":1,"contexts":self.rows},f,allow_nan=False,sort_keys=True)
+                json.dump({"schema":2,"contexts":self.rows},f,allow_nan=False,sort_keys=True)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(temp,self.path)
