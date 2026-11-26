@@ -115,8 +115,13 @@ def learning_block():
 def learning_ui(source):
     line=next(l for l in source.splitlines() if l.startswith("_WV_HTML = "))
     html=ast.literal_eval(line.split("=",1)[1].strip())
+    # /curvecalc returns JSON, not an HTML configuration page.
+    # The legacy root and other links below are actual template routes.
+    old='<a href="/curvecalc">Krzywa grzewcza</a>'
+    if old in html:
+        html=once(html,old,'<a href="/">Panel oryginalny</a>')
     if 'id="am-learning"' in html:
-        return source
+        return source if html==ast.literal_eval(line.split("=",1)[1].strip()) else once(source,line,"_WV_HTML = "+repr(html))
     html=once(html,'<p id="am-reason"', '<div class="metric"><span>Uczenie (obserwacje / konteksty)</span><strong id="am-learning">—</strong></div><div class="metric"><span>Pamięć / dostrojenie</span><strong id="am-learning-detail">—</strong></div><p id="am-reason"')
     html=once(html,' $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";',
     ''' const l=v.learning;

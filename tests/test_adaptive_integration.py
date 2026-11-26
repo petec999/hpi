@@ -151,6 +151,18 @@ class SourceIntegration(unittest.TestCase):
             self.assertIn('GPIO.setup(modbuspin, GPIO.OUT, initial=GPIO.LOW)',src)
             self.assertIn("STABLE MQTT PUBACK HEALTH",src)
             self.assertIn("HOME-IOT WEB UI V2 BEGIN",src)
+            import ast
+            html=ast.literal_eval(next(l for l in src.splitlines() if l.startswith("_WV_HTML = ")).split("=",1)[1].strip())
+            self.assertNotIn('href="/curvecalc"',html)
+            for url in ("/","/scheduler","/settings","/parameters","/charts"):
+                self.assertIn('href="'+url+'"',html)
+            # Migrate the already installed learning UI without duplicating it.
+            old=html.replace('<a href="/">Panel oryginalny</a>','<a href="/curvecalc">Krzywa grzewcza</a>')
+            line=next(l for l in src.splitlines() if l.startswith("_WV_HTML = "))
+            (d/"main.py").write_text(src.replace(line,"_WV_HTML = "+repr(old),1))
+            self.assertEqual(installer["plan"](d)[0][2].decode(),src)
+            (d/"main.py").write_text(src)
+
             self.assertEqual(installer["plan"](d),[])
             self.assertIn('learning_path="/opt/haier/.adaptive-learning.json"',src)
             self.assertIn('STABLE MQTT RECONNECT v2',src)
