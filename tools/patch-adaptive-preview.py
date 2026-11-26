@@ -429,52 +429,62 @@ const rw=d.register_watch;''')
 ''')
     return source
 
-def heater_control_api(source):
+def heater_status_api(source):
     source=heater_counter_api(source)
-    if 'out["heater_mode"]' not in source:
-        source=once(source,'    out["adaptive_control"]=am["control"]','    out["heater_mode"]=am["heater"]["mode"]\n    out["adaptive_control"]=am["control"]')
-        source=once(source,'    if key=="curve_settings":\n        value=_am.validate_curve(value)', '''    if key=="heater_mode":
+    # Retire the experimental writer on already-patched installations too.
+    if 'out["heater_mode"]' in source:
+        source=once(source,'    out["heater_mode"]=am["heater"]["mode"]\n','')
+        source=once(source,'''    if key=="heater_mode":
         if value not in ("off","on","auto") or expected not in ("off","on","auto"):
             raise ValueError("invalid heater mode")
-    elif key=="curve_settings":
-        value=_am.validate_curve(value)''')
-        source=once(source,'if (key not in ("adaptive_control","curve_settings") and not state["control_ready"])','if (key not in ("adaptive_control","curve_settings","heater_mode") and not state["control_ready"])')
-        source=once(source,'            if key=="curve_settings":\n                try:', '''            if key=="heater_mode":
+    elif key=="curve_settings":''','    if key=="curve_settings":')
+        source=once(source,'if (key not in ("adaptive_control","curve_settings","heater_mode") and not state["control_ready"])','if (key not in ("adaptive_control","curve_settings") and not state["control_ready"])')
+        source=once(source,'''            if key=="heater_mode":
                 _am.heater_request(value,expected)
-            elif key=="curve_settings":
-                try:''')
-        source=once(source,'    if msg.topic == topic + "/power/set":','''    if msg.topic == topic + "/ch/heater/mode/set":
+            elif key=="curve_settings":''','            if key=="curve_settings":')
+        source=once(source,'''    if msg.topic == topic + "/ch/heater/mode/set":
         if not msg.retain:
             try:
                 _am.heater_request(payload_raw.strip().lower())
             except ValueError:
                 logging.warning("Rejected Heater CO request")
         return
-    if msg.topic == topic + "/power/set":''')
-        source=once(source,'    configure_switch("Service test: Heater (A04)",','''    configure_select("Heater CO request (preview)", mqtt_topic + "/ch/heater/mode/set",
+''','')
+        source=once(source,'''    configure_select("Heater CO request (preview)", mqtt_topic + "/ch/heater/mode/set",
                      mqtt_topic + "/ch/heater/mode/state", "HaierPi_HeaterCORequest", ["off","on","auto"])
     configure_sensor("Heater CO reason", mqtt_topic + "/ch/heater/reason/state", "HaierPi_HeaterCOReason")
-    configure_switch("Service test: Heater (A04)",''')
+''','')
+    # Empty retained discovery messages delete only the retired entities.
+    if '_retired_heater_uid' not in source:
+        anchor='    configure_binary_sensor("Heater", st(\'heater\'), "HaierPi_Heater")'
+        source=once(source,anchor,anchor+'''
+    for _retired_heater_domain,_retired_heater_uid in (
+        ("select","HaierPi_HeaterCORequest"),("sensor","HaierPi_HeaterCOReason")
+    ):
+        client.publish(f"{ha_mqtt_discovery_prefix}/{_retired_heater_domain}/HaierPi/{_retired_heater_uid}/config","",qos=1,retain=True)
+''')
     line=next(l for l in source.splitlines() if l.startswith("_WV_HTML = "))
     html=ast.literal_eval(line.split("=",1)[1].strip())
-    if 'id="heater-request"' not in html:
-        html=once(html,'<p id="am-reason"', '<div class="metric"><span>Heater CO — żądanie (preview)</span><strong id="heater-request">—</strong></div><div class="ctlrow"><button id="heater-on" disabled>ON</button><button id="heater-off" disabled>OFF</button><button id="heater-auto" disabled>AUTO</button></div><p id="heater-reason"></p><small>ON: ręczne żądanie bez limitu czasu, dopóki warunki CO są bezpieczne. OFF kończy własne wspomaganie. AUTO pozostawia sterowanie fabryczne. OFF nie blokuje ochrony fabrycznej. Nie dotyczy osobnej grzałki zasobnika.</small><p id="am-reason"')
-        html=once(html,' const expected=key==="adaptive_control"?amState.control:amState.relay;', ' const expected=key==="heater_mode"?amState.heater.mode:key==="adaptive_control"?amState.control:amState.relay;')
+    original=html
+    if 'id="heater-request"' in html:
+        start=html.index('<div class="metric"><span>Heater CO — żądanie (preview)</span>')
+        end=html.index('<p id="am-reason"',start)
+        html=html[:start]+html[end:]
+        html=once(html,' const expected=key==="heater_mode"?amState.heater.mode:key==="adaptive_control"?amState.control:amState.relay;', ' const expected=key==="adaptive_control"?amState.control:amState.relay;')
+        start=html.index(' const ht=v.heater;')
+        end=html.index(' $("am-owner").textContent=',start)
+        html=html[:start]+html[end:]
+        start=html.index('for(const k of ["on","off","auto"])$("heater-"+k).addEventListener')
+        end=html.index('\n',start)+1
+        html=html[:start]+html[end:]
+    if 'id="heater-status-only"' not in html:
+        html=once(html,'<p id="am-reason"', '<div class="metric"><span>Heater CO — odczyt A4A</span><strong id="heater-status-only">—</strong></div><p id="heater-status-note"></p><p id="am-reason"')
         html=once(html,' $("am-owner").textContent=', ''' const ht=v.heater;
- $("heater-request").textContent=ht?ht.mode+" · A4A "+(ht.state===null?"—":ht.state?"ON":"OFF"):"—";
- $("heater-reason").textContent=ht?ht.reason+(ht.uncertain?" · Niepotwierdzony stan":""):"";
- for(const k of ["on","off","auto"])$("heater-"+k).disabled=!amState||amBusy||!ht||(k!=="off"&&ht.uncertain);
+ $("heater-status-only").textContent=ht&&ht.state!==null?(ht.state?"ON":"OFF"):"—";
+ $("heater-status-note").textContent=ht&&ht.previous_request_marker?"Pozostał znacznik dawnego żądania A04 — sprawdź stan na sterowniku. Brak zapisu A04 przez Adaptive.":"Tylko odczyt; liczniki w raporcie.";
  $("am-owner").textContent=''')
-        html=once(html,'$("am-save").addEventListener("click",', '''for(const k of ["on","off","auto"])$("heater-"+k).addEventListener("click",()=>{if(k!=="on"||window.confirm("Włączyć ręczne wspomaganie CO?"))amSend("heater_mode",k)});
-$("am-save").addEventListener("click",''')
+    if html!=original:
         source=once(source,line,"_WV_HTML = "+repr(html))
-    # Upgrade installed previews without leaving old labels.
-    old_html=html
-    html=html.replace('>ON (15 min)</button>','>ON</button>').replace(
-        'OFF anuluje nasze wspomaganie, nie wyłącza ochrony fabrycznej. AUTO: 60 min CO, niedobór &gt;3 K i wolny wzrost; próba maks. 10 min. Nie dotyczy osobnej grzałki zasobnika.',
-        'ON: ręczne żądanie bez limitu czasu, dopóki warunki CO są bezpieczne. OFF kończy własne wspomaganie. AUTO pozostawia sterowanie fabryczne. OFF nie blokuje ochrony fabrycznej. Nie dotyczy osobnej grzałki zasobnika.')
-    if html!=old_html:
-        source=once(source,"_WV_HTML = "+repr(old_html),"_WV_HTML = "+repr(html))
     return source
 
 def experiment_api(source):
@@ -483,7 +493,7 @@ def experiment_api(source):
     source=source if new in source else once(source,old,new)
     old='if current==value:'
     new='if current==value and not (key=="adaptive_control" and value=="manual" and _am.view()["auto_resume_pending"]):'
-    return heater_control_api(source if new in source else once(source,old,new))
+    return heater_status_api(source if new in source else once(source,old,new))
 
 def learning_block():
     policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")

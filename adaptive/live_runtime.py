@@ -37,25 +37,8 @@ class Runtime:
         self.thresholds=NativeThresholds(Path(learning_path).with_name(".adaptive-thresholds-v1.json") if learning_path else None)
         self.register_watch=RegisterWatch(Path(learning_path).with_name(".adaptive-register-watch-v1.json") if learning_path else None)
         self.heater_counter=HeaterCounter(Path(learning_path).with_name(".adaptive-heater-counter-v1.json") if learning_path else None)
-        # An explicit request never survives a process restart. A durable
-        # ownership marker does, so a possibly outstanding ON is visible.
-        self.heater_mode="auto"
-        self.heater_reason="AUTO: sterowanie fabryczne"
+        # Prior experimental ON marker is diagnostic only after retirement.
         self.heater_marker=Path(learning_path).with_name(".adaptive-heater-owned-v1") if learning_path else None
-        self.heater_owned=False
-        self.heater_uncertain=False
-        self.heater_issued=None
-        self.heater_last_write=-1e9
-        if self.heater_marker is not None:
-            try:
-                self.heater_owned=self.heater_marker.exists() or self.heater_marker.is_symlink()
-                if self.heater_owned:
-                    self.heater_mode="off"
-                    self.heater_uncertain=True
-                    self.heater_reason="Odzyskiwanie po restarcie: oczekiwanie na odczyt A4A"
-            except OSError:
-                self.heater_uncertain=True
-                self.heater_reason="Nie można sprawdzić stanu zapisanego wspomagania"
         self.observer_frames=None
         self.experiment_since=None
         self.experiment_idle=None
@@ -503,209 +486,12 @@ class Runtime:
             return data
 
     def heater_view(self):
-        return {"mode":self.heater_mode,"owned":self.heater_owned,"uncertain":self.heater_uncertain,
-                "reason":self.heater_reason,"state":self.heater_counter.summary(time.monotonic())["state"]}
-
-    def heater_request(self,mode,expected=None):
-        if mode not in ("off","on","auto"):
-            raise ValueError("invalid heater request")
-        with self.lock:
-            if expected is not None and expected!=self.heater_mode:
-                raise ValueError("heater request changed")
-            if mode=="on":
-                # Refuse to queue an unattended start in the future.
-                s,f=self.heater_snapshot()
-                if self.heater_blocker(s,f) or self.heater_uncertain:
-                    raise ValueError("Heater: brak bezpiecznych warunków CO")
-                if f["R141"][1][3]&0x0100 and not self.heater_owned:
-                    raise ValueError("Heater już aktywny fabrycznie; brak przejęcia wyjścia")
-            self.heater_mode=mode
-            self.heater_reason="Żądanie "+mode+"; oczekiwanie na ocenę"
-            return self.heater_view()
-
-    def heater_snapshot(self):
-        s,_,_,_=self.snapshot()
-        with self.frames_lock:
-            f=dict(self.frames)
-        now=time.monotonic()
-        if set(f)!=set(self.SIZES) or any(not 0<=now-v[0]<=self.MAX_AGE for v in f.values()):
-            raise ValueError("stale heater frames")
-        return s,f
-
-    def heater_priority(self,s,f):
-        # Restrict the added writer to the unambiguous CO-only context.
-        power=f["R101"][1][0]&255
-        return (bool(power&0x80) or s.dhw or s.defrost or s.override or s.error
-                or str(self.raw("pdhw")).lower()!="off"
-                or str(self.raw("anti_legionella_run")).lower() not in ("0","off","none")
-                or bool(self.g.get("anti_legionella_active"))
-                or bool(self.g.get("_dhw_assist_forced_heater"))
-                or bool(self.g.get("dhw_heater_assist_active"))
-                or bool(self.g.get("anti_legionella_forced_heater")))
-
-    def heater_blocker(self,s,f):
-        if self.heater_priority(s,f):
-            return "Priorytet CWU/ochrona/serwis"
-        if not (s.heating and self.flag(self.raw("pch")) and s.hz>0 and s.requested_hz>0
-                and f["R141"][1][3]&0x0200 and str(self.raw("pump")).lower()=="on"):
-            return "Brak aktywnego CO lub potwierdzonej pompy obiegowej"
-        if not (10<=s.target<=55 and 5<=s.return_temp<=s.supply_temp+2
-                and 5<=s.supply_temp<min(55,s.target+1)):
-            return "Temperatura poza zakresem wspomagania"
-        if self.control=="experiment":
-            return "Eksperyment Adaptive"
-        return None
-
-    def heater_mark(self,on):
-        # The marker is written BEFORE sending ON. Never auto-resume ON.
-        if self.heater_marker is None:
-            return False
-        p=self.heater_marker
-        temp=None
-        try:
-            if p.is_symlink():
-                raise OSError("symlink marker")
-            if on:
-                fd,temp=tempfile.mkstemp(prefix=".heater-owned-",dir=p.parent)
-                with os.fdopen(fd,"w") as stream:
-                    stream.write("A04\n")
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temp,p)
-                temp=None
-            else:
-                p.unlink(missing_ok=True)
-            fd=os.open(str(p.parent),os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            self.heater_owned=on
-            return True
-        except OSError:
-            self.heater_uncertain=True
-            self.heater_reason="Błąd zapisu stanu Heatera"
-            return False
-        finally:
-            if temp is not None:
-                try:
-                    os.unlink(temp)
-                except OSError:
-                    pass
-
-    @staticmethod
-    def heater_frame(current,on):
-        if len(current)!=6 or any(type(v) is not int or not 0<=v<=65535 for v in current):
-            raise ValueError("invalid A04 source")
-        # A04 write flag + explicit bit set/clear; no arithmetic carry.
-        low=(current[0]&255)&~8
-        return [0x1000|low|(8 if on else 0),current[1],current[2],current[3]&15,current[4]&255,current[5]]
-
-    def heater_write(self,on,now):
-        with self.serial_lock:
-            s,f=self.heater_snapshot()
-            if self.heater_priority(s,f) or (on and self.heater_blocker(s,f)):
-                return False
-            if self.g.get("newframe") or not self.g["_hp_ready_for_setters"]():
-                return False
-            actual=bool(f["R141"][1][3]&256)
-            if actual==on:
-                return False
-            current=list(f["R101"][1])
-            # Compare against the actual legacy source before sending.
-            if list(self.g.get("R101",[]))!=current:
-                return False
-            if on and not self.heater_mark(True):
-                return False
-            self.heater_last_write=now
-            self.heater_issued=(on,f["R141"][0],now)
-            if not self.g["set_newframe"](self.g["R101"],self.heater_frame(current,on)):
-                self.heater_uncertain=True
-                self.heater_mode="off"
-                self.heater_reason="Brak ACK A04 — oczekiwanie na odczyt; nie ponawiam ON"
-                return False
-            self.heater_reason="A04 przekazane — oczekiwanie na potwierdzenie"
-            return True
-
-    def heater_tick(self,now):
-        try:
-            s,f=self.heater_snapshot()
-            stamp=f["R141"][0]
-            actual=bool(f["R141"][1][3]&256)
-            priority=self.heater_priority(s,f)
-            blocker=self.heater_blocker(s,f)
-            if self.heater_issued is not None:
-                wanted,old_stamp,issued=self.heater_issued
-                if stamp>old_stamp and actual==wanted:
-                    self.heater_issued=None
-                    self.heater_uncertain=False
-                    if not wanted and not self.heater_mark(False):
-                        return
-                    self.heater_reason="Potwierdzono A4A "+("ON" if wanted else "OFF")
-                elif now-issued<90:
-                    return
-                else:
-                    self.heater_issued=None
-                    self.heater_uncertain=True
-                    self.heater_mode="off"
-                    self.heater_reason="Niepotwierdzone A04; żądanie ON anulowane"
-            if self.heater_owned and not actual and self.heater_issued is None:
-                if not self.heater_mark(False):
-                    return
-                self.heater_uncertain=False
-                # A native shutoff is not an invitation to reassert ON.
-                if self.heater_mode=="on":
-                    self.heater_mode="off"
-            if priority:
-                if self.heater_mode=="on":
-                    self.heater_mode="off"
-                self.heater_reason=("Priorytet fabryczny/CWU — bez zapisu A04"
-                                    +(" · własne ON wymaga potwierdzenia OFF" if self.heater_owned else ""))
-                return
-            if blocker and self.heater_mode=="on":
-                self.heater_mode="off"
-            if self.heater_owned:
-                # OFF and AUTO both release our manual ON. Do not write to
-                # unowned outputs; wait for fresh readback after every write.
-                stop=self.heater_mode!="on" or blocker or self.heater_uncertain
-                if stop and actual and now-self.heater_last_write>=30:
-                    self.heater_write(False,now)
-                elif not stop:
-                    self.heater_reason="Ręczne wspomaganie CO aktywne (A4A)"
-                return
-            if self.heater_mode=="auto":
-                self.heater_reason="AUTO: sterowanie fabryczne; bez zapisu A04"
-                return
-            if self.heater_mode=="off" or blocker or self.heater_uncertain:
-                self.heater_reason=blocker or "OFF: brak własnego wspomagania"
-                return
-            if actual:
-                # Factory output appeared after the manual request: never
-                # claim it or queue a later start.
-                self.heater_mode="auto"
-                self.heater_reason="Fabryczny Heater aktywny; bez przejęcia"
-                return
-            if now-self.heater_last_write>=60:
-                self.heater_write(True,now)
-        except Exception:
-            if self.heater_mode=="on" or self.heater_owned:
-                self.heater_mode="off"
-            if self.heater_owned:
-                self.heater_uncertain=True
-            self.heater_reason="Brak poprawnego odczytu — ręczne ON anulowane"
-
-    def heater_mqtt(self):
-        base=str(self.g.get("mqtt_topic","")).rstrip("/")
-        if not base:
-            return
-        d=self.heater_view()
-        for client in list(self.g.get("services",[])):
-            try:
-                if client.is_connected():
-                    for key,value in (("mode",d["mode"]),("reason",d["reason"])):
-                        client.publish(base+"/ch/heater/"+key+"/state",str(value),qos=0,retain=False)
-            except Exception:
-                pass
+        data=self.heater_counter.summary(time.monotonic())
+        # Do not silently write OFF or delete a prior ownership marker.
+        # It is evidence of a possible historical manual request, not proof.
+        data["previous_request_marker"]=bool(self.heater_marker and
+            (self.heater_marker.exists() or self.heater_marker.is_symlink()))
+        return data
 
     def observe_heater(self,now):
         # Count only fresh, distinct R141 samples; no additional RS485 traffic.
@@ -897,8 +683,6 @@ class Runtime:
                     self.ready_log_frames=stamps
                     self.ready_log_count+=1
             self.observe_heater(now)
-            self.heater_tick(now)
-            self.heater_mqtt()
             self.observe_registers(now)
             self.observe_hysteresis()
             if self.resume_requested:

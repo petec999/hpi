@@ -412,6 +412,11 @@ class SourceIntegration(unittest.TestCase):
             html=ast.literal_eval(next(l for l in src.splitlines() if l.startswith("_WV_HTML = ")).split("=",1)[1].strip())
             self.assertNotIn('href="/curvecalc"',html)
             self.assertIn('id="am-owner"',html)
+            self.assertIn('id="heater-status-only"',html)
+            self.assertNotIn('id="heater-on"',html)
+            self.assertNotIn('out["heater_mode"]',src)
+            self.assertNotIn('"/ch/heater/mode/set"',src)
+            self.assertIn('_retired_heater_uid',src)
             self.assertIn('href="/v2/adaptive-report"',html)
             report_routes={n.name:n for n in ast.parse(src).body if isinstance(n,ast.FunctionDef) and n.name.startswith("_wv_adaptive_report_")}
             self.assertEqual(set(report_routes),{"_wv_adaptive_report_page","_wv_adaptive_report_json","_wv_adaptive_report_csv"})
