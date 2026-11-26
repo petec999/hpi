@@ -1,0 +1,26 @@
+# Integrated adaptive preview for 1.4.5 Stable
+
+This is an opt-in **experimental preview**, not an upstream release or a validated hardware controller. It integrates the 1.4.5_4 core (GPIO, RS485 initial receive state, MQTT reconnect/PUBACK and HA watchdog), the previously device-tested Stage 2 WWW v2, and the adaptive policy. It preserves the existing configuration, original WWW and diagnostic sidecars. No reset, remount or clean installation.
+
+## Installation and rollback
+
+Download the terminal installer from a pinned commit and pass that same 40-character commit to it. Without --apply it only stages and compiles the changes. With --apply it requires root on HaierPi, validates every source anchor before writes, saves original main.py and HPi/GPIO.py if changed, replaces them atomically, and restarts haier once. It checks two independently renewed sets of four complete RS485 frames in the new service invocation and a valid snapshot; failure triggers automatic restoration and restart. A systemd invocation ID and journal are required. It does not verify end-to-end Home Assistant delivery; check existing watchdog separately. A power loss during file replacement is not an atomic two-file transaction; retain the printed backup.
+
+The wrapper downloads nine source files into a temporary directory from the same immutable Git commit. It does not download or overwrite the original Stable archive, install packages or change the service definition. Unknown WWW v2 variants are rejected. The initial preview marker prevents accidental double installation; later preview upgrades must explicitly support migration.
+
+Open the existing HaierPi address plus /v2/ and log in as usual. New card: AntiON-OFF v2.
+
+## Control selection
+
+- Legacy (default after **every service restart**): the original preset/FLimit policy remains in charge.
+- Shadow: the original policy remains in charge; adaptive proposals shown without writes.
+- Manual: suppress normal automatic CO preset/relay writers; manually select Quiet/Eco/Turbo and FLimit in WWW. Explicit priority modes and protections remain authoritative.
+- Auto: opt-in; uses actual four-frame snapshot and the adaptive policy. It requires original FLimit and preset policies set to auto, a normal outdoor zone, valid sensors, no conflicting safety/DHW operation and actual CO target within 1 K of computed curve. It never changes heat demand, water setpoint or starts/stops the compressor. Explicit manual profile or relay command takes over as Manual when Auto is enabled (provided no priority operation or outstanding command). The existing MQTT and original WWW manual command paths are included.
+- Frost/warm forced zones, DHW override/restoration, defrost and antifreeze remain priorities. Disable optional forced preset zones in existing settings only if you want adaptive decisions throughout their temperature range; do not disable factory protections. Auto pauses outside normal zone.
+- Stale data pauses adaptive writes; prolonged data loss, failed write/readback or exceptions disarm into Manual hold. Pending write confirmation blocks other adaptive writes. Only a confirmed subsequent R201 preset frame and physical sysfs GPIO readback can clear pending state.
+
+State selection is session/process-wide, not saved into config. Auto never starts by itself after reboot. Core serial writes share a lock to prevent simultaneous submissions to the existing single-slot mailbox. Existing protocol parsing is unchanged: complete register counts are not a new CRC implementation. A pending timed-out legacy write may still complete; no automatic adaptive retry. GPIO readback verifies the output pin, not the physical relay contacts. Curve and actual CH target are kept distinct. The new panel uses the existing authenticated CSRF-protected control route. All runtime controls are local; no new MQTT discovery entities added in this preview.
+
+## Validation
+
+Unit tests on Python 3.9/3.11, mocked ownership/readback/telemetry tests, pinned Stable archive checksum, actual PyHaier decoder export checks, full source patch and idempotence. MQTT and GPIO core tests passed separately in release/1.4.5_4. The integrated code has not been operated on a real pump; keep Legacy or Shadow until verifying four-frame cadence, WWW state, and Manual behavior. Do not enable Auto unattended on the first hardware test. No promise of eliminating all cycles, especially when heat demand is below the pump's physical minimum. Existing historical replay is observational, not a counterfactual proof.
