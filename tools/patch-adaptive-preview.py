@@ -103,11 +103,40 @@ def _wv_ready''')
                 _wv_execute(g,key,value)''')
     return once(s,base,b)
 
+def learning_block():
+    policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")
+    runtime=(ROOT/"adaptive/live_runtime.py").read_text(encoding="utf-8").replace("from adaptive.regulator import","from _hpi_adaptive_policy import")
+    block=MARK+"\nimport sys as _am_sys, types as _am_types\n"
+    for name,code in (("_hpi_adaptive_policy",policy),("_hpi_adaptive_runtime",runtime)):
+        block+=f'_am_module = _am_types.ModuleType({name!r})\n_am_sys.modules[{name!r}] = _am_module\nexec(compile({code!r}, {name!r}, "exec"), _am_module.__dict__)\n'
+    block+='_am = _am_module.Runtime(globals(), learning_path="/opt/haier/.adaptive-learning.json")\n# HOME-IOT ADAPTIVE MODULATION END'
+    return block
+
+def learning_ui(source):
+    line=next(l for l in source.splitlines() if l.startswith("_WV_HTML = "))
+    html=ast.literal_eval(line.split("=",1)[1].strip())
+    if 'id="am-learning"' in html:
+        return source
+    html=once(html,'<p id="am-reason"', '<div class="metric"><span>Uczenie (obserwacje / konteksty)</span><strong id="am-learning">—</strong></div><div class="metric"><span>Pamięć / dostrojenie</span><strong id="am-learning-detail">—</strong></div><p id="am-reason"')
+    html=once(html,' $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";',
+    ''' const l=v.learning;
+ $("am-learning").textContent=l?l.observations+" / "+l.contexts:"—";
+ $("am-learning-detail").textContent=l?(l.storage_error?"RAM (błąd zapisu)":l.unsaved?"RAM (oczekuje na zapis)":"Zapis / brak nowych danych")+" · "+fmt(v.down_confirm)+" s / "+fmt(v.surplus_band)+" K":"—";
+ $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";''')
+    return once(source,line,"_WV_HTML = "+repr(html))
+
 def patch(source):
     if MARK in source:
         if source.count(MARK)!=1 or "_am.tick()" not in source or 'id="am-control"' not in ast.literal_eval(next(l for l in source.splitlines() if l.startswith("_WV_HTML = ")).split("=",1)[1].strip()):
             raise ValueError("Incomplete adaptive patch")
-        return source
+        end="# HOME-IOT ADAPTIVE MODULATION END"
+        if source.count(end)!=1:
+            raise ValueError("Incomplete adaptive module")
+        start=source.index(MARK)
+        stop=source.index(end,start)+len(end)
+        updated=learning_ui(source[:start]+learning_block()+source[stop:])
+        compile(updated,"main.py","exec")
+        return updated
     # Match known call sites by AST and reject new writers. Do not edit arbitrary strings.
     tree=ast.parse(source)
     functions={n.name:n for n in tree.body if isinstance(n,ast.FunctionDef)}
@@ -163,18 +192,12 @@ def patch(source):
     start=n.body[0].lineno-1
     ls[start:n.end_lineno]=["    with _am.serial_lock:\n"]+["    "+l if l.strip() else l for l in ls[start:n.end_lineno]]
     s="".join(ls)
-    # Embedded private modules avoid installing a new package into the live Python env.
-    policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")
-    runtime=(ROOT/"adaptive/live_runtime.py").read_text(encoding="utf-8").replace("from adaptive.regulator import","from _hpi_adaptive_policy import")
-    block="\n"+MARK+"\nimport sys as _am_sys, types as _am_types\n"
-    for name,code in (("_hpi_adaptive_policy",policy),("_hpi_adaptive_runtime",runtime)):
-        block+=f'_am_module = _am_types.ModuleType({name!r})\n_am_sys.modules[{name!r}] = _am_module\nexec(compile({code!r}, {name!r}, "exec"), _am_module.__dict__)\n'
-    block+="_am = _am_module.Runtime(globals())\n# HOME-IOT ADAPTIVE MODULATION END\n\n"
+    block="\n"+learning_block()+"\n\n"
     # Defined before MQTT callback, reader and any core output call.
     n=next(n for n in ast.parse(s).body if isinstance(n,ast.FunctionDef) and n.name=="on_message")
     ls=s.splitlines(keepends=True)
     ls.insert(min([n.lineno]+[d.lineno for d in n.decorator_list])-1,block)
     s="".join(ls)
-    s=patch_web(s)
+    s=learning_ui(patch_web(s))
     compile(s,"main.py","exec")
     return s

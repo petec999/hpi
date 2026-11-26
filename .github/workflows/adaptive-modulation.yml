@@ -1,7 +1,7 @@
 name: Adaptive modulation policy tests
 on:
   push:
-    branches: [feature/adaptive-modulation]
+    branches: [feature/adaptive-modulation, feature/adaptive-learning]
   workflow_dispatch:
 permissions:
   contents: read

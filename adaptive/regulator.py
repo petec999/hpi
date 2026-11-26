@@ -1,5 +1,10 @@
 """Experimental anti-cycling supervisory policy. Pure proposals, no I/O."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
+import json
+import os
+import tempfile
+import time
 from collections import deque
 from statistics import median
 import math
@@ -251,3 +256,158 @@ class Regulator:
             reason="increase available capacity" if direction=="up" else "reduce before overshoot" if excess else "probe lower capacity"
         self.last_offer=(level,proposed,direction,now)
         return decision(proposed,reason,risk)
+
+class Learning:
+    """Bounded adaptation from confirmed, uninterrupted Auto reductions."""
+    MAX_CONTEXTS = 128
+    SAVE_INTERVAL = 21600
+
+    def __init__(self, path=None, logger=None):
+        self.path = Path(path) if path is not None else None
+        self.logger = logger
+        self.rows = {}
+        self.trial = None
+        self.dirty = False
+        self.last_save = None
+        self.storage_error = None
+        self.load()
+
+    @staticmethod
+    def key(s, outdoor, old, new):
+        if not math.isfinite(outdoor) or not -40 <= outdoor <= 45:
+            return None
+        return "%d:%d:%d:%d" % (math.floor(outdoor/5), math.floor(s.target/3), old, new)
+
+    def load(self):
+        if self.path is None:
+            return
+        try:
+            if self.path.is_symlink() or self.path.stat().st_size > 65536:
+                raise ValueError("invalid learning file")
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if data["schema"] != 1 or not isinstance(data["contexts"], dict) or len(data["contexts"]) > self.MAX_CONTEXTS:
+                raise ValueError("invalid learning schema")
+            rows = {}
+            for k, v in data["contexts"].items():
+                a,b,c,d = map(int,k.split(":"))
+                if not (-8 <= a <= 9 and 3 <= b <= 21 and 0 <= c < 6 and 0 <= d < 6 and adjacent(c,"down")==d and c!=d):
+                    raise ValueError("invalid context")
+                if set(v) != {"n","score","delta_hz","delta_error","last"} or type(v["n"]) is not int or not 1<=v["n"]<=1000000:
+                    raise ValueError("invalid observation")
+                if not all(type(v[x]) in (int,float) and math.isfinite(v[x]) for x in ("score","delta_hz","delta_error","last")):
+                    raise ValueError("invalid numeric observation")
+                if not (-1<=v["score"]<=1 and abs(v["delta_hz"])<=150 and abs(v["delta_error"])<=30 and v["last"]>=0):
+                    raise ValueError("out of range observation")
+                rows[k]=v
+            self.rows=rows
+            self.last_save=time.monotonic()
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError) as e:
+            self.storage_error=type(e).__name__
+            self.last_save=time.monotonic()
+            if self.logger:
+                self.logger.warning("Adaptive learning load skipped: %s", self.storage_error)
+
+    def settings(self, s, outdoor):
+        base=Settings()
+        old=LEVELS.index((s.mode,s.relay))
+        new=adjacent(old,"down")
+        row=self.rows.get(self.key(s,outdoor,old,new),{})
+        if row.get("n",0)<3:
+            return base
+        score=row["score"]
+        return replace(base,
+                       down_confirm=max(60,min(120,90-30*score)),
+                       surplus_band=max(.4,min(.8,.6-.2*score)),
+                       early_surplus=max(.7,min(1.1,.9-.2*score)),
+                       forecast_min=max(2.5,min(3.5,3+.5*score)))
+
+    def cancel(self):
+        self.trial=None
+
+    def start(self, before, after, outdoor):
+        self.cancel()
+        old=LEVELS.index((before.mode,before.relay))
+        new=LEVELS.index((after.mode,after.relay))
+        if old==new or adjacent(old,"down")!=new or abs(before.target-after.target)>=.25:
+            return
+        key=self.key(before,outdoor,old,new)
+        if key is not None:
+            self.trial={"key":key,"before":before,"new":new,"outdoor":outdoor,
+                        "start":after.now,"last":after.now,"samples":[]}
+
+    def observe(self,s,outdoor):
+        t=self.trial
+        if t is None:
+            return
+        if (not s.fresh or not s.heating or s.defrost or s.dhw or s.override or s.error
+            or s.hz<=0 or s.requested_hz<=0 or abs(s.target-t["before"].target)>=.25
+            or abs(outdoor-t["outdoor"])>1.5 or LEVELS.index((s.mode,s.relay))!=t["new"]
+            or not 0<=s.now-t["last"]<=65
+            or not all(math.isfinite(x) for x in (s.now,s.target,s.supply_temp,s.hz,outdoor))):
+            self.cancel()
+            return
+        if s.now==t["last"]:
+            return
+        t["last"]=s.now
+        t["samples"].append((s.now,s.target-s.supply_temp,s.hz))
+        t["samples"]=[x for x in t["samples"] if s.now-x[0]<=120]
+        if s.now-t["start"]<180 or len(t["samples"])<3:
+            return
+        e=median(x[1] for x in t["samples"])
+        hz=median(x[2] for x in t["samples"])
+        shortage=e>.5 and all(x[1]>.3 for x in t["samples"])
+        if not shortage and s.now-t["start"]<300:
+            return
+        score=-1 if shortage else 1 if e<-.6 else 0
+        self.record(t["key"],score,hz-t["before"].hz,e-(t["before"].target-t["before"].supply_temp))
+        self.cancel()
+
+    def record(self,key,score,dhz,de):
+        if not all(math.isfinite(x) for x in (score,dhz,de)) or abs(dhz)>150 or abs(de)>30:
+            return
+        if key not in self.rows and len(self.rows)>=self.MAX_CONTEXTS:
+            del self.rows[min(self.rows,key=lambda k:self.rows[k]["last"])]
+        row=self.rows.get(key)
+        alpha=1 if row is None else .25
+        row=row or {"n":0,"score":0,"delta_hz":0,"delta_error":0}
+        updated={"n":min(1000000,row["n"]+1),"last":max(0,time.time())}
+        for name,value in (("score",score),("delta_hz",dhz),("delta_error",de)):
+            updated[name]=round((1-alpha)*row[name]+alpha*value,4)
+        self.rows[key]=updated
+        self.dirty=True
+        if self.logger:
+            self.logger.info("Adaptive learning observation: %s %s",key,updated)
+
+    def save_if_due(self,now):
+        if not self.dirty or self.path is None or (self.last_save is not None and now-self.last_save<self.SAVE_INTERVAL):
+            return
+        self.last_save=now
+        temp=None
+        try:
+            if self.path.is_symlink():
+                raise ValueError("symlink learning path")
+            fd,temp=tempfile.mkstemp(prefix=".adaptive-learning-",dir=str(self.path.parent))
+            with os.fdopen(fd,"w",encoding="utf-8") as f:
+                json.dump({"schema":1,"contexts":self.rows},f,allow_nan=False,sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp,self.path)
+            temp=None
+            self.dirty=False
+            self.storage_error=None
+        except (OSError,ValueError,TypeError) as e:
+            self.storage_error=type(e).__name__
+            if self.logger:
+                self.logger.warning("Adaptive learning persistence unavailable: %s",self.storage_error)
+        finally:
+            if temp is not None:
+                try:
+                    os.unlink(temp)
+                except OSError:
+                    pass
+
+    def summary(self):
+        return {"contexts":len(self.rows),"observations":sum(v["n"] for v in self.rows.values()),
+                "trial":self.trial is not None,"unsaved":self.dirty,"storage_error":self.storage_error}

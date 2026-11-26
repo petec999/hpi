@@ -2,13 +2,13 @@
 import threading
 import time
 import math
-from adaptive.regulator import Regulator, Sample, LEVELS
+from adaptive.regulator import Regulator, Sample, LEVELS, Learning
 
 class Runtime:
     MAX_AGE=60
     PERIOD=30
     SIZES={"R101":6,"R141":16,"R201":1,"R241":22}
-    def __init__(self,g):
+    def __init__(self,g,learning_path=None):
         self.g=g
         self.lock=threading.RLock()
         self.serial_lock=threading.RLock()
@@ -16,6 +16,8 @@ class Runtime:
         self.frames={}
         self.control="legacy"
         self.reg=Regulator()
+        self.learning=Learning(learning_path,g.get("logging"))
+        self.learning_before=None
         self.last_tick=0
         self.pending=None
         self.status={"reason":"Legacy; no adaptive writes","risk":"paused"}
@@ -120,6 +122,8 @@ class Runtime:
             if self.control in ("legacy","shadow") or zone in ("frost","warm"):
                 if zone in ("frost","warm") and self.control=="auto":
                     self.pending=None
+                    self.learning.cancel()
+                    self.learning_before=None
                     self.reg.reset()
                 return self.g["new_presetchange" if kind=="preset" else "flimitchange"](value)
             return ("Adaptive owns output",False if kind=="preset" else "error")
@@ -128,6 +132,8 @@ class Runtime:
         with self.lock:
             if self.control=="auto":
                 self.pending=None
+                self.learning.cancel()
+                self.learning_before=None
                 self.reg.reset()
             return self.g["new_presetchange" if kind=="preset" else "flimitchange"](value)
 
@@ -142,6 +148,8 @@ class Runtime:
                 if self.priority() or self.pending is not None:
                     return ("Priority operation or pending readback",False if kind=="preset" else "error")
                 self.control="manual"
+                self.learning.cancel()
+                self.learning_before=None
                 self.reg=Regulator()
             return self.g["new_presetchange" if kind=="preset" else "flimitchange"](value)
 
@@ -162,12 +170,16 @@ class Runtime:
                 if str(self.g.get("flimit")).lower()!="auto" or str(self.g.get("presetautochange")).lower()!="auto":
                     raise ValueError("set original FLimit and preset policy to auto first")
             self.control=mode
+            self.learning.cancel()
+            self.learning_before=None
             self.fault=None
             self.invalid_since=None
             self.reg=Regulator()
             self.status={"reason":"control selected: "+mode,"risk":"paused"}
 
     def fail(self,reason):
+        self.learning.cancel()
+        self.learning_before=None
         self.control="manual"
         self.reg=Regulator()
         self.fault=reason
@@ -182,6 +194,10 @@ class Runtime:
             return
         try:
             self.last_tick=now
+            self.learning.save_if_due(now)
+            if self.control!="auto":
+                self.learning.cancel()
+                self.learning_before=None
             if self.ready_log_count<3:
                 with self.frames_lock:
                     stamps={k:t for k,(t,_) in self.frames.items()}
@@ -196,6 +212,8 @@ class Runtime:
             try:
                 s,zone,curve,stamp=self.snapshot()
             except Exception as e:
+                self.learning.cancel()
+                self.learning_before=None
                 self.reg.reset()
                 if self.invalid_since is None:
                     self.invalid_since=now
@@ -212,6 +230,13 @@ class Runtime:
                 mode,relay,deadline,issued=self.pending
                 if (s.mode,s.relay)==(mode,relay) and stamp>issued:
                     self.pending=None
+                    before=self.learning_before
+                    self.learning_before=None
+                    if before is not None and self.control=="auto":
+                        original,outdoor=before
+                        current_outdoor=self.number(self.raw("outtemp"))
+                        if abs(current_outdoor-outdoor)<=1.5:
+                            self.learning.start(original,s,outdoor)
                 elif now>deadline:
                     self.pending=None
                     self.fail("command readback did not match")
@@ -224,6 +249,8 @@ class Runtime:
                     self.status={"reason":"manual control; no adaptive writes","risk":"paused"}
                 return
             if zone!="normal" or s.dhw or s.defrost or s.override or s.error or abs(curve-s.target)>1:
+                self.learning.cancel()
+                self.learning_before=None
                 self.reg.reset()
                 self.status={"reason":"priority zone, protection, DHW or setpoint mismatch","risk":"paused"}
                 return
@@ -231,12 +258,18 @@ class Runtime:
                                        str(self.g.get("presetautochange")).lower()!="auto"):
                 self.fail("original automatic policy setting changed")
                 return
+            if self.control=="auto":
+                outdoor=self.number(self.raw("outtemp"))
+                self.learning.observe(s,outdoor)
+                self.reg.cfg=self.learning.settings(s,outdoor)
             d=self.reg.step(s,control=self.control)
             label=lambda i: None if i is None else LEVELS[i][0]+("+FLimit" if LEVELS[i][1] else "")
             self.status={"reason":d.reason,"risk":d.risk,"actual":label(d.current),
                          "proposed":label(d.proposed),"target":s.target,
                          "supply_error":d.supply_error,"forecast":d.predicted_surplus,
-                         "deficit_integral":d.deficit_integral}
+                         "deficit_integral":d.deficit_integral,
+                         "down_confirm":self.reg.cfg.down_confirm,
+                         "surplus_band":self.reg.cfg.surplus_band}
             if self.control!="auto" or d.proposed==d.current or d.proposed is None:
                 return
             # Re-read immediately, and serialize against legacy set_newframe callers.
@@ -246,6 +279,8 @@ class Runtime:
                     return
                 mode,relay=LEVELS[d.proposed]
                 issued=time.monotonic()
+                self.learning.cancel()
+                self.learning_before=(s,outdoor)
                 self.pending=(mode,relay,issued+90,issued)
                 if mode!=s.mode:
                     _,ok=self.g["new_presetchange"](mode)
@@ -275,4 +310,5 @@ class Runtime:
                 actual=relay=zone=None
                 ready=False
             return dict(self.status,control=self.control,mode=actual,relay=relay,
-                        ready=ready,zone=zone,pending=self.pending is not None,fault=self.fault)
+                        ready=ready,zone=zone,pending=self.pending is not None,fault=self.fault,
+                        learning=self.learning.summary())
