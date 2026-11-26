@@ -145,7 +145,10 @@ def describe(s,data,d,states,observed=None):
                 delta=d.delta,trend_k_min=None if d.trend is None else round(d.trend,3),
                 fresh=s.fresh,availability=states,zone=data.get("tempzone"),
                 legacy_antionoff=data.get("antionoff"),control="shadow",
-                observation=observed or {})
+                risk=d.risk,supply_error=d.supply_error,
+                supply_trend_k_min=None if d.supply_trend is None else round(d.supply_trend,3),
+                predicted_surplus=d.predicted_surplus,deficit_k_min=round(d.deficit_integral,2),
+                retry_block_seconds=round(d.blocked_seconds),observation=observed or {})
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
