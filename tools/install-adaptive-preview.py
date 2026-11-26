@@ -47,7 +47,7 @@ def recent_health():
         systemctl("is-active","--quiet","haier")
         log=subprocess.run(["journalctl","--no-pager","-o","cat","_SYSTEMD_INVOCATION_ID="+invocation],
                            check=True,capture_output=True,text=True,timeout=15).stdout
-        ready="Adaptive integration: four complete recent frames" in log
+        ready=log.count("Adaptive integration: four complete recent frames")>=2
         snapshots=[]
         for l in log.splitlines():
             if "status_snapshot: " in l:
