@@ -5,7 +5,7 @@ import math
 import os
 import tempfile
 from pathlib import Path
-from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver
+from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport
 
 class SelectionBlocked(ValueError):
     """Safe, fixed activation reason exposed to authenticated UI."""
@@ -32,6 +32,8 @@ class Runtime:
         self.learning_before=None
         observer_path=Path(learning_path).with_name(".adaptive-hysteresis-v1.json") if learning_path else None
         self.observer=HysteresisObserver(observer_path,g.get("logging"))
+        self.report=AdaptiveReport(Path(learning_path).with_name(".adaptive-report-v1.json") if learning_path else None)
+        self.learning.on_record=self.report.learned
         self.observer_frames=None
         self.experiment_since=None
         self.experiment_idle=None
@@ -305,6 +307,8 @@ class Runtime:
                 self.reg.reset()
             self.persist_owner(mode)
             self.control=mode
+            self.report_event("owner","selected "+mode)
+            self.report.interrupt()
             self.observer.interrupt()
             self.experiment_idle=None
             if mode=="experiment":
@@ -319,6 +323,8 @@ class Runtime:
             self.status={"reason":"control selected: "+mode,"risk":"paused"}
 
     def fail(self,reason):
+        self.report_event("fault",reason)
+        self.report.interrupt()
         self.learning.cancel()
         self.learning_before=None
         self.control="manual"
@@ -415,6 +421,7 @@ class Runtime:
             mode,relay=(current.mode,True) if not current.relay else ("quiet",True)
             issued=time.monotonic()
             self.pending=(mode,relay,issued+90,issued)
+            self.report_event("issued","idle: "+mode+" / FLimit "+str(relay))
             if not current.relay:
                 _,ok=self.g["flimitchange"]("1")
                 if ok!="success" or self.gpio("freqlimitpin")!=relay:
@@ -425,6 +432,35 @@ class Runtime:
                     self.fail("idle preset write not acknowledged")
             self.g["logging"].info("Adaptive idle preparation issued: %s / FLimit %s",mode,relay)
         return True
+
+    def report_event(self,kind,detail):
+        try:
+            self.report.event(kind,self.control,detail)
+        except Exception:
+            pass
+
+    def report_view(self):
+        with self.lock:
+            data=self.report.snapshot()
+            rows=[]
+            for key,value in self.learning.rows.items():
+                a,b,c,d=map(int,key.split(":"))
+                score=value["score"]
+                learned=value["n"]>=3
+                rows.append(dict(value,context=key,outdoor_band=a*5,target_band=b*3,
+                    transition=data["levels"][c]+" → "+data["levels"][d],tuned=learned,
+                    down_confirm=90-30*score if learned else 90,
+                    surplus_band=1.5-.5*score if learned else 1.5,
+                    early_surplus=2.5-.5*score if learned else 2.5,
+                    forecast_min=3+.5*score if learned else 3))
+            data["learning"]={"contexts":len(rows),"capacity":self.learning.MAX_CONTEXTS,
+                "observations":sum(v["n"] for v in rows),"unsaved":self.learning.dirty,
+                "storage_error":self.learning.storage_error,"rows":sorted(rows,key=lambda x:x["last"],reverse=True)}
+            try:
+                data["learning"]["saved_at"]=self.learning.path.stat().st_mtime if self.learning.path and self.learning.path.exists() else None
+            except OSError:
+                data["learning"]["saved_at"]=None
+            return data
 
     def observe_hysteresis(self):
         # Separate from regulation; failures must never influence commands.
@@ -440,17 +476,28 @@ class Runtime:
             self.observer_frames=stamps
             eligible=(self.activation_reason(s,zone,curve) is None
                       and bool(power&1 and power&4 and not power&2)
-                      and self.flag(self.raw("pch")) and self.gpio("heatdemandpin")
-                      and self.pending is None)
+                      and self.flag(self.raw("pch")) and self.gpio("heatdemandpin"))
             try:
                 outdoor=self.number(self.raw("outtemp"))
             except (TypeError,ValueError):
                 outdoor=None
-            self.observer.observe(s,self.control,eligible,time.time(),outdoor=outdoor)
+            wall=time.time()
+            # Do not discard ordinary Auto modulation or pending writes from
+            # performance cycles. Strict hysteresis keeps its old rules.
+            try:
+                self.report.observe(s,self.control,eligible,wall,outdoor)
+            except Exception:
+                self.report.interrupt()
+            self.observer.observe(s,self.control,eligible and self.pending is None,wall,outdoor=outdoor)
         except Exception:
             self.observer.interrupt()
+            self.report.interrupt()
         finally:
             self.observer.save_if_due(time.monotonic())
+            try:
+                self.report.save_if_due(time.monotonic())
+            except Exception:
+                pass
 
     def experiment_counts(self):
         counts=[0]*len(self.EXPERIMENT_LEVELS)
@@ -581,6 +628,7 @@ class Runtime:
                 mode,relay,deadline,issued=self.pending
                 if (s.mode,s.relay)==(mode,relay) and stamp>issued:
                     self.pending=None
+                    self.report_event("confirmed",mode+" / FLimit "+str(relay))
                     before=self.learning_before
                     self.learning_before=None
                     if before is not None and self.control=="auto":
@@ -641,6 +689,7 @@ class Runtime:
                 self.learning.cancel()
                 self.learning_before=(s,outdoor)
                 self.pending=(mode,relay,issued+90,issued)
+                self.report_event("issued",str(self.status["actual"])+" → "+str(self.status["proposed"])+" | "+d.reason+" | Two "+str(s.supply_temp)+" / target "+str(s.target))
                 if mode!=s.mode:
                     _,ok=self.g["new_presetchange"](mode)
                     if ok is not True:

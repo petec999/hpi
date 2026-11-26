@@ -280,6 +280,7 @@ class Learning:
         self.dirty = False
         self.last_save = None
         self.storage_error = None
+        self.on_record = None
         self.load()
 
     @staticmethod
@@ -398,6 +399,11 @@ class Learning:
             updated[name]=round((1-alpha)*row[name]+alpha*value,4)
         self.rows[key]=updated
         self.dirty=True
+        if self.on_record is not None:
+            try:
+                self.on_record(key,score)
+            except Exception:
+                pass
         if self.logger:
             self.logger.info("Adaptive learning observation: %s %s",key,updated)
 
@@ -663,3 +669,196 @@ class HysteresisObserver:
             "above_seconds":{k:{str(b):med(r["above_seconds"][k][str(b)] for r in extended)
                                 for b in self.BANDS} for k in self.SENSORS}}
         return result
+
+
+class AdaptiveReport:
+    """Independent sampled performance report; never changes policy or outputs.
+
+    A cycle spans modulation changes, unlike the strict hysteresis observer.
+    All time and start counts describe eligible observed CO, not all-day totals.
+    Daily groups use UTC, owner, 5 K outdoor and 3 K target bands.
+    """
+    DAYS=90
+    MAX_BUCKETS=2048
+    MAX_EVENTS=512
+    MAX_FILE_BYTES=2*1024*1024
+    SAVE_INTERVAL=1800
+    OWNERS=("legacy","manual","shadow","auto","experiment")
+
+    def __init__(self,path=None):
+        self.path=Path(path) if path else None
+        self.buckets={}
+        self.events=[]
+        self.scores={"-1":0,"0":0,"1":0}
+        self.since=None
+        self.saved_at=None
+        self.last_save=None
+        self.dirty=False
+        self.error=None
+        self.last=None
+        self.run=None
+        self.load()
+
+    @staticmethod
+    def empty():
+        return {"coverage_s":0.0,"running_s":0.0,"starts":0,"completed":0,
+                "run_s":0.0,"levels_s":[0.0]*6}
+
+    @staticmethod
+    def number(x,lo=0,hi=1e12):
+        return type(x) in (float,int) and math.isfinite(x) and lo<=x<=hi
+
+    def load(self):
+        if self.path is None:
+            return
+        try:
+            if self.path.is_symlink() or self.path.stat().st_size>self.MAX_FILE_BYTES:
+                raise ValueError("invalid report file")
+            d=json.loads(self.path.read_text(encoding="utf-8"))
+            if d["schema"]!=1 or not isinstance(d["buckets"],dict) or len(d["buckets"])>self.MAX_BUCKETS or not isinstance(d["events"],list) or len(d["events"])>self.MAX_EVENTS:
+                raise ValueError("invalid report schema")
+            for key,b in d["buckets"].items():
+                day,owner,out,target=key.split(":")
+                if not (0<=int(day)<=2000000 and owner in self.OWNERS and -12<=int(out)<=12 and 3<=int(target)<=21):
+                    raise ValueError("invalid report group")
+                if set(b)!=set(self.empty()) or not all(self.number(b[k]) for k in ("coverage_s","running_s","starts","completed","run_s")) or len(b["levels_s"])!=6 or not all(self.number(x) for x in b["levels_s"]):
+                    raise ValueError("invalid report row")
+                if b["running_s"]>b["coverage_s"] or b["completed"]>b["starts"] or any(type(b[k]) is not int for k in ("starts","completed")):
+                    raise ValueError("invalid report counts")
+            for e in d["events"]:
+                if not isinstance(e,dict) or set(e)!={"at","kind","owner","detail"} or not self.number(e["at"]) or e["owner"] not in self.OWNERS or not isinstance(e["kind"],str) or not isinstance(e["detail"],str) or len(e["kind"])>32 or len(e["detail"])>512:
+                    raise ValueError("invalid report event")
+            if set(d["scores"])!={"-1","0","1"} or not all(type(v) is int and self.number(v) for v in d["scores"].values()):
+                raise ValueError("invalid report scores")
+            if not all(v is None or self.number(v) for v in (d["since"],d["saved_at"])):
+                raise ValueError("invalid report time")
+            self.buckets=d["buckets"]
+            self.events=d["events"]
+            self.scores=d["scores"]
+            self.since=d["since"]
+            self.saved_at=d["saved_at"]
+            self.last_save=time.monotonic()
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError):
+            self.error="report load failed"
+            self.last_save=time.monotonic()
+
+    def interrupt(self):
+        self.last=None
+        self.run=None
+
+    def prune(self,day):
+        cutoff=day-self.DAYS+1
+        self.buckets={k:v for k,v in self.buckets.items() if int(k.split(":")[0])>=cutoff}
+        if len(self.buckets)>self.MAX_BUCKETS:
+            for k in sorted(self.buckets,key=lambda k:int(k.split(":")[0]))[:len(self.buckets)-self.MAX_BUCKETS]:
+                del self.buckets[k]
+
+    def observe(self,s,owner,eligible,wall,outdoor):
+        if not (eligible and s.fresh and not s.defrost and not s.dhw and not s.override and not s.error and owner in self.OWNERS
+                and self.number(wall) and self.number(s.now) and self.number(outdoor,-60,60)
+                and self.number(s.target,10,65) and self.number(s.hz,0,500) and self.number(s.requested_hz,0,500)
+                and (s.mode,s.relay) in LEVELS):
+            self.interrupt()
+            return
+        day=int(wall//86400)
+        if self.since is None:
+            self.since=wall
+            self.dirty=True
+        group=(owner,math.floor(outdoor/5),math.floor(s.target/3))
+        key=":".join(map(str,(day,)+group))
+        level=LEVELS.index((s.mode,s.relay))
+        active=s.requested_hz>0
+        actual=s.hz>0
+        previous=self.last
+        self.last=(s.now,wall,key,group,level,active,actual)
+        if previous is None:
+            return
+        pn,pw,pk,pg,pl,pa,ph=previous
+        dt=s.now-pn
+        if not 0<dt<=65 or not 0<wall-pw<=90 or pg[0]!=owner or pg[2]!=group[2]:
+            self.run=None
+            return
+        # Attribute intervals to the last observed state; no interpolation
+        # across telemetry gaps or owner/target-band changes.
+        b=self.buckets.setdefault(pk,self.empty())
+        b["coverage_s"]+=dt
+        if ph:
+            b["running_s"]+=dt
+            b["levels_s"][pl]+=dt
+        if active and not pa and not ph:
+            b=self.buckets.setdefault(key,self.empty())
+            b["starts"]+=1
+            self.run=(key,s.now,actual)
+        elif self.run and active:
+            k,start,ran=self.run
+            self.run=(k,start,ran or actual)
+        elif not active and pa:
+            if self.run:
+                k,start,ran=self.run
+                if ran and k in self.buckets:
+                    b=self.buckets[k]
+                    b["completed"]+=1
+                    b["run_s"]+=s.now-start
+            self.run=None
+        self.prune(day)
+        self.dirty=True
+
+    def event(self,kind,owner,detail,wall=None):
+        wall=time.time() if wall is None else wall
+        if owner not in self.OWNERS or not self.number(wall):
+            return
+        if self.since is None:
+            self.since=wall
+        self.events.append({"at":wall,"kind":str(kind)[:32],"owner":owner,"detail":str(detail)[:512]})
+        self.events=self.events[-self.MAX_EVENTS:]
+        self.dirty=True
+
+    def learned(self,key,score):
+        if str(score) in self.scores:
+            self.scores[str(score)]+=1
+            self.event("learning","auto",key+" score="+str(score))
+
+    def save_if_due(self,now):
+        if not self.dirty or self.path is None or (self.last_save is not None and now-self.last_save<self.SAVE_INTERVAL):
+            return
+        self.last_save=now
+        temp=None
+        try:
+            if self.path.is_symlink():
+                raise ValueError("symlink report path")
+            wall=time.time()
+            data={"schema":1,"buckets":self.buckets,"events":self.events,"scores":self.scores,"since":self.since,"saved_at":wall}
+            raw=json.dumps(data,allow_nan=False,separators=(",",":")).encode("utf-8")
+            if len(raw)>self.MAX_FILE_BYTES:
+                raise ValueError("report exceeds storage bound")
+            fd,temp=tempfile.mkstemp(prefix=".adaptive-report-",dir=str(self.path.parent))
+            with os.fdopen(fd,"wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp,self.path)
+            temp=None
+            self.saved_at=wall
+            self.dirty=False
+            self.error=None
+        except (OSError,ValueError,TypeError):
+            self.error="report save failed"
+        finally:
+            if temp is not None:
+                try:
+                    os.unlink(temp)
+                except OSError:
+                    pass
+
+    def snapshot(self):
+        import copy
+        groups=[]
+        for key,b in sorted(self.buckets.items()):
+            day,owner,out,target=key.split(":")
+            groups.append(dict(copy.deepcopy(b),day=int(day),owner=owner,outdoor_band=int(out)*5,target_band=int(target)*3))
+        return {"schema":1,"since":self.since,"saved_at":self.saved_at,"unsaved":self.dirty,
+                "storage_error":self.error,"retention_days":self.DAYS,"groups":groups,
+                "events":copy.deepcopy(self.events),"scores":dict(self.scores),
+                "levels":[m+(" + FLimit" if limit else " / OFF") for m,limit in LEVELS]}
