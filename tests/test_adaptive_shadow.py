@@ -1,6 +1,6 @@
 import json
 import unittest
-from adaptive.shadow import Availability, decode, describe
+from adaptive.shadow import Availability, Observation, decode, describe
 from adaptive.regulator import Regulator
 
 class Shadow(unittest.TestCase):
@@ -58,3 +58,22 @@ class Shadow(unittest.TestCase):
                 s,_=decode(self.record(compinfo=[0,0,0,320,25] if fresh else [30,30,4,320,25]),t,fresh,100)
                 d=r.step(s)
                 self.assertEqual(d.current,d.proposed)
+
+    def test_all_six_combinations_observed(self):
+        for mode in ("quiet","eco","turbo"):
+            for relay in ("0","1"):
+                obs=Observation()
+                r=Regulator()
+                for t in range(0,151,30):
+                    s,data=decode(self.record(mode=mode,flimiton=relay,flrelay=relay,
+                                              twitwo=[29+t/300,32.2]),t,True,100)
+                    metrics=obs.update(s)
+                    d=r.step(s)
+                self.assertEqual(metrics["observed_seconds"],150)
+                self.assertEqual(metrics["supply_deficit"],-0.2)
+                self.assertLess(metrics["return_trend_k_min"],0)
+                if relay=="1" and mode!="quiet":
+                    self.assertIsNone(d.proposed)
+                stale,_=decode(self.record(),180,False,100)
+                self.assertEqual(obs.update(stale),{})
+                self.assertEqual(len(obs.history),0)
