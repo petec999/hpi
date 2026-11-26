@@ -1,71 +1,94 @@
 import unittest
 from dataclasses import replace
-from adaptive.regulator import Regulator, Sample
+from adaptive.regulator import Regulator, Sample, LEVELS, adjacent
 
-def sample(t,delta=3,level=1,**kw):
-    from adaptive.regulator import LEVELS
+def sample(t,level=1,supply=32,ret=29,hz=30,**kw):
     mode,relay=LEVELS[level]
-    s=Sample(t,32,32-delta,32.3,30,30,mode,relay,True,False,True)
-    return replace(s,**kw)
+    return replace(Sample(t,32,ret,supply,hz,hz,mode,relay,True,False,True),**kw)
 
 class TestPolicy(unittest.TestCase):
-    def run_series(self,r,delta,level=1,start=0,end=900,**kw):
-        return [r.step(sample(t,delta,level,**kw)) for t in range(start,end+1,30)]
-    def test_sustained_shortfall(self):
-        ds=self.run_series(Regulator(),3.5)
+    def series(self,r,level=1,start=0,end=900,**kw):
+        return [r.step(sample(t,level,**kw)) for t in range(start,end+1,30)]
+    def test_six_combinations_one_output_at_a_time(self):
+        self.assertEqual(len(LEVELS),6)
+        for i in range(6):
+            for direction in ("up","down"):
+                j=adjacent(i,direction)
+                self.assertLessEqual(sum(a!=b for a,b in zip(LEVELS[i],LEVELS[j])),1)
+    def test_stable_supply_normal_return_delta_not_shortfall(self):
+        ds=self.series(Regulator(),ret=27,end=840)
+        self.assertTrue(all(d.proposed==1 for d in ds))
+    def test_persistent_shortfall(self):
+        ds=self.series(Regulator(),supply=30.9,end=600)
         self.assertEqual(ds[-1].proposed,2)
-        self.assertTrue(all(d.proposed==1 for d in ds[:14]))
-    def test_reduce_slowly(self):
-        ds=self.run_series(Regulator(),1.0,level=1)
-        self.assertEqual(ds[-1].proposed,0)
-        self.assertTrue(all(d.proposed==1 for d in ds[:20]))
-    def test_hysteresis(self):
+        self.assertTrue(all(d.proposed==1 for d in ds[:6]))
+    def test_small_integrated_deficit(self):
+        ds=self.series(Regulator(),supply=31.6,end=1800)
+        self.assertEqual(ds[-1].proposed,2)
+        self.assertGreater(ds[-1].deficit_integral,4)
+    def test_recovering_shortfall(self):
         r=Regulator()
-        ds=[r.step(sample(t,2.8+(.2 if t%60==0 else -.2))) for t in range(0,1200,30)]
+        ds=[r.step(sample(t,supply=min(32,30+t/120))) for t in range(0,600,30)]
         self.assertTrue(all(d.proposed==1 for d in ds))
-    def test_recovering_delta(self):
+    def test_urgent_release(self):
+        ds=self.series(Regulator(),level=5,supply=29,end=180)
+        self.assertEqual(ds[-1].proposed,3)
+    def test_replay_turbo_limit_real_trace(self):
         r=Regulator()
-        ds=[r.step(sample(t,5-t/300)) for t in range(0,601,30)]
+        twi=[29.1,29.0,29.2,29.1,29.3,29.3,29.3,29.4,29.6,29.7,29.7,29.7,29.9]
+        two=[32.2,32.3,32.3,32.3,32.4,32.6,32.6,32.6,32.8,32.8,32.9,33.1,32.8]
+        ds=[r.step(sample(i*30,level=5,supply=b,ret=a,hz=45)) for i,(a,b) in enumerate(zip(twi,two))]
+        self.assertTrue(any(d.proposed==4 for d in ds))
+        self.assertTrue(all(d.proposed in (4,5) for d in ds))
+    def test_noisy_deadband(self):
+        r=Regulator()
+        ds=[r.step(sample(t,supply=32+(.2 if t%60==0 else -.2),hz=25)) for t in range(0,1800,30)]
         self.assertTrue(all(d.proposed==1 for d in ds))
-    def test_guards(self):
+    def test_guard_states(self):
         for guard in ({"fresh":False},{"defrost":True},{"dhw":True},{"error":12},{"heating":False},{"hz":0},{"override":True},{"return_temp":float("nan")}):
-            ds=self.run_series(Regulator(),7,**guard)
+            ds=self.series(Regulator(),supply=29,**guard)
             self.assertTrue(all(d.current==d.proposed for d in ds))
-    def test_manual_legacy_no_proposals(self):
+    def test_manual_legacy(self):
         for control in ("manual","legacy"):
             r=Regulator()
-            for t in range(0,1200,30):
-                d=r.step(sample(t,9),control)
+            for t in range(0,900,30):
+                d=r.step(sample(t,supply=29),control)
                 self.assertEqual(d.current,d.proposed)
-    def test_urgent_one_step(self):
-        ds=self.run_series(Regulator(),7,level=0,end=120)
-        self.assertEqual(ds[-1].proposed,1)
-    def test_resume_after_defrost(self):
+    def test_defrost_and_gap_reset(self):
         r=Regulator()
-        self.run_series(r,3.5)
-        r.step(sample(930,3.5,defrost=True))
-        ds=self.run_series(r,3.5,start=960,end=1200)
-        self.assertTrue(all(d.proposed==1 for d in ds))
-    def test_target_change_resets(self):
+        self.series(r,supply=30.9)
+        r.step(sample(930,defrost=True))
+        self.assertEqual(r.step(sample(960,supply=30.9)).proposed,1)
+        self.assertEqual(r.step(sample(1100,supply=29)).proposed,1)
+    def test_target_reset(self):
         r=Regulator()
-        self.run_series(r,3.5)
-        d=r.step(sample(930,3.5,target=33))
-        self.assertEqual(d.current,d.proposed)
-    def test_stale_gap_resets(self):
+        self.series(r,supply=30.9)
+        self.assertEqual(r.step(sample(930,target=33,supply=30)).proposed,1)
+    def test_reduction_failure_and_cooldown(self):
         r=Regulator()
-        self.run_series(r,3.5)
-        d=r.step(sample(1100,3.5))
-        self.assertEqual(d.current,d.proposed)
-    def test_ceiling(self):
+        # turbo+FLimit -> eco+FLimit; actual change observed after proposal
+        ds=self.series(r,level=5,supply=33,end=450)
+        self.assertEqual(ds[-1].proposed,4)
+        ds=self.series(r,level=4,start=480,end=780,supply=29.8)
+        self.assertEqual(ds[-1].proposed,5)
+        self.assertIn("failed",ds[-1].reason)
+        ds=self.series(r,level=5,start=810,end=1500,supply=33)
+        self.assertEqual(ds[-1].proposed,5)
+        self.assertGreater(ds[-1].blocked_seconds,0)
+    def test_unobserved_proposal_does_not_change_state(self):
+        r=Regulator()
+        ds=self.series(r,level=5,supply=33,end=600)
+        self.assertEqual(ds[-1].proposed,4)
+        self.assertTrue(all(d.current==5 for d in ds))
+        self.assertIsNone(r.trial)
+    def test_restriction(self):
         r=Regulator()
         for t in range(0,900,30):
-            d=r.step(sample(t,7),ceiling=1)
+            d=r.step(sample(t,supply=29),allowed={0,1})
             self.assertEqual(d.proposed,1)
-    def test_observed_change_wait(self):
-        r=Regulator()
-        self.run_series(r,3.5)
-        ds=self.run_series(r,4.7,level=2,start=930,end=1170)
-        self.assertTrue(all(d.proposed==2 for d in ds))
+    def test_balanced_low_frequency_no_probe(self):
+        ds=self.series(Regulator(),hz=24,end=2400)
+        self.assertTrue(all(d.proposed==1 for d in ds))
 
 if __name__=="__main__":
     unittest.main()
