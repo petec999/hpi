@@ -15,6 +15,7 @@ LEVELS=(("quiet",True),("quiet",False),("eco",False),("turbo",False),
 PRESETS=("quiet","eco","turbo")
 # Empirical supply-temperature STOP model, not a factory-confirmed safety limit.
 STOP_HYSTERESIS=5.0
+START_OFFSET=-2.0
 
 @dataclass(frozen=True)
 class Sample:
@@ -133,7 +134,9 @@ class Regulator:
             self.target=None
             self.changed_at=None
 
-    def step(self,s,control="shadow",allowed=None):
+    def step(self,s,control="shadow",allowed=None,stop_offset=STOP_HYSTERESIS):
+        if not math.isfinite(stop_offset) or not 3.5<=stop_offset<=5.5:
+            stop_offset=STOP_HYSTERESIS
         if control not in ("manual","legacy","shadow","auto"):
             raise ValueError("Unknown control")
         allowed=set(range(len(LEVELS))) if allowed is None else set(allowed)
@@ -206,7 +209,7 @@ class Regulator:
         # band independently calls for a reduction, even with a cold return.
         excess=(er<=-c.surplus_band and tr<=c.trend_band) or (
             er<=0 and forecast>=c.early_surplus and tr<-c.trend_band)
-        stop_risk=max(s.supply_temp-s.target,supply_forecast)>=STOP_HYSTERESIS-c.stop_margin
+        stop_risk=max(s.supply_temp-s.target,supply_forecast)>=stop_offset-c.stop_margin
         # Close to STOP, never increase capacity even if the median lags.
         if stop_risk:
             urgent=shortfall=False
@@ -348,7 +351,7 @@ class Learning:
             self.trial={"key":key,"before":before,"new":new,"outdoor":outdoor,
                         "start":after.now,"last":after.now,"samples":[]}
 
-    def observe(self,s,outdoor):
+    def observe(self,s,outdoor,stop_offset=STOP_HYSTERESIS):
         t=self.trial
         if t is None:
             return
@@ -377,7 +380,7 @@ class Learning:
         # 180 s settling period. Record that observation before it is lost.
         supply_surplus=-median(x[3] for x in t["samples"])
         supply_rise=max(0,min(.5,-trend(t["samples"],3)))
-        supply_risk=supply_surplus+supply_rise*3>=4
+        supply_risk=supply_surplus+supply_rise*3>=stop_offset-1.0
         if not shortage and not supply_risk and s.now-t["start"]<300:
             return
         # Positive score means thermal surplus or persistent supply STOP risk.
@@ -862,3 +865,194 @@ class AdaptiveReport:
                 "storage_error":self.error,"retention_days":self.DAYS,"groups":groups,
                 "events":copy.deepcopy(self.events),"scores":dict(self.scores),
                 "levels":[m+(" + FLimit" if limit else " / OFF") for m,limit in LEVELS]}
+
+
+class NativeThresholds:
+    """Independent stable-edge model. No actuator, no change to firmware.
+    Keep separate START/STOP observations per actual preset, FLimit, 3 K
+    target band. START uses mean only when idle water sensors agree.
+    """
+    MIN_SAMPLES=8
+    PER_KEY=24
+    MAX_KEYS=228
+    SAVE_INTERVAL=300
+    MAX_FILE_BYTES=1024*1024
+
+    def __init__(self,path=None):
+        self.path=Path(path) if path else None
+        self.rows={}
+        self.last=None
+        self.context=None
+        self.stable_since=None
+        self.phase_since=None
+        self.pending=None
+        self.idle=deque()
+        self.dirty=False
+        self.last_save=None
+        self.saved_at=None
+        self.error=None
+        self.load()
+
+    @staticmethod
+    def key(s,edge):
+        return "%s:%d:%d"%(edge,LEVELS.index((s.mode,s.relay)),math.floor(s.target/3))
+
+    def load(self):
+        if self.path is None:
+            return
+        try:
+            if self.path.is_symlink() or self.path.stat().st_size>self.MAX_FILE_BYTES:
+                raise ValueError("invalid threshold file")
+            d=json.loads(self.path.read_text(encoding="utf-8"))
+            if d["schema"]!=1 or not isinstance(d["rows"],dict) or len(d["rows"])>self.MAX_KEYS:
+                raise ValueError("invalid threshold schema")
+            for key,rows in d["rows"].items():
+                edge,level,band=key.split(":")
+                if edge not in ("start","stop") or not 0<=int(level)<6 or not 3<=int(band)<=21 or not isinstance(rows,list) or len(rows)>self.PER_KEY:
+                    raise ValueError("invalid threshold group")
+                for row in rows:
+                    if not isinstance(row,list) or len(row)!=3 or not all(type(v) in (float,int) and math.isfinite(v) for v in row) or not (0<=row[0]<=1e11 and -30<=row[1]<=30 and -30<=row[2]<=30):
+                        raise ValueError("invalid threshold row")
+            saved=d["saved_at"]
+            if not isinstance(saved,(int,float)) or not math.isfinite(saved) or not 0<=saved<=1e11:
+                raise ValueError("invalid save time")
+            self.rows=d["rows"]
+            self.saved_at=saved
+            self.last_save=time.monotonic()
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError):
+            self.error="threshold load failed"
+            self.last_save=time.monotonic()
+
+    def interrupt(self):
+        self.last=None
+        self.context=None
+        self.stable_since=None
+        self.phase_since=None
+        self.pending=None
+        self.idle.clear()
+
+    def observe(self,s,eligible,wall,owner):
+        vals=(s.now,s.target,s.return_temp,s.supply_temp,s.hz,s.requested_hz,wall)
+        if not (eligible and s.fresh and not s.defrost and not s.dhw and not s.override and not s.error and all(type(v) in (float,int) and math.isfinite(v) for v in vals)
+                and 10<=s.target<=65 and -10<=s.return_temp<=85 and -10<=s.supply_temp<=85 and min(s.hz,s.requested_hz)>=0 and (s.mode,s.relay) in LEVELS):
+            self.interrupt()
+            return
+        ctx=(owner,s.mode,s.relay,s.target)
+        before=self.last
+        active=s.requested_hz>0
+        if before is None or ctx!=self.context or not 0<s.now-before.now<=65:
+            self.interrupt()
+            self.context=ctx
+            self.stable_since=s.now
+            self.phase_since=s.now
+            before=None
+        if before is not None:
+            was=before.requested_hz>0
+            if active!=was:
+                if self.pending is not None:
+                    self.pending=None
+                elif s.now-self.stable_since>=120 and s.now-self.phase_since>=120:
+                    a,b=before.return_temp-before.target,s.return_temp-s.target
+                    c,d=before.supply_temp-before.target,s.supply_temp-s.target
+                    if max(abs(a-b),abs(c-d))<=0.8:
+                        twi,two=(a+b)/2,(c+d)/2
+                        edge="start" if active else "stop"
+                        # Idle START requires zero actual Hz before request.
+                        # STOP requires a running compressor before request.
+                        if (active and before.hz==0 and max(abs(a-c),abs(b-d))<=0.6 and -4<=twi<=-0.5 and -4<=two<=-0.5) or (not active and before.hz>0 and 3<=two<=6.5):
+                            self.pending=(self.key(s,edge),s.now,wall,twi,two,active,s.hz>0 if active else s.hz==0)
+                self.phase_since=s.now
+            if self.pending is not None:
+                key,at,ts,twi,two,expected,confirmed=self.pending
+                if active!=expected or s.now-at>180:
+                    self.pending=None
+                else:
+                    confirmed=confirmed or (s.hz>0 if active else s.hz==0)
+                    self.pending=(key,at,ts,twi,two,expected,confirmed)
+                    if confirmed and s.now-at>=60:
+                        rows=self.rows.setdefault(key,[])
+                        rows.append([ts,round(twi,3),round(two,3)])
+                        self.rows[key]=rows[-self.PER_KEY:]
+                        self.pending=None
+                        self.dirty=True
+        self.last=s
+        if not active and s.hz==0 and abs(s.return_temp-s.supply_temp)<=0.6:
+            self.idle.append((s.now,((s.return_temp+s.supply_temp)/2)-s.target))
+            while self.idle and s.now-self.idle[0][0]>180:
+                self.idle.popleft()
+        else:
+            self.idle.clear()
+
+    @classmethod
+    def estimate(cls,edge,rows):
+        vals=[(x[1]+x[2])/2 if edge=="start" else x[2] for x in rows]
+        m=median(vals) if vals else None
+        mad=median(abs(x-m) for x in vals) if vals else None
+        # MAD alone can hide a split distribution: require central 80%
+        # (at least seven out of eight) within 0.6 K of median.
+        consistent=sum(abs(x-m)<=0.6 for x in vals) if vals else 0
+        lo,hi=(-3.5,-1) if edge=="start" else (3.5,5.5)
+        learned=len(vals)>=cls.MIN_SAMPLES and mad<=0.35 and consistent>=math.ceil(.8*len(vals)) and lo<=m<=hi
+        return {"offset":round(m,2) if learned else START_OFFSET if edge=="start" else STOP_HYSTERESIS,
+                "median":round(m,2) if m is not None else None,"mad":round(mad,2) if mad is not None else None,
+                "n":len(vals),"source":"learned" if learned else "default","sensor":"mean" if edge=="start" else "two",
+                "twi_median":round(median(x[1] for x in rows),2) if rows else None,
+                "two_median":round(median(x[2] for x in rows),2) if rows else None}
+
+    def model(self,s):
+        start=self.estimate("start",self.rows.get(self.key(s,"start"),[]))
+        stop=self.estimate("stop",self.rows.get(self.key(s,"stop"),[]))
+        mean=(s.return_temp+s.supply_temp)/2
+        idle=s.hz==0 and s.requested_hz==0 and abs(s.return_temp-s.supply_temp)<=0.6
+        margin=mean-s.target-start["offset"] if idle else None
+        eta=None
+        if idle and len(self.idle)>=4 and self.idle[-1][0]-self.idle[0][0]>=90:
+            rate=trend(list(self.idle),1)
+            if margin<=0:
+                eta=0
+            elif rate<-.03:
+                eta=round(min(180,margin/-rate),1) if margin/-rate<=180 else None
+        return {"start":start,"stop":stop,"start_target":s.target+start["offset"],"stop_target":s.target+stop["offset"],
+                "start_margin":round(margin,2) if margin is not None else None,"start_eta_min":eta,
+                "storage_error":self.error,"unsaved":self.dirty}
+
+    def summary(self):
+        groups=[]
+        for key,rows in sorted(self.rows.items()):
+            edge,level,band=key.split(":")
+            m,relay=LEVELS[int(level)]
+            groups.append(dict(self.estimate(edge,rows),edge=edge,preset=m,flimit=relay,target_band=int(band)*3))
+        return {"groups":groups,"minimum_samples":self.MIN_SAMPLES,"saved_at":self.saved_at,"unsaved":self.dirty,"storage_error":self.error}
+
+    def save_if_due(self,now):
+        if not self.dirty or self.path is None or (self.last_save is not None and now-self.last_save<self.SAVE_INTERVAL):
+            return
+        self.last_save=now
+        temp=None
+        try:
+            if self.path.is_symlink():
+                raise ValueError("symlink threshold path")
+            wall=time.time()
+            data=json.dumps({"schema":1,"rows":self.rows,"saved_at":wall},allow_nan=False).encode("utf-8")
+            if len(data)>self.MAX_FILE_BYTES:
+                raise ValueError("threshold file too large")
+            fd,temp=tempfile.mkstemp(prefix=".adaptive-threshold-",dir=self.path.parent)
+            with os.fdopen(fd,"wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp,self.path)
+            temp=None
+            self.saved_at=wall
+            self.dirty=False
+            self.error=None
+        except (OSError,ValueError,TypeError):
+            self.error="threshold save failed"
+        finally:
+            if temp is not None:
+                try:
+                    os.unlink(temp)
+                except OSError:
+                    pass

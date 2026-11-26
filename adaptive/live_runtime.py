@@ -5,7 +5,7 @@ import math
 import os
 import tempfile
 from pathlib import Path
-from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport
+from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds
 
 class SelectionBlocked(ValueError):
     """Safe, fixed activation reason exposed to authenticated UI."""
@@ -34,6 +34,7 @@ class Runtime:
         self.observer=HysteresisObserver(observer_path,g.get("logging"))
         self.report=AdaptiveReport(Path(learning_path).with_name(".adaptive-report-v1.json") if learning_path else None)
         self.learning.on_record=self.report.learned
+        self.thresholds=NativeThresholds(Path(learning_path).with_name(".adaptive-thresholds-v1.json") if learning_path else None)
         self.observer_frames=None
         self.experiment_since=None
         self.experiment_idle=None
@@ -309,6 +310,7 @@ class Runtime:
             self.control=mode
             self.report_event("owner","selected "+mode)
             self.report.interrupt()
+            self.thresholds.interrupt()
             self.observer.interrupt()
             self.experiment_idle=None
             if mode=="experiment":
@@ -325,6 +327,7 @@ class Runtime:
     def fail(self,reason):
         self.report_event("fault",reason)
         self.report.interrupt()
+        self.thresholds.interrupt()
         self.learning.cancel()
         self.learning_before=None
         self.control="manual"
@@ -403,10 +406,13 @@ class Runtime:
             reason="Postój sprężarki – Quiet + FLimit gotowe do startu"
         elif previous is None or not 0<frame-previous<=self.MAX_AGE:
             reason="Postój sprężarki – potwierdzanie postoju przed przygotowaniem"
+        model=self.thresholds.model(s)
+        if model["start_margin"] is not None and (model["start_margin"]<=0.5 or model["start_eta_min"] is not None and model["start_eta_min"]<=5):
+            reason+=" · zbliża się prognozowany START"
         self.status={"reason":"idle startup preparation","reason_pl":reason,
                      "risk":"paused","actual":actual,"proposed":proposed,
-                     "target":s.target,"return_temp":s.return_temp,"stop_target":s.target+STOP_HYSTERESIS,
-                     "supply_temp":s.supply_temp,"stop_sensor":"two","stop_margin":s.target+STOP_HYSTERESIS-s.supply_temp,"down_confirm":self.reg.cfg.down_confirm,
+                     "target":s.target,"return_temp":s.return_temp,"stop_target":model["stop_target"],
+                     "supply_temp":s.supply_temp,"stop_sensor":"two","stop_margin":model["stop_target"]-s.supply_temp,"down_confirm":self.reg.cfg.down_confirm,
                      "surplus_band":self.reg.cfg.surplus_band}
         if self.control!="auto" or (s.mode,s.relay)==(mode,relay) or previous is None or not 0<frame-previous<=self.MAX_AGE:
             return True
@@ -460,6 +466,7 @@ class Runtime:
                 data["learning"]["saved_at"]=self.learning.path.stat().st_mtime if self.learning.path and self.learning.path.exists() else None
             except OSError:
                 data["learning"]["saved_at"]=None
+            data["thresholds"]=self.thresholds.summary()
             return data
 
     def observe_hysteresis(self):
@@ -472,6 +479,7 @@ class Runtime:
             if self.observer_frames is not None and not all(a>b for a,b in zip(stamps,self.observer_frames)):
                 if max(stamps)-min(stamps)>self.MAX_AGE:
                     self.observer.interrupt()
+                    self.thresholds.interrupt()
                 return
             self.observer_frames=stamps
             eligible=(self.activation_reason(s,zone,curve) is None
@@ -489,13 +497,19 @@ class Runtime:
             except Exception:
                 self.report.interrupt()
             self.observer.observe(s,self.control,eligible and self.pending is None,wall,outdoor=outdoor)
+            try:
+                self.thresholds.observe(s,eligible and self.pending is None,wall,self.control)
+            except Exception:
+                self.thresholds.interrupt()
         except Exception:
             self.observer.interrupt()
             self.report.interrupt()
+            self.thresholds.interrupt()
         finally:
             self.observer.save_if_due(time.monotonic())
             try:
                 self.report.save_if_due(time.monotonic())
+                self.thresholds.save_if_due(time.monotonic())
             except Exception:
                 pass
 
@@ -659,11 +673,13 @@ class Runtime:
                 return
             if self.prepare_idle(s,zone,curve):
                 return
+            model=self.thresholds.model(s)
+            stop_offset=model["stop"]["offset"]
             if self.control=="auto":
                 outdoor=self.number(self.raw("outtemp"))
-                self.learning.observe(s,outdoor)
+                self.learning.observe(s,outdoor,stop_offset)
                 self.reg.cfg=self.learning.settings(s,outdoor)
-            d=self.reg.step(s,control=self.control)
+            d=self.reg.step(s,control=self.control,stop_offset=stop_offset)
             label=lambda i: None if i is None else LEVELS[i][0]+("+FLimit" if LEVELS[i][1] else "")
             self.status={"reason":d.reason,"reason_pl":self.display_reason(s,d.reason),"risk":d.risk,"actual":label(d.current),
                          "proposed":label(d.proposed),"target":s.target,
@@ -671,7 +687,7 @@ class Runtime:
                          "return_temp":s.return_temp,"return_trend":None if d.trend is None else -d.trend,
                          "supply_temp":s.supply_temp,"supply_forecast":d.supply_forecast,
                          "supply_trend":None if d.supply_trend is None else -d.supply_trend,
-                         "stop_sensor":"two","stop_target":s.target+STOP_HYSTERESIS,"stop_margin":s.target+STOP_HYSTERESIS-s.supply_temp,
+                         "stop_sensor":"two","stop_target":model["stop_target"],"stop_margin":model["stop_target"]-s.supply_temp,
                          "deficit_integral":d.deficit_integral,
                          "down_confirm":self.reg.cfg.down_confirm,
                          "surplus_band":self.reg.cfg.surplus_band}
@@ -683,7 +699,7 @@ class Runtime:
                 if z!="normal" or current.override or current.defrost or current.dhw or current.error or not current.heating or current.hz<=0 or current.requested_hz<=0 or (current.mode,current.relay)!=(s.mode,s.relay) or abs(current.target-s.target)>0.25 or abs(actual_target-current.target)>1 or self.g.get("newframe"):
                     return
                 mode,relay=LEVELS[d.proposed]
-                if d.reason in ("increase available capacity","restore previous capacity; reduction failed") and current.supply_temp-current.target>=STOP_HYSTERESIS-self.reg.cfg.stop_margin:
+                if d.reason in ("increase available capacity","restore previous capacity; reduction failed") and current.supply_temp-current.target>=self.thresholds.model(current)["stop"]["offset"]-self.reg.cfg.stop_margin:
                     return
                 issued=time.monotonic()
                 self.learning.cancel()
@@ -808,14 +824,15 @@ class Runtime:
                 actual=s.mode
                 relay="1" if s.relay else "0"
                 blocker=self.activation_reason(s,zone,curve)
+                model=self.thresholds.model(s)
             except Exception:
-                actual=relay=zone=curve=None
+                actual=relay=zone=curve=model=None
                 blocker="Brak pełnego, świeżego odczytu pompy lub GPIO"
             if self.pending is not None:
                 blocker="Oczekiwanie na potwierdzenie poprzedniego polecenia"
             return dict(self.status,control=self.control,mode=actual,relay=relay,
                         ready=blocker is None,activation_blocker=blocker,curve=curve,zone=zone,pending=self.pending is not None,fault=self.fault,
-                        auto_resume_pending=self.resume_requested,owner_storage_error=self.resume_error,
+                        auto_resume_pending=self.resume_requested,owner_storage_error=self.resume_error,threshold_model=model,
                         curve_settings=self.curve_settings(),learning=self.learning.summary(),hysteresis=self.observer.summary(),
                         experiment={"counts":self.experiment_counts(),"levels":[m+("+FLimit" if l else " / OFF") for m,l in self.EXPERIMENT_LEVELS],
                                     "per_level":self.EXPERIMENT_CYCLES,"since":self.experiment_since})
