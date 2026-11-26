@@ -13,8 +13,9 @@ esac
 systemctl is-active --quiet haier
 exec 9>/run/lock/haierpi-1453.lock
 flock -n 9
-python3 "$PATCH" --dry-run
-if grep -Fq '# HOME-IOT WEB UI V2 BEGIN' "$CORE"; then
+check="$(python3 "$PATCH" --dry-run)"
+echo "$check"
+if [[ "$check" == "Web UI v2 already current." ]]; then
   echo "Already installed; no restart."
   exit 0
 fi
