@@ -299,7 +299,26 @@ def status_ui(html):
  $("am-hysteresis-twi").textContent="Twi: "+hs(h&&h.twi);
  $("am-hysteresis-two").textContent="Two: "+hs(h&&h.two);
  $("am-reason").textContent=v.fault||v.reason_pl||v.reason||"Brak odczytu.";''')
+    if 'id="am-hysteresis-mean"' not in html:
+        html=once(html,'<p id="am-hysteresis-two"></p>', '<p id="am-hysteresis-two"></p><p id="am-hysteresis-mean"></p><p id="am-hysteresis-extra"></p><p id="am-hysteresis-dwell"></p><small>Czas ponad nastawą / +1 K / +2 K: mediany próbkowanych przedziałów pracy. Średnia Twi/Two jest hipotezą.</small>')
+        html=once(html,' $("am-hysteresis-two").textContent="Two: "+hs(h&&h.two);', ''' $("am-hysteresis-two").textContent="Two: "+hs(h&&h.two);
+ $("am-hysteresis-mean").textContent="Średnia Twi/Two: "+hs(h&&h.mean);
+ const he=h&&h.extended;
+ const hv=(x,u)=>x==null?"—":fmt(x)+" "+u;
+ $("am-hysteresis-extra").textContent=he?"Rozszerzone cykle: "+he.cycles+" · przed STOP: ΔT "+hv(he.stop_water_delta,"K")+", Fact "+hv(he.stop_fact,"Hz")+", Fset "+hv(he.stop_fset,"Hz")+", na zewnątrz "+hv(he.stop_outdoor,"°C")+" · praca "+hv(he.run_seconds==null?null:he.run_seconds/60,"min"):"—";
+ const hd=(k)=>he&&he.above_seconds?[0,1,2].map(b=>hv(he.above_seconds[k][b]==null?null:he.above_seconds[k][b]/60,"min")).join(" / "):"—";
+ $("am-hysteresis-dwell").textContent="Ponad progi: Twi "+hd("twi")+" · Two "+hd("two")+" · średnia "+hd("mean");''')
+    if 'value="experiment"' not in html:
+        html=once(html,'<option value="auto">Auto – eksperymentalne</option>', '<option value="auto">Auto – eksperymentalne</option><option value="experiment">Eksperyment – test konfiguracji</option>')
+        html=once(html,'auto:"Adaptive Auto"', 'auto:"Adaptive Auto",experiment:"Eksperyment"')
+        html=once(html,'<p id="am-hysteresis-mean"></p>','<p id="am-hysteresis-mean"></p><p id="am-experiment"></p><small>Eksperyment zmienia tryb i FLimit tylko przy potwierdzonym postoju; 3 cykle na konfigurację, maks. 7 dni; zwykła Obserwacja nie zmienia ustawień.</small>')
+        html=once(html,' $("am-hysteresis-mean").textContent="Średnia Twi/Two: "+hs(h&&h.mean);',' $("am-hysteresis-mean").textContent="Średnia Twi/Two: "+hs(h&&h.mean);\n const ex=v.experiment;\n $("am-experiment").textContent=ex&&ex.since?"Eksperyment: "+ex.levels.map((x,i)=>x+" "+ex.counts[i]+"/"+ex.per_level).join(" · "):"";'.replace("\n","\n"))
     return html
+
+def experiment_api(source):
+    old='choices=("legacy","manual","shadow","auto") if key=="adaptive_control"'
+    new='choices=("legacy","manual","shadow","auto","experiment") if key=="adaptive_control"'
+    return source if new in source else once(source,old,new)
 
 def learning_block():
     policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")
@@ -321,7 +340,7 @@ def learning_ui(source):
     html=curve_editor_ui(curve_ui(activation_ui(html)))
     if 'id="am-learning"' in html:
         html=status_ui(html)
-        return curve_editor_api(curve_api(activation_api(source if html==ast.literal_eval(line.split("=",1)[1].strip()) else once(source,line,"_WV_HTML = "+repr(html)))))
+        return experiment_api(curve_editor_api(curve_api(activation_api(source if html==ast.literal_eval(line.split("=",1)[1].strip()) else once(source,line,"_WV_HTML = "+repr(html))))))
     html=once(html,'<p id="am-reason"', '<div class="metric"><span>Uczenie (obserwacje / konteksty)</span><strong id="am-learning">—</strong></div><div class="metric"><span>Pamięć / dostrojenie</span><strong id="am-learning-detail">—</strong></div><p id="am-reason"')
     html=once(html,' $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";',
     ''' const l=v.learning;
@@ -329,7 +348,7 @@ def learning_ui(source):
  $("am-learning-detail").textContent=l?(l.storage_error?"RAM (błąd zapisu)":l.unsaved?"RAM (oczekuje na zapis)":"Zapis / brak nowych danych")+" · "+fmt(v.down_confirm)+" s / "+fmt(v.surplus_band)+" K":"—";
  $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";''')
     html=status_ui(html)
-    return curve_editor_api(curve_api(activation_api(once(source,line,"_WV_HTML = "+repr(html)))))
+    return experiment_api(curve_editor_api(curve_api(activation_api(once(source,line,"_WV_HTML = "+repr(html))))))
 
 def patch(source):
     if MARK in source:

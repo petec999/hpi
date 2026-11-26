@@ -57,3 +57,39 @@ class ObserverTests(unittest.TestCase):
         for t in range(0,901,30):
             o.observe(sample(t,300<=t<750),"legacy",t!=600,1700000000+t)
         self.assertEqual(len(o.rows),0)
+
+    def test_extended_metrics_and_old_data(self):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/"obs.json"
+            o=HysteresisObserver(p)
+            for t in range(0,901,30):
+                o.observe(sample(t,300<=t<750),"experiment",True,1700000000+t,outdoor=2)
+            q=o.summary()
+            self.assertEqual(q["mean"]["stop"]["offset"],.25)
+            self.assertEqual(q["extended"]["stop_fact"],35)
+            self.assertEqual(q["extended"]["stop_fset"],35)
+            self.assertEqual(q["extended"]["stop_outdoor"],2)
+            self.assertEqual(q["extended"]["stop_water_delta"],3)
+            self.assertEqual(q["extended"]["run_seconds"],450)
+            self.assertEqual(q["extended"]["above_seconds"]["twi"]["0"],420)
+            self.assertEqual(q["extended"]["above_seconds"]["twi"]["2"],0)
+            o.save_if_due(900)
+            n=HysteresisObserver(p)
+            self.assertEqual(len(n.rows),1)
+            data=json.loads(p.read_text())
+            data["schema"]=1
+            for row in data["cycles"]:
+                row["context"][0]="legacy"
+                row.pop("above_seconds")
+                row.pop("run_seconds")
+                for e in ("start","stop"):
+                    for k in ("outdoor","fact","fset"):
+                        row[e].pop(k)
+            p.write_text(json.dumps(data))
+            n=HysteresisObserver(p)
+            self.assertEqual(len(n.rows),1)
+            n.context=("legacy","eco",False,32)
+            self.assertEqual(n.summary()["mean"]["stop"]["offset"],.25)
+            self.assertEqual(n.summary()["extended"]["cycles"],0)
+            self.assertIsNone(n.summary()["extended"]["stop_fact"])

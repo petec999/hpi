@@ -221,6 +221,35 @@ class RuntimeTest(unittest.TestCase):
             self.assertFalse(self.writes)
             self.assertEqual(self.r.status["proposed"],"quiet+FLimit")
 
+    def test_experiment_writes_only_after_fresh_idle(self):
+        with patch.dict(FakeGPIO.values,{1:"1",2:"1"}):
+            self.r.choose("experiment","legacy")
+            for t in range(1000,1181,30):
+                self.now.return_value=t
+                self.refresh()
+                self.r.tick()
+            self.assertFalse(self.writes)
+            with patch.object(Decoder,"GetCompInfo",return_value=[0,0,0,320,25]):
+                self.g["statusdict"]["ch_heating"]["value"]="off"
+                for t in (1210,1240):
+                    self.now.return_value=t
+                    self.refresh()
+                    self.r.tick()
+                self.assertFalse(self.writes)
+                self.now.return_value=1270
+                self.refresh()
+                self.r.tick()
+                self.assertEqual(self.writes,[("preset","eco")])
+                self.assertIsNotNone(self.r.pending)
+                self.r.choose("shadow","experiment")
+                self.assertEqual(self.r.control,"manual")
+
+    def test_experiment_priority_cancels(self):
+        self.r.choose("experiment","legacy")
+        self.r.priority_write("preset","quiet")
+        self.assertEqual(self.r.control,"manual")
+        self.assertEqual(self.writes,[("preset","quiet")])
+
     def test_pause_reason_does_not_hide_bad_data(self):
         from dataclasses import replace
         s,_,_,_=self.r.snapshot()

@@ -13,6 +13,9 @@ class SelectionBlocked(ValueError):
 class Runtime:
     MAX_AGE=60
     PERIOD=30
+    EXPERIMENT_LEVELS=(("eco",False),("quiet",False),("quiet",True),("eco",True),("turbo",True),("turbo",False))
+    EXPERIMENT_CYCLES=3
+    EXPERIMENT_TIMEOUT=7*86400
     SIZES={"R101":6,"R141":16,"R201":1,"R241":22}
     def __init__(self,g,learning_path=None):
         self.g=g
@@ -27,6 +30,10 @@ class Runtime:
         observer_path=Path(learning_path).with_name(".adaptive-hysteresis-v1.json") if learning_path else None
         self.observer=HysteresisObserver(observer_path,g.get("logging"))
         self.observer_frames=None
+        self.experiment_since=None
+        self.experiment_started=None
+        self.experiment_idle=None
+        self.experiment_initial=None
         self.last_tick=0
         self.pending=None
         self.status={"reason":"Legacy; no adaptive writes","risk":"paused"}
@@ -130,6 +137,8 @@ class Runtime:
         with self.lock:
             # Explicit outdoor-zone presets remain authoritative.
             if self.control in ("legacy","shadow") or zone in ("frost","warm"):
+                if zone in ("frost","warm") and self.control=="experiment":
+                    self.fail("experiment interrupted by priority zone")
                 if zone in ("frost","warm") and self.control=="auto":
                     self.idle_frame=None
                     self.pending=None
@@ -141,6 +150,8 @@ class Runtime:
 
     def priority_write(self,kind,value):
         with self.lock:
+            if self.control=="experiment":
+                self.fail("experiment interrupted by priority write")
             if self.control=="auto":
                 self.idle_frame=None
                 self.pending=None
@@ -156,7 +167,7 @@ class Runtime:
 
     def manual(self,kind,value):
         with self.lock:
-            if self.control in ("manual","auto"):
+            if self.control in ("manual","auto","experiment"):
                 if self.priority() or self.pending is not None:
                     return ("Priority operation or pending readback",False if kind=="preset" else "error")
                 self.control="manual"
@@ -186,7 +197,7 @@ class Runtime:
 
     def choose(self,mode,expected):
         with self.lock:
-            if mode not in ("legacy","manual","shadow","auto") or expected!=self.control:
+            if mode not in ("legacy","manual","shadow","auto","experiment") or expected!=self.control:
                 raise SelectionBlocked("Stan sterowania zmienił się; odśwież panel")
             if self.pending is not None:
                 # Disarm immediately, but do not send competing commands.
@@ -194,7 +205,7 @@ class Runtime:
                     self.control="manual"
                     return
                 raise SelectionBlocked("Oczekiwanie na potwierdzenie poprzedniego polecenia")
-            if mode=="auto":
+            if mode in ("auto","experiment"):
                 try:
                     s,zone,curve,_=self.snapshot()
                 except Exception:
@@ -205,6 +216,12 @@ class Runtime:
                 # The Adaptive owner gates legacy CO writers. Stored legacy
                 # preset/FLimit policies remain untouched for a return to Legacy.
             self.control=mode
+            self.observer.interrupt()
+            self.experiment_idle=None
+            if mode=="experiment":
+                self.experiment_since=time.time()
+                self.experiment_started=time.monotonic()
+                self.experiment_initial=(s.mode,s.relay)
             self.learning.cancel()
             self.learning_before=None
             self.fault=None
@@ -333,11 +350,94 @@ class Runtime:
                       and bool(power&1 and power&4 and not power&2)
                       and self.flag(self.raw("pch")) and self.gpio("heatdemandpin")
                       and self.pending is None)
-            self.observer.observe(s,self.control,eligible,time.time())
+            try:
+                outdoor=self.number(self.raw("outtemp"))
+            except (TypeError,ValueError):
+                outdoor=None
+            self.observer.observe(s,self.control,eligible,time.time(),outdoor=outdoor)
         except Exception:
             self.observer.interrupt()
         finally:
             self.observer.save_if_due(time.monotonic())
+
+    def experiment_counts(self):
+        counts=[0]*len(self.EXPERIMENT_LEVELS)
+        if self.experiment_since is not None:
+            for row in self.observer.rows:
+                c=row["context"]
+                if c[0]=="experiment" and row["start"]["at"]>=self.experiment_since:
+                    pair=tuple(c[1:3])
+                    if pair in self.EXPERIMENT_LEVELS:
+                        counts[self.EXPERIMENT_LEVELS.index(pair)]+=1
+        return counts
+
+    def experiment_tick(self,s,zone,curve):
+        # Opt-in, native idle only. Never change demand, water target or Fset.
+        counts=self.experiment_counts()
+        idx=next((i for i,n in enumerate(counts) if n<self.EXPERIMENT_CYCLES),None)
+        expired=self.experiment_started is None or s.now-self.experiment_started>=self.EXPERIMENT_TIMEOUT
+        done=idx is None or expired
+        goal=self.experiment_initial if done else self.EXPERIMENT_LEVELS[idx]
+        actual=(s.mode,s.relay)
+        label=lambda x:x[0]+("+FLimit" if x[1] else " / FLimit OFF")
+        self.status={"reason":"experiment: passive during active cycle","reason_pl":"Eksperyment – obserwacja cyklu, bez zmian podczas pracy",
+                     "risk":"paused","actual":label(actual),"proposed":label(goal),"target":s.target,
+                     "return_temp":s.return_temp}
+        if self.activation_reason(s,zone,curve) is not None or not self.gpio("heatdemandpin"):
+            self.experiment_idle=None
+            self.status["reason_pl"]="Eksperyment wstrzymany – warunek priorytetowy lub brak zapotrzebowania"
+            return
+        if not self.idle_snapshot_valid(s,zone,curve):
+            self.experiment_idle=None
+            return
+        with self.frames_lock:
+            stamp=self.frames["R241"][0]
+        if self.experiment_idle is None:
+            self.experiment_idle=(stamp,stamp)
+            return
+        first,previous=self.experiment_idle
+        if stamp<=previous or stamp-previous>self.MAX_AGE:
+            if stamp-previous>self.MAX_AGE:
+                self.experiment_idle=(stamp,stamp)
+            return
+        self.experiment_idle=(first,stamp)
+        if stamp-first<60 or self.observer.stop is not None:
+            return
+        if actual==goal:
+            if done:
+                self.control="manual"
+                self.status["reason_pl"]="Eksperyment zakończony – przywrócono konfigurację początkową"
+            else:
+                self.status["reason_pl"]="Eksperyment – konfiguracja gotowa, oczekiwanie na naturalny START"
+            return
+        with self.serial_lock:
+            current,z,target,_=self.snapshot()
+            if (not self.idle_snapshot_valid(current,z,target) or not self.gpio("heatdemandpin")
+                    or (current.mode,current.relay)!=actual or abs(current.target-s.target)>0.25
+                    or self.g.get("newframe")):
+                return
+            # One output at a time; enable limit first if needed, then preset,
+            # then remove limit if needed. No writes in Shadow.
+            mode,relay=actual
+            if goal[1] and not relay:
+                relay=True
+            elif mode!=goal[0]:
+                mode=goal[0]
+            else:
+                relay=goal[1]
+            issued=time.monotonic()
+            self.pending=(mode,relay,issued+90,issued)
+            self.observer.interrupt()
+            self.experiment_idle=None
+            if mode!=actual[0]:
+                _,ok=self.g["new_presetchange"](mode)
+                if ok is not True:
+                    self.fail("experiment preset write not acknowledged")
+            else:
+                _,ok=self.g["flimitchange"]("1" if relay else "0")
+                if ok!="success" or self.gpio("freqlimitpin")!=relay:
+                    self.fail("experiment FLimit readback mismatch")
+            self.g["logging"].info("Hysteresis experiment issued: %s / FLimit %s",mode,relay)
 
     def tick(self):
         now=time.monotonic()
@@ -377,7 +477,7 @@ class Runtime:
                 if self.pending and now>self.pending[2]:
                     self.pending=None
                     self.fail("command readback unavailable")
-                elif self.control=="auto" and now-self.invalid_since>=180:
+                elif self.control in ("auto","experiment") and now-self.invalid_since>=180:
                     self.fail("telemetry lost; manual hold")
                 else:
                     self.status={"reason":str(e),"risk":"paused"}
@@ -401,6 +501,9 @@ class Runtime:
                 else:
                     self.status={"reason":"waiting for confirmed preset and relay","risk":"paused"}
                     return
+            if self.control=="experiment":
+                self.experiment_tick(s,zone,curve)
+                return
             if self.control=="manual":
                 if self.fault is None:
                     self.status={"reason":"manual control; no adaptive writes","risk":"paused"}
@@ -565,4 +668,6 @@ class Runtime:
                 blocker="Oczekiwanie na potwierdzenie poprzedniego polecenia"
             return dict(self.status,control=self.control,mode=actual,relay=relay,
                         ready=blocker is None,activation_blocker=blocker,curve=curve,zone=zone,pending=self.pending is not None,fault=self.fault,
-                        curve_settings=self.curve_settings(),learning=self.learning.summary(),hysteresis=self.observer.summary())
+                        curve_settings=self.curve_settings(),learning=self.learning.summary(),hysteresis=self.observer.summary(),
+                        experiment={"counts":self.experiment_counts(),"levels":[m+("+FLimit" if l else " / OFF") for m,l in self.EXPERIMENT_LEVELS],
+                                    "per_level":self.EXPERIMENT_CYCLES,"since":self.experiment_since})

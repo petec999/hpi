@@ -437,6 +437,8 @@ class HysteresisObserver:
     POST_STOP = 120
     MAX_GAP = 65
     SAVE_INTERVAL = 300
+    SENSORS = ('twi','two','mean')
+    BANDS = (0,1,2)
 
     def __init__(self, path=None, logger=None):
         self.path = Path(path) if path is not None else None
@@ -450,6 +452,8 @@ class HysteresisObserver:
         self.start = None
         self.stop = None
         self.ran = False
+        self.outdoor = None
+        self.above = self.empty_above()
         self.dirty = False
         self.last_save = None
         self.storage_error = None
@@ -462,13 +466,13 @@ class HysteresisObserver:
             if self.path.is_symlink() or self.path.stat().st_size > 262144:
                 raise ValueError("invalid observer file")
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            if data["schema"] != 1 or not isinstance(data["cycles"], list) or len(data["cycles"]) > self.LIMIT:
+            if data["schema"] not in (1,2) or not isinstance(data["cycles"], list) or len(data["cycles"]) > self.LIMIT:
                 raise ValueError("invalid observer schema")
             def numeric(x, lo, hi):
                 return type(x) in (float, int) and math.isfinite(x) and lo <= x <= hi
             for row in data["cycles"]:
                 ctx = row["context"]
-                if (len(ctx) != 4 or ctx[0] not in ("legacy", "manual", "shadow", "auto")
+                if (len(ctx) != 4 or ctx[0] not in ("legacy", "manual", "shadow", "auto", "experiment")
                         or ctx[1] not in PRESETS or type(ctx[2]) is not bool
                         or not numeric(ctx[3], 10, 65)):
                     raise ValueError("invalid context")
@@ -478,6 +482,20 @@ class HysteresisObserver:
                     for k in ("twi", "two"):
                         if len(event[k]) != 2 or not all(numeric(v, -100, 100) for v in event[k]):
                             raise ValueError("invalid temperature bracket")
+                for event in (row["start"],row["stop"]):
+                    if "outdoor" in event and (len(event["outdoor"]) != 2 or not all(v is None or numeric(v,-60,60) for v in event["outdoor"])):
+                        raise ValueError("invalid outdoor samples")
+                    for k in ("fact","fset"):
+                        if k in event and (len(event[k]) != 2 or not all(numeric(v,0,500) for v in event[k])):
+                            raise ValueError("invalid frequency samples")
+                if "run_seconds" in row and not numeric(row["run_seconds"],0,1e8):
+                    raise ValueError("invalid duration")
+                if "above_seconds" in row:
+                    if set(row["above_seconds"]) != set(self.SENSORS):
+                        raise ValueError("invalid duration sensors")
+                    for values in row["above_seconds"].values():
+                        if set(values) != {str(k) for k in self.BANDS} or not all(numeric(v,0,row["run_seconds"]) for v in values.values()):
+                            raise ValueError("invalid duration")
                 if row["stop"]["at"] < row["start"]["at"]:
                     raise ValueError("invalid event order")
             if data["since"] is not None and not numeric(data["since"], 0, 1e11):
@@ -495,14 +513,29 @@ class HysteresisObserver:
         self.phase_since = None
         self.start = self.stop = None
         self.ran = False
+        self.outdoor = None
+        self.above = self.empty_above()
+
+    @classmethod
+    def empty_above(cls):
+        return {k:{str(b):0.0 for b in cls.BANDS} for k in cls.SENSORS}
 
     @staticmethod
-    def edge(before, after, wall):
-        return {"at": wall,
-                "twi": [round(before.return_temp-before.target, 3), round(after.return_temp-after.target, 3)],
-                "two": [round(before.supply_temp-before.target, 3), round(after.supply_temp-after.target, 3)]}
+    def offsets(s):
+        a,b=s.return_temp-s.target,s.supply_temp-s.target
+        return {"twi":a,"two":b,"mean":(a+b)/2}
 
-    def observe(self, s, control, eligible, wall):
+    @classmethod
+    def edge(cls,before,after,wall,previous_outdoor,outdoor):
+        a,b=cls.offsets(before),cls.offsets(after)
+        return {"at":wall,"twi":[round(a["twi"],3),round(b["twi"],3)],
+                "two":[round(a["two"],3),round(b["two"],3)],
+                "outdoor":[previous_outdoor,outdoor],
+                "fact":[before.hz,after.hz],"fset":[before.requested_hz,after.requested_hz]}
+
+    def observe(self, s, control, eligible, wall, outdoor=None):
+        if type(outdoor) not in (int,float) or not math.isfinite(outdoor) or not -60<=outdoor<=60:
+            outdoor=None
         if self.since is None:
             self.since = wall
             self.dirty = True
@@ -522,6 +555,8 @@ class HysteresisObserver:
         if before is not None and not 0 < s.now-before.now <= self.MAX_GAP:
             self.interrupt()
             before = None
+        previous_outdoor=self.outdoor
+        self.outdoor=outdoor
         self.last = s
         active = s.requested_hz > 0
         if before is None:
@@ -531,12 +566,20 @@ class HysteresisObserver:
             if self.stop is not None or self.phase_since is None or s.now-self.phase_since < self.MIN_PHASE or before.hz != 0:
                 self.start = None
             else:
-                self.start = self.edge(before, s, wall)
+                self.start = self.edge(before,s,wall,previous_outdoor,outdoor)
+            self.above=self.empty_above()
             self.phase_since = s.now
             self.stop = None
             self.ran = s.hz > 0
-        elif not active and before.requested_hz > 0:
-            self.stop = (self.edge(before,s,wall), s.now) if (
+        if self.start is not None and active and before.requested_hz>0:
+            a,b=self.offsets(before),self.offsets(s)
+            for k in self.SENSORS:
+                for band in self.BANDS:
+                    if min(a[k],b[k])>band:
+                        self.above[k][str(band)]+=s.now-before.now
+        if not active and before.requested_hz > 0:
+            self.stop = (self.edge(before,s,wall,previous_outdoor,outdoor),s.now,
+                         round(s.now-self.phase_since,2),self.above) if (
                 self.start is not None and self.ran and self.phase_since is not None
                 and s.now-self.phase_since >= self.MIN_PHASE) else None
             self.phase_since = None
@@ -546,7 +589,8 @@ class HysteresisObserver:
             if self.phase_since is None:
                 self.phase_since = s.now
             if self.stop is not None and s.now-self.phase_since >= self.POST_STOP:
-                self.rows.append({"context":list(context), "start":self.start, "stop":self.stop[0]})
+                self.rows.append({"context":list(context),"start":self.start,"stop":self.stop[0],
+                                  "run_seconds":self.stop[2],"above_seconds":self.stop[3]})
                 self.rows = self.rows[-self.LIMIT:]
                 self.start = self.stop = None
                 self.dirty = True
@@ -563,7 +607,7 @@ class HysteresisObserver:
                 raise ValueError("symlink observer path")
             fd,tmp = tempfile.mkstemp(prefix=".hysteresis-",dir=str(self.path.parent))
             with os.fdopen(fd,"w",encoding="utf-8") as f:
-                json.dump({"schema":1,"since":self.since,"cycles":self.rows},f,allow_nan=False)
+                json.dump({"schema":2,"since":self.since,"cycles":self.rows},f,allow_nan=False)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp,self.path)
@@ -585,14 +629,29 @@ class HysteresisObserver:
         result = {"total":len(self.rows),"cycles":len(group),"since":self.since,
                   "changed":self.change,"context":self.context,"storage_error":self.storage_error,
                   "unsaved":self.dirty,"enough_samples":len(group)>=20,"last_cycle":group[-1] if group else None}
-        for sensor in ("twi","two"):
+        for sensor in self.SENSORS:
             stats={}
             for edge in ("start","stop"):
-                pairs=[r[edge][sensor] for r in group]
+                pairs=[[(a+b)/2 for a,b in zip(r[edge]["twi"],r[edge]["two"])] if sensor=="mean"
+                       else r[edge][sensor] for r in group]
                 mids=[sum(p)/2 for p in pairs]
                 center=median(mids) if mids else None
                 stats[edge]={"offset":round(center,2),"mad":round(median(abs(x-center) for x in mids),2),
                              "sample_span":round(median(abs(p[1]-p[0]) for p in pairs),2)} if mids else None
             stats["width"]=round(stats["stop"]["offset"]-stats["start"]["offset"],2) if group else None
             result[sensor]=stats
+        extended=[r for r in group if "above_seconds" in r]
+        def med(values):
+            values=list(values)
+            return round(median(values),2) if values else None
+        outdoor=[r["stop"]["outdoor"][0] for r in group if r["stop"].get("outdoor",[None])[0] is not None]
+        result["extended"]={"cycles":len(extended),
+            "stop_outdoor":med(outdoor),"outdoor_min":min(outdoor) if outdoor else None,
+            "outdoor_max":max(outdoor) if outdoor else None,
+            "stop_fact":med(r["stop"]["fact"][0] for r in group if "fact" in r["stop"]),
+            "stop_fset":med(r["stop"]["fset"][0] for r in group if "fset" in r["stop"]),
+            "stop_water_delta":med(r["stop"]["two"][0]-r["stop"]["twi"][0] for r in group),
+            "run_seconds":med(r["run_seconds"] for r in extended),
+            "above_seconds":{k:{str(b):med(r["above_seconds"][k][str(b)] for r in extended)
+                                for b in self.BANDS} for k in self.SENSORS}}
         return result
