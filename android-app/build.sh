@@ -9,7 +9,7 @@ rm -rf "$OUT"
 mkdir -p "$OUT/classes" "$OUT/dex"
 "$BT/aapt2" compile --dir res -o "$OUT/res.zip"
 "$BT/aapt2" link -I "$JAR" --manifest AndroidManifest.xml -o "$OUT/base.apk" "$OUT/res.zip"
-javac -encoding UTF-8 -source 8 -target 8 -bootclasspath "$JAR" -d "$OUT/classes" $(find src -name '*.java')
+javac -encoding UTF-8 -source 8 -target 8 -classpath "$JAR" -d "$OUT/classes" $(find src -name '*.java')
 "$BT/d8" --min-api 26 --lib "$JAR" --output "$OUT/dex" $(find "$OUT/classes" -name '*.class')
 (cd "$OUT/dex" && zip -q "$OUT/base.apk" classes.dex)
 "$BT/zipalign" -f -p 4 "$OUT/base.apk" "$OUT/aligned.apk"
