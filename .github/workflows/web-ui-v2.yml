@@ -42,6 +42,8 @@ jobs:
           names={n.name for n in ast.walk(ast.parse(patched)) if isinstance(n,ast.FunctionDef)}
           assert {'new_tempchange','statechange','new_presetchange','curvecalc','new_tempcompchange','validate_schedule','schedule_write','_load_schedule','_scheduler_config','saveconfig','loadconfig'} <= names
           result = ui['patch'](patched)
+          assert result.replace(ui['BLOCK'],'',1)==patched, 'Unexpected modification outside UI block'
+          assert '# HOME-IOT WEB V2 COUNTER TAP' not in result
           for old in (ui['PREVIOUS_BLOCK'],ui['CONTROL_BLOCK']):
               idx=result.index(ui['BLOCK'])
               previous=result[:idx]+old+result[idx+len(ui['BLOCK']):]
@@ -61,6 +63,45 @@ jobs:
           block=runpy.run_path('tools/install-web-ui-v2.py')['BLOCK']
           tree=ast.parse(block)
           html=next(ast.literal_eval(n.value) for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(k,ast.Name) and k.id=='_WV_HTML' for k in n.targets))
+          pathlib.Path('/tmp/web-v2.html').write_text(html)
           pathlib.Path('/tmp/web-v2.js').write_text(html.split('<script>',1)[1].split('</script>',1)[0])
           PY
           node --check /tmp/web-v2.js
+      - name: Execute browser UI against mocked live state and failed optional diagnostics
+        run: |
+          npm install --prefix /tmp/webui-test jsdom@24 --no-audit --no-fund
+          node <<'JS'
+          const {JSDOM,VirtualConsole}=require('/tmp/webui-test/node_modules/jsdom');
+          const fs=require('fs');
+          const errors=[];
+          const vc=new VirtualConsole();
+          vc.on('jsdomError',e=>errors.push(e.message));
+          const d=new JSDOM(fs.readFileSync('/tmp/web-v2.html','utf8'),{
+            url:'http://localhost/v2/',runScripts:'dangerously',virtualConsole:vc,
+            beforeParse(w){
+              w.scrollTo=()=>{};
+              w.fetch=async url=>{
+                if(url.includes('diagnostics')) throw Error('simulated failure');
+                return {ok:true,redirected:false,json:async()=>({
+                  schema:1,frames:{r141:{fresh:true,age_s:2},r241:{fresh:true,age_s:3}},
+                  values:{two:32,twi:28,fact:40,pd:22,ps:7,defrost:false},
+                  controls:{settemp:30,dhw:50,hcurve:32,mode:'eco',pch:'on',pdhw:'off'},
+                  control_ready:true,mqtt:true,watchdog:{status:'ok',age_s:1,failures:0,recoveries:0}
+                })};
+              };
+            }
+          });
+          setTimeout(()=>{
+            const doc=d.window.document;
+            const assert=require('assert/strict');
+            try{
+              assert.equal(doc.querySelector('[data-value="two"]').textContent,'32');
+              assert.equal(doc.getElementById('transport').textContent,'WWW · OK');
+              assert.equal(doc.getElementById('r141').textContent,'R141 · OK');
+              assert.equal(doc.getElementById('r241').textContent,'R241 · OK');
+              assert.equal(doc.getElementById('notice').classList.contains('hide'),true);
+              assert.deepEqual(errors,[]);
+              console.log('Live telemetry survives independent diagnostics failure');
+            } finally {d.window.close();}
+          },300);
+          JS
