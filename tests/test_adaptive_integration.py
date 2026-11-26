@@ -76,6 +76,33 @@ class RuntimeTest(unittest.TestCase):
         self.r.legacy("preset","turbo","frost")
         self.r.priority_write("relay","0")
         self.assertEqual(self.writes,[("preset","turbo"),("relay","0")])
+    def test_auto_owns_outputs_independent_of_legacy_settings(self):
+        self.g.update(flimit="manual",presetautochange="manual")
+        self.r.choose("auto","legacy")
+        self.assertEqual(self.r.control,"auto")
+        self.assertEqual(self.g["flimit"],"manual")
+        self.assertEqual(self.g["presetautochange"],"manual")
+        self.r.legacy("relay","0","normal")
+        self.r.legacy("preset","quiet","normal")
+        self.assertFalse(self.writes)
+        for now in range(1000,1901,30):
+            self.now.return_value=now
+            self.refresh()
+            self.r.tick()
+            if self.r.pending:
+                break
+        self.assertEqual(self.writes,[("preset","eco")])
+        self.assertEqual(self.r.control,"auto")
+
+    def test_activation_blocker_and_priority_preserved(self):
+        self.g["get_temp_zone"]=lambda v:"warm"
+        self.assertFalse(self.r.view()["ready"])
+        self.assertIn("strefa",self.r.view()["activation_blocker"])
+        with self.assertRaisesRegex(ValueError,"strefa"):
+            self.r.choose("auto","legacy")
+        self.assertEqual(self.r.control,"legacy")
+        self.assertFalse(self.writes)
+
     def test_auto_manual_handoff(self):
         self.r.choose("auto","legacy")
         self.r.manual("preset","eco")
@@ -154,6 +181,9 @@ class SourceIntegration(unittest.TestCase):
             import ast
             html=ast.literal_eval(next(l for l in src.splitlines() if l.startswith("_WV_HTML = ")).split("=",1)[1].strip())
             self.assertNotIn('href="/curvecalc"',html)
+            self.assertIn('id="am-owner"',html)
+            self.assertIn('activation_blocker',html)
+            self.assertIn('"reason":str(exc)',src)
             for url in ("/","/scheduler","/settings","/parameters","/charts"):
                 self.assertIn('href="'+url+'"',html)
             # Migrate the already installed learning UI without duplicating it.

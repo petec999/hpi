@@ -103,6 +103,38 @@ def _wv_ready''')
                 _wv_execute(g,key,value)''')
     return once(s,base,b)
 
+def activation_api(source):
+    old='                _am.choose(value,expected)'
+    new='''                try:
+                    _am.choose(value,expected)
+                except _am_sys.modules["_hpi_adaptive_runtime"].SelectionBlocked as exc:
+                    return reply({"accepted":False,"reason":str(exc)},409)'''
+    if new in source:
+        return source
+    return once(source,old,new)
+
+def activation_ui(html):
+    if 'id="am-owner"' in html:
+        return html
+    html=once(html,'<div class="metric"><span>Tryb / zworka (odczyt)</span>',
+        '<div class="metric"><span>Aktywne sterowanie</span><strong id="am-owner">—</strong></div><p id="am-activation" role="status"></p><div class="metric"><span>Tryb / zworka (odczyt)</span>')
+    html=once(html,'let amState=null,amBusy=false,amDirty=false;',
+        'let amState=null,amBusy=false,amDirty=false,amError="";')
+    html=once(html,' if(!amDirty)$("am-control").value=v.control||"legacy";',
+        ''' if(v.control&&(!amDirty||$("am-control").value===v.control)){amDirty=false;$("am-control").value=v.control;}
+ $("am-owner").textContent=({legacy:"Legacy",manual:"Ręczne",shadow:"Obserwacja",auto:"Adaptive Auto"})[v.control]||"Brak odczytu";
+ $("am-activation").textContent=amError||(v.activation_blocker?"Auto: "+v.activation_blocker:"");''')
+    html=once(html,'$("am-control").addEventListener("change",()=>{amDirty=',
+        '$("am-control").addEventListener("change",()=>{amError="";amDirty=')
+    html=once(html,' amBusy=true;amPaint(amState);',' amError="";amBusy=true;amPaint(amState);')
+    html=once(html,'  if(!res.ok||res.redirected||!(await res.json()).accepted)throw Error("rejected");\n  amDirty=false;amPaint(null);$("am-reason").textContent="Polecenie przyjęte; czekam na odczyt.";\n }catch(e){amPaint(null);$("am-reason").textContent="Polecenie niepotwierdzone. Sprawdź aktualny stan; brak automatycznej ponawiania."}\n finally{clearTimeout(timer);amBusy=false;}',
+        '''  const body=res.redirected?{}:await res.json();
+  if(!res.ok||!body.accepted)throw Error(body.reason||"Polecenie odrzucone (HTTP "+res.status+")");
+  amDirty=false;amError="";amPaint(null);
+ }catch(e){amDirty=false;amError=e.message||"Brak potwierdzenia polecenia.";amPaint(null);}
+ finally{clearTimeout(timer);amBusy=false;amPaint(amState);}''')
+    return html
+
 def learning_block():
     policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")
     runtime=(ROOT/"adaptive/live_runtime.py").read_text(encoding="utf-8").replace("from adaptive.regulator import","from _hpi_adaptive_policy import")
@@ -120,15 +152,16 @@ def learning_ui(source):
     old='<a href="/curvecalc">Krzywa grzewcza</a>'
     if old in html:
         html=once(html,old,'<a href="/">Panel oryginalny</a>')
+    html=activation_ui(html)
     if 'id="am-learning"' in html:
-        return source if html==ast.literal_eval(line.split("=",1)[1].strip()) else once(source,line,"_WV_HTML = "+repr(html))
+        return activation_api(source if html==ast.literal_eval(line.split("=",1)[1].strip()) else once(source,line,"_WV_HTML = "+repr(html)))
     html=once(html,'<p id="am-reason"', '<div class="metric"><span>Uczenie (obserwacje / konteksty)</span><strong id="am-learning">—</strong></div><div class="metric"><span>Pamięć / dostrojenie</span><strong id="am-learning-detail">—</strong></div><p id="am-reason"')
     html=once(html,' $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";',
     ''' const l=v.learning;
  $("am-learning").textContent=l?l.observations+" / "+l.contexts:"—";
  $("am-learning-detail").textContent=l?(l.storage_error?"RAM (błąd zapisu)":l.unsaved?"RAM (oczekuje na zapis)":"Zapis / brak nowych danych")+" · "+fmt(v.down_confirm)+" s / "+fmt(v.surplus_band)+" K":"—";
  $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";''')
-    return once(source,line,"_WV_HTML = "+repr(html))
+    return activation_api(once(source,line,"_WV_HTML = "+repr(html)))
 
 def patch(source):
     if MARK in source:

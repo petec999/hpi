@@ -4,6 +4,9 @@ import time
 import math
 from adaptive.regulator import Regulator, Sample, LEVELS, Learning
 
+class SelectionBlocked(ValueError):
+    """Safe, fixed activation reason exposed to authenticated UI."""
+
 class Runtime:
     MAX_AGE=60
     PERIOD=30
@@ -153,22 +156,44 @@ class Runtime:
                 self.reg=Regulator()
             return self.g["new_presetchange" if kind=="preset" else "flimitchange"](value)
 
+    @staticmethod
+    def activation_reason(s,zone,curve):
+        if s.error:
+            return "Aktywny błąd pompy"
+        if s.dhw:
+            return "Trwa grzanie CWU"
+        if s.defrost:
+            return "Trwa odszranianie"
+        if s.override:
+            return "Aktywna funkcja ochronna lub serwisowa"
+        if zone!="normal":
+            return "Wymuszona strefa temperatury zewnętrznej"
+        if abs(curve-s.target)>1:
+            return "Nastawa pompy różni się od krzywej o ponad 1 K"
+        if not (10<=s.target<=65 and -10<=s.supply_temp<=85 and -10<=s.return_temp<=85):
+            return "Temperatury poza zakresem regulatora"
+        return None
+
     def choose(self,mode,expected):
         with self.lock:
             if mode not in ("legacy","manual","shadow","auto") or expected!=self.control:
-                raise ValueError("control selection changed")
+                raise SelectionBlocked("Stan sterowania zmienił się; odśwież panel")
             if self.pending is not None:
                 # Disarm immediately, but do not send competing commands.
                 if mode in ("manual","shadow"):
                     self.control="manual"
                     return
-                raise ValueError("waiting for pending command")
+                raise SelectionBlocked("Oczekiwanie na potwierdzenie poprzedniego polecenia")
             if mode=="auto":
-                s,zone,curve,_=self.snapshot()
-                if zone!="normal" or s.dhw or s.defrost or s.override or s.error or abs(curve-s.target)>1:
-                    raise ValueError("automatic control not ready")
-                if str(self.g.get("flimit")).lower()!="auto" or str(self.g.get("presetautochange")).lower()!="auto":
-                    raise ValueError("set original FLimit and preset policy to auto first")
+                try:
+                    s,zone,curve,_=self.snapshot()
+                except Exception:
+                    raise SelectionBlocked("Brak pełnego, świeżego odczytu pompy lub GPIO") from None
+                reason=self.activation_reason(s,zone,curve)
+                if reason:
+                    raise SelectionBlocked(reason)
+                # The Adaptive owner gates legacy CO writers. Stored legacy
+                # preset/FLimit policies remain untouched for a return to Legacy.
             self.control=mode
             self.learning.cancel()
             self.learning_before=None
@@ -254,10 +279,6 @@ class Runtime:
                 self.reg.reset()
                 self.status={"reason":"priority zone, protection, DHW or setpoint mismatch","risk":"paused"}
                 return
-            if self.control=="auto" and (str(self.g.get("flimit")).lower()!="auto" or
-                                       str(self.g.get("presetautochange")).lower()!="auto"):
-                self.fail("original automatic policy setting changed")
-                return
             if self.control=="auto":
                 outdoor=self.number(self.raw("outtemp"))
                 self.learning.observe(s,outdoor)
@@ -305,10 +326,12 @@ class Runtime:
                 s,zone,curve,_=self.snapshot()
                 actual=s.mode
                 relay="1" if s.relay else "0"
-                ready=(zone=="normal" and not (s.dhw or s.defrost or s.override or s.error) and abs(curve-s.target)<=1)
+                blocker=self.activation_reason(s,zone,curve)
             except Exception:
                 actual=relay=zone=None
-                ready=False
+                blocker="Brak pełnego, świeżego odczytu pompy lub GPIO"
+            if self.pending is not None:
+                blocker="Oczekiwanie na potwierdzenie poprzedniego polecenia"
             return dict(self.status,control=self.control,mode=actual,relay=relay,
-                        ready=ready,zone=zone,pending=self.pending is not None,fault=self.fault,
+                        ready=blocker is None,activation_blocker=blocker,zone=zone,pending=self.pending is not None,fault=self.fault,
                         learning=self.learning.summary())
