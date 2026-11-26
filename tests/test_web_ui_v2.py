@@ -96,7 +96,9 @@ class Tests(unittest.TestCase):
         updated=patcher.patch(old)
         self.assertEqual(updated,patcher.patch(SOURCE))
         self.assertEqual(patcher.patch(SOURCE.replace('@app.route("/")',patcher.CONTROL_BLOCK+'@app.route("/")')),updated)
-        self.assertEqual(updated.count("# HOME-IOT WEB V2 COUNTER TAP"),1)
+        self.assertNotIn("# HOME-IOT WEB V2 COUNTER TAP",updated)
+        self.assertEqual(updated.replace(patcher.BLOCK,"",1),SOURCE)
+        self.assertRaises(ValueError,patcher.patch,SOURCE+"\n# HOME-IOT WEB V2 COUNTER TAP\n")
         self.assertEqual(patcher.patch(updated),updated)
         self.assertRaises(ValueError,patcher.patch,old.replace("Panel techniczny","Unknown panel"))
 
@@ -143,29 +145,21 @@ class Tests(unittest.TestCase):
         self.assertEqual(post(payload).status_code,409)
         self.assertEqual(len(calls),4)
 
-    def test_pressure_and_counters(self):
+    def test_pressure_and_optional_failure(self):
         g=self.g
         now=time.monotonic()
-        cl=SimpleNamespace(is_connected=lambda:True)
-        g.update(client=cl,mqtt_topic="climate/haier",use_mqtt="1",
-                 _pump_frame_last_at={"R141":now,"R241":now},
+        g.update(_pump_frame_last_at={"R141":now,"R241":now},
                  statusdict={"pdps":{"mqtt":"/haierunit/pressures/pdps/state","value":[24,23.5,6,7]}})
-        def msg(key,payload,retain=False):
-            return g["on_message"](cl,None,SimpleNamespace(topic="climate/haier/diagnostics/counters/"+key,payload=payload,retain=retain))
-        self.assertEqual(msg("available",b"online"),"original")
-        for k in g["_WV_COUNTER_KEYS"]:
-            msg(k,b"4",True)
-        msg("available",b"online",True)
+        def fail(*args):
+            raise RuntimeError("optional diagnostic failure")
+        g["_wv_system"]=fail
+        g["_wv_curve"]=fail
         state=g["_wv_state"](g,time.monotonic())
-        self.assertEqual(state["counters"],{})
+        self.assertEqual(state["system"],{})
+        self.assertEqual(state["curve"],{})
         self.assertEqual(state["values"]["pd"],23.5)
         self.assertEqual(state["values"]["pressure_delta"],16.5)
-        for k in g["_WV_COUNTER_KEYS"]:
-            msg(k,b"4")
-        msg("available",b"online")
-        self.assertEqual(g["_wv_state"](g,time.monotonic())["counters"]["compressor_starts"],4)
-        msg("available",b"offline")
-        self.assertEqual(g["_wv_state"](g,time.monotonic())["counters"],{})
+        self.assertEqual(g["on_message"](None,None,None),"original")
         g["_pump_frame_last_at"]["R241"]=0
         self.assertIsNone(g["_wv_state"](g,time.monotonic())["values"]["pd"])
 
