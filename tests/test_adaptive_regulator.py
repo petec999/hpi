@@ -86,6 +86,13 @@ class TestPolicy(unittest.TestCase):
         for t in range(0,900,30):
             d=r.step(sample(t,supply=29),allowed={0,1})
             self.assertEqual(d.proposed,1)
+    def test_surplus_at_lowest_envelope_does_not_force_stop_or_raise_power(self):
+        ds=self.series(Regulator(),level=0,supply=36,ret=33.5,hz=40,end=900)
+        self.assertTrue(all(d.proposed==0 for d in ds))
+        self.assertEqual(ds[-1].risk,"cycling_risk_at_minimum")
+    def test_deficit_can_release_lowest_envelope(self):
+        ds=self.series(Regulator(),level=0,supply=29,hz=40,end=300)
+        self.assertEqual(ds[-1].proposed,1)
     def test_balanced_low_frequency_no_probe(self):
         ds=self.series(Regulator(),hz=24,end=2400)
         self.assertTrue(all(d.proposed==1 for d in ds))
