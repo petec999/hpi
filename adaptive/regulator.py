@@ -353,11 +353,14 @@ class Learning:
         t["last"]=s.now
         t["samples"].append((s.now,s.target-s.supply_temp,s.hz))
         t["samples"]=[x for x in t["samples"] if s.now-x[0]<=120]
-        if s.now-t["start"]<180 or len(t["samples"])<3:
+        if s.now-t["start"]<90 or len(t["samples"])<3:
             return
         e=median(x[1] for x in t["samples"])
         hz=median(x[2] for x in t["samples"])
         shortage=e>.5 and all(x[1]>.3 for x in t["samples"])
+        urgent=e>=2 and all(x[1]>1.5 for x in t["samples"])
+        if s.now-t["start"]<180 and not urgent:
+            return
         if not shortage and s.now-t["start"]<300:
             return
         score=-1 if shortage else 1 if e<-.6 else 0

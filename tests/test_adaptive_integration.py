@@ -107,6 +107,26 @@ class RuntimeTest(unittest.TestCase):
         self.assertIsNone(self.r.pending)
         self.assertIsNotNone(self.r.fault)
         self.assertEqual(len(self.writes),1)
+    def test_learning_requires_confirmed_auto_transition(self):
+        self.r.choose("auto","legacy")
+        with patch.object(Decoder,"GetMode",return_value="turbo") as mode, patch.object(Decoder,"GetCompInfo",return_value=[45,45,2,320,30]) as comp:
+            for now in range(1000,1901,30):
+                self.now.return_value=now
+                self.refresh()
+                self.r.tick()
+                if self.r.pending:
+                    break
+            self.assertEqual(self.writes,[("preset","eco")])
+            self.assertIsNone(self.r.learning.trial)
+            mode.return_value="eco"
+            comp.return_value=[40,40,2,320,30]
+            for now in range(now+30,now+361,30):
+                self.now.return_value=now
+                self.refresh()
+                self.r.tick()
+            self.assertEqual(self.r.learning.summary()["observations"],1)
+            self.assertEqual(self.r.view()["learning"]["contexts"],1)
+
     def test_auto_disarm_on_lost_telemetry(self):
         self.r.choose("auto","legacy")
         for t in range(1090,1361,30):
@@ -132,3 +152,15 @@ class SourceIntegration(unittest.TestCase):
             self.assertIn("STABLE MQTT PUBACK HEALTH",src)
             self.assertIn("HOME-IOT WEB UI V2 BEGIN",src)
             self.assertEqual(installer["plan"](d),[])
+            self.assertIn('learning_path="/opt/haier/.adaptive-learning.json"',src)
+            self.assertIn('STABLE MQTT RECONNECT v2',src)
+            self.assertIn('HOME-IOT MQTT WATCHDOG v2',src)
+            # Simulate the previous embedded module: migration must keep all
+            # core patches and leave the installed version idempotent.
+            old=src.replace('learning_path="/opt/haier/.adaptive-learning.json"','learning_path=None',1)
+            (d/"main.py").write_text(old)
+            planned=installer["plan"](d)
+            self.assertEqual(len(planned),1)
+            self.assertEqual(planned[0][0],d/"main.py")
+            self.assertEqual(planned[0][2].decode(),src)
+
