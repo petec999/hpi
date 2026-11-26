@@ -5,7 +5,7 @@ import math
 import os
 import tempfile
 from pathlib import Path
-from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch
+from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch, HeaterCounter
 
 class SelectionBlocked(ValueError):
     """Safe, fixed activation reason exposed to authenticated UI."""
@@ -36,6 +36,7 @@ class Runtime:
         self.learning.on_record=self.report.learned
         self.thresholds=NativeThresholds(Path(learning_path).with_name(".adaptive-thresholds-v1.json") if learning_path else None)
         self.register_watch=RegisterWatch(Path(learning_path).with_name(".adaptive-register-watch-v1.json") if learning_path else None)
+        self.heater_counter=HeaterCounter(Path(learning_path).with_name(".adaptive-heater-counter-v1.json") if learning_path else None)
         self.observer_frames=None
         self.experiment_since=None
         self.experiment_idle=None
@@ -479,7 +480,31 @@ class Runtime:
                 data["learning"]["saved_at"]=None
             data["thresholds"]=self.thresholds.summary()
             data["register_watch"]=self.register_watch.summary(time.monotonic())
+            data["heater_counter"]=self.heater_counter.summary(time.monotonic())
             return data
+
+    def observe_heater(self,now):
+        # Count only fresh, distinct R141 samples; no additional RS485 traffic.
+        try:
+            with self.frames_lock:
+                stamp,frame=self.frames.get("R141",(None,None))
+            self.heater_counter.observe(frame,stamp,time.monotonic(),time.time())
+            self.heater_counter.save_if_due(now)
+            d=self.heater_counter.summary(time.monotonic())
+            if d["state"] is None or d["storage_error"]:
+                return
+            base=str(self.g.get("mqtt_topic","")).rstrip("/")
+            if not base:
+                return
+            for client in list(self.g.get("services",[])):
+                try:
+                    if client.is_connected():
+                        for key,value in (("starts",d["starts"]),("seconds",d["seconds"])):
+                            client.publish(base+"/diagnostics/heater/"+key,str(value),qos=0,retain=False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def observe_registers(self,now):
         # Independent from CO eligibility and owner. No extra bus transactions.
@@ -647,6 +672,7 @@ class Runtime:
                     self.g["logging"].info("Adaptive integration: four complete recent frames")
                     self.ready_log_frames=stamps
                     self.ready_log_count+=1
+            self.observe_heater(now)
             self.observe_registers(now)
             self.observe_hysteresis()
             if self.resume_requested:

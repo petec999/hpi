@@ -1256,3 +1256,91 @@ class RegisterWatch:
                     os.unlink(tmp)
                 except OSError:
                     pass
+
+
+class HeaterCounter:
+    """Observed A4A output transitions; not an electrical power measurement."""
+    SAVE_INTERVAL=1800
+    LIMIT=128
+    MAX_BYTES=32768
+    def __init__(self,path=None):
+        self.path=Path(path) if path else None
+        self.starts=0
+        self.seconds=0.0
+        self.events=[]
+        self.last=None
+        self.dirty=False
+        self.last_save=None
+        self.error=None
+        try:
+            if self.path is not None:
+                if self.path.is_symlink() or self.path.stat().st_size>self.MAX_BYTES:
+                    raise ValueError("invalid heater counter file")
+                d=json.loads(self.path.read_text())
+                if (d["schema"]!=1 or type(d["starts"]) is not int or d["starts"]<0
+                        or not AdaptiveReport.number(d["seconds"]) or d["seconds"]<0
+                        or not isinstance(d["events"],list) or len(d["events"])>self.LIMIT
+                        or any(not isinstance(e,list) or len(e)!=2 or not AdaptiveReport.number(e[0])
+                               or type(e[1]) is not bool for e in d["events"])):
+                    raise ValueError("invalid heater counter data")
+                self.starts,self.seconds,self.events=d["starts"],float(d["seconds"]),d["events"]
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError):
+            self.error="heater counter load failed"
+
+    def observe(self,frame,stamp,now,wall):
+        if (not isinstance(frame,(tuple,list)) or len(frame)!=16
+                or type(frame[3]) is not int or not 0<=frame[3]<=65535
+                or not AdaptiveReport.number(stamp) or not 0<=now-stamp<=60):
+            self.last=None
+            return
+        state=bool(frame[3]&0x0100)
+        if self.last is not None:
+            previous,old=self.last
+            dt=stamp-previous
+            if dt==0:
+                return
+            if 0<dt<=65:
+                if old and state:
+                    self.seconds+=dt
+                    self.dirty=True
+                if old!=state:
+                    self.starts+=int(state)
+                    self.events.append([wall,state])
+                    self.events=self.events[-self.LIMIT:]
+                    self.dirty=True
+        self.last=(stamp,state)
+
+    def summary(self,now):
+        fresh=self.last is not None and 0<=now-self.last[0]<=60
+        return {"starts":self.starts,"seconds":round(self.seconds,1),
+                "state":self.last[1] if fresh else None,
+                "events":[list(e) for e in self.events],"unsaved":self.dirty,
+                "storage_error":self.error}
+
+    def save_if_due(self,now):
+        if not self.dirty or self.path is None or (self.last_save is not None and now-self.last_save<self.SAVE_INTERVAL):
+            return
+        self.last_save=now
+        temp=None
+        try:
+            if self.path.is_symlink():
+                raise ValueError("invalid heater counter path")
+            fd,temp=tempfile.mkstemp(prefix=".adaptive-heater-",dir=self.path.parent)
+            with os.fdopen(fd,"w") as stream:
+                json.dump({"schema":1,"starts":self.starts,"seconds":self.seconds,"events":self.events},stream,allow_nan=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp,self.path)
+            temp=None
+            self.dirty=False
+            self.error=None
+        except (OSError,ValueError,TypeError):
+            self.error="heater counter save failed"
+        finally:
+            if temp is not None:
+                try:
+                    os.unlink(temp)
+                except OSError:
+                    pass

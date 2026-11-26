@@ -400,13 +400,42 @@ table("events",["Czas","Typ","Właściciel","Szczegóły"]''')
     elif kind=="events":''')
     return source
 
+def heater_counter_api(source):
+    source=register_watch_api(source)
+    line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+    html=ast.literal_eval(line.split("=",1)[1].strip())
+    if 'id="heater-kpis"' not in html:
+        html=once(html,'<article><h2>Diagnostyka grzałek / CWU (pasywna)</h2>','<article><h2>Heater — odczyt A4A</h2><p id="heater-kpis"></p><div class="scroll"><table id="heater-events"></table></div><small>Załączenia OFF→ON z kolejnych świeżych próbek. Czas ON to dolna granica (bez przerw i nieznanych odcinków przejściowych). Odczyt sterownika, nie pomiar poboru prądu. Dane od instalacji licznika.</small></article><article><h2>Diagnostyka grzałek / CWU (pasywna)</h2>')
+        html=once(html,'const rw=d.register_watch;', '''const hc=d.heater_counter;
+el("heater-kpis").textContent=hc?("Stan: "+(hc.state===null?"—":hc.state?"ON":"OFF")+" · Załączenia: "+hc.starts+" · Czas: "+num(hc.seconds/3600,3)+" h"+(hc.storage_error?" · "+hc.storage_error:hc.unsaved?" · RAM":"")):"Brak danych";
+table("heater-events",["Czas","Stan A4A"],(hc?hc.events:[]).slice().reverse().map(e=>[dt(e[0]),e[1]?"ON":"OFF"]));
+const rw=d.register_watch;''')
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    # Reuse the native discovery function and device identity. Non-retained
+    # periodic samples expire when the frame or service is unavailable.
+    if '"HaierPi_HeaterStartsObserved"' not in source:
+        anchor='    configure_binary_sensor("Heater", st(\'heater\'), "HaierPi_Heater")'
+        source=once(source,anchor,anchor+'''
+    for _suffix,_uid,_name,_unit in (
+        ("starts","HaierPi_HeaterStartsObserved","Heater observed starts",None),
+        ("seconds","HaierPi_HeaterSecondsObserved","Heater observed run time","s"),
+    ):
+        _hc_cfg={"name":_name,"stat_t":mqtt_topic+"/diagnostics/heater/"+_suffix,
+                 "uniq_id":_uid,"exp_aft":90,"stat_cla":"total_increasing"}
+        if _unit:
+            _hc_cfg["unit_of_meas"]=_unit
+            _hc_cfg["dev_cla"]="duration"
+        _pub("sensor",_uid,_hc_cfg)
+''')
+    return source
+
 def experiment_api(source):
     old='choices=("legacy","manual","shadow","auto") if key=="adaptive_control"'
     new='choices=("legacy","manual","shadow","auto","experiment") if key=="adaptive_control"'
     source=source if new in source else once(source,old,new)
     old='if current==value:'
     new='if current==value and not (key=="adaptive_control" and value=="manual" and _am.view()["auto_resume_pending"]):'
-    return register_watch_api(source if new in source else once(source,old,new))
+    return heater_counter_api(source if new in source else once(source,old,new))
 
 def learning_block():
     policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")
