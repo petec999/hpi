@@ -429,13 +429,54 @@ const rw=d.register_watch;''')
 ''')
     return source
 
+def heater_control_api(source):
+    source=heater_counter_api(source)
+    if 'out["heater_mode"]' not in source:
+        source=once(source,'    out["adaptive_control"]=am["control"]','    out["heater_mode"]=am["heater"]["mode"]\n    out["adaptive_control"]=am["control"]')
+        source=once(source,'    if key=="curve_settings":\n        value=_am.validate_curve(value)', '''    if key=="heater_mode":
+        if value not in ("off","on","auto") or expected not in ("off","on","auto"):
+            raise ValueError("invalid heater mode")
+    elif key=="curve_settings":
+        value=_am.validate_curve(value)''')
+        source=once(source,'if (key not in ("adaptive_control","curve_settings") and not state["control_ready"])','if (key not in ("adaptive_control","curve_settings","heater_mode") and not state["control_ready"])')
+        source=once(source,'            if key=="curve_settings":\n                try:', '''            if key=="heater_mode":
+                _am.heater_request(value,expected)
+            elif key=="curve_settings":
+                try:''')
+        source=once(source,'    if msg.topic == topic + "/power/set":','''    if msg.topic == topic + "/ch/heater/mode/set":
+        if not msg.retain:
+            try:
+                _am.heater_request(payload_raw.strip().lower())
+            except ValueError:
+                logging.warning("Rejected Heater CO request")
+        return
+    if msg.topic == topic + "/power/set":''')
+        source=once(source,'    configure_switch("Service test: Heater (A04)",','''    configure_select("Heater CO request (preview)", mqtt_topic + "/ch/heater/mode/set",
+                     mqtt_topic + "/ch/heater/mode/state", "HaierPi_HeaterCORequest", ["off","on","auto"])
+    configure_sensor("Heater CO reason", mqtt_topic + "/ch/heater/reason/state", "HaierPi_HeaterCOReason")
+    configure_switch("Service test: Heater (A04)",''')
+    line=next(l for l in source.splitlines() if l.startswith("_WV_HTML = "))
+    html=ast.literal_eval(line.split("=",1)[1].strip())
+    if 'id="heater-request"' not in html:
+        html=once(html,'<p id="am-reason"', '<div class="metric"><span>Heater CO — żądanie (preview)</span><strong id="heater-request">—</strong></div><div class="ctlrow"><button id="heater-on" disabled>ON (15 min)</button><button id="heater-off" disabled>OFF</button><button id="heater-auto" disabled>AUTO</button></div><p id="heater-reason"></p><small>OFF anuluje nasze wspomaganie, nie wyłącza ochrony fabrycznej. AUTO: 60 min CO, niedobór &gt;3 K i wolny wzrost; próba maks. 10 min. Nie dotyczy osobnej grzałki zasobnika.</small><p id="am-reason"')
+        html=once(html,' const expected=key==="adaptive_control"?amState.control:amState.relay;', ' const expected=key==="heater_mode"?amState.heater.mode:key==="adaptive_control"?amState.control:amState.relay;')
+        html=once(html,' $("am-owner").textContent=', ''' const ht=v.heater;
+ $("heater-request").textContent=ht?ht.mode+" · A4A "+(ht.state===null?"—":ht.state?"ON":"OFF"):"—";
+ $("heater-reason").textContent=ht?ht.reason+(ht.uncertain?" · Niepotwierdzony stan":""):"";
+ for(const k of ["on","off","auto"])$("heater-"+k).disabled=!amState||amBusy||!ht||(k!=="off"&&ht.uncertain);
+ $("am-owner").textContent=''')
+        html=once(html,'$("am-save").addEventListener("click",', '''for(const k of ["on","off","auto"])$("heater-"+k).addEventListener("click",()=>{if(k==="off"||window.confirm("Włączyć wspomaganie CO "+k+"?"))amSend("heater_mode",k)});
+$("am-save").addEventListener("click",''')
+        source=once(source,line,"_WV_HTML = "+repr(html))
+    return source
+
 def experiment_api(source):
     old='choices=("legacy","manual","shadow","auto") if key=="adaptive_control"'
     new='choices=("legacy","manual","shadow","auto","experiment") if key=="adaptive_control"'
     source=source if new in source else once(source,old,new)
     old='if current==value:'
     new='if current==value and not (key=="adaptive_control" and value=="manual" and _am.view()["auto_resume_pending"]):'
-    return heater_counter_api(source if new in source else once(source,old,new))
+    return heater_control_api(source if new in source else once(source,old,new))
 
 def learning_block():
     policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")
