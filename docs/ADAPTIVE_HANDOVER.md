@@ -2,6 +2,15 @@
 
 Updated: 2026-11-26. Read this file before continuing work in a new conversation. Technical project notes only: no household history, secrets, addresses, credentials or raw device logs are included.
 
+## Current checkpoint — read before historical notes
+
+- Verified functional revision: `71bca7feef181acd54c2152436056a2a71558c06` ([CI](https://github.com/petec999/hpi/actions/runs/45867996308): all jobs passed). Installer and exact operational instructions: [branch README](../README.md).
+- Experiment has no calendar deadline. Three newly accepted cycles per combination, 18 minimum in total; restoration at the next eligible idle, then Manual. Counts are session-local and reset after restart; existing observations survive subject to save interval.
+- Legacy policy settings no longer block selecting Auto. Full curve editor is now available in v2. Earlier notes below are historical where these items differ.
+- Twi +5 K is an unverified **model assumption**, not a confirmed or user-validated native STOP threshold. Initial observations motivated further testing; keep automatic threshold inference disabled pending real evidence.
+- Runtime learning path: `/opt/haier/.adaptive-learning-twi-v2.json`. Passive observer: `/opt/haier/.adaptive-hysteresis-v1.json`.
+- Open acceptance: experiment on hardware, native STOP inference, data export/analysis, improved Auto verification. Do not treat successful CI as proof of hardware behavior.
+
 ## Goal
 
 Replace the existing CO anti-cycling preset/FLimit policy with an opt-in adaptive supervisor that actually controls the pump and learns online. Use all six Quiet/Eco/Turbo × FLimit OFF/ON combinations. Reduce cycling while tracking the existing water setpoint. Preserve native heat demand, heating curve, defrost, DHW/service priorities and factory protection. No forced compressor start/stop, no raw register control beyond existing core handlers. No SQLite; minimise storage writes.
@@ -59,7 +68,7 @@ Idle startup preparation (Auto only): with CH enabled, normal outdoor zone, no p
 
 Field verification 26 Nov: normal idle has pch=on, ch_heating=off, demand=1 and actual/requested Hz=0. Stable GetParametersNEW derives pch from R101 bits 0/2 with cooling bit clear. Idle eligibility now checks those raw enable bits plus pch, not the active heating indicator. Regression test matches observed state; running policy still requires ch_heating. No private log content stored.
 
-Current Twi-v2 policy supersedes earlier supply-centric assumptions: confirmed installation assumption STOP at Twi=target+5 K; display margin and trend. Reduction tracks return surplus and forecast, default 1.5 K surplus and 1 K warning margin; Two corroborates shortages only. All margins provisional, no forced stops or safety bypass. Old learning file retained untouched; new schema 2 stored separately at /opt/haier/.adaptive-learning-twi-v2.json; learns return trend and return error. No prior history validation of exact STOP threshold; user confirmed assumption, device validation pending.
+Current Twi-v2 policy supersedes earlier supply-centric assumptions: provisional model assumption STOP at Twi=target+5 K; display margin and trend. Reduction tracks return surplus and forecast, default 1.5 K surplus and 1 K warning margin; Two corroborates shortages only. All margins provisional, no forced stops or safety bypass. Old learning file retained untouched; new schema 2 stored separately at /opt/haier/.adaptive-learning-twi-v2.json; learns return trend and return error. No prior history validation of exact STOP threshold; not confirmed by device evidence; validation pending.
 
 Return forecast uses latest three-sample median as its starting value, full 150 s robust trend for projection. This avoids lag from using the entire-window median as the starting temperature. Added timing assertion on a rising-return trace and a current-return near-stop guard test.
 
