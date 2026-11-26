@@ -35,6 +35,8 @@ class Settings:
     up_confirm: float=120
     urgent_confirm: float=60
     down_confirm: float=90
+    early_down_confirm: float=60
+    early_surplus: float=1.2
     probe_after: float=900
     failed_retry: float=1800
     trial_window: float=900
@@ -205,7 +207,7 @@ class Regulator:
             # Urgent deficits may bypass the normal settling hold but still need confirmation.
             if not urgent and now-self.changed_at<c.settle_hold:
                 direction=None
-        elif settled and (excess or stable_probe):
+        elif (settled and (excess or stable_probe)) or (excess and forecast>=c.early_surplus and ts<-c.trend_band and tr<=c.trend_band and now-self.ready_since>=c.settle_hold and now-self.changed_at>=c.settle_hold):
             direction="down"
             risk="surplus" if excess else "efficiency_probe"
         if direction is None:
@@ -228,13 +230,12 @@ class Regulator:
         if key!=self.candidate:
             self.candidate=key
             self.candidate_since=now
-        required=c.urgent_confirm if direction=="up" and urgent else c.up_confirm if direction=="up" else c.down_confirm
+        required=c.urgent_confirm if direction=="up" and urgent else c.up_confirm if direction=="up" else c.early_down_confirm if excess and forecast>=c.early_surplus and ts<-c.trend_band else c.down_confirm
         if now-self.candidate_since<required:
             self.last_offer=None
             return decision(level,"confirming "+risk,risk)
         if direction=="up" and self.trial and self.trial[1]==level:
             self.blocked[(self.trial[0],level)]=now+c.failed_retry
-            self.trial=None
             reason="restore previous capacity; reduction failed"
         else:
             reason="increase available capacity" if direction=="up" else "reduce before overshoot" if excess else "probe lower capacity"
