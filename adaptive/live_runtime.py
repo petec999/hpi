@@ -39,21 +39,18 @@ class Runtime:
         self.heater_counter=HeaterCounter(Path(learning_path).with_name(".adaptive-heater-counter-v1.json") if learning_path else None)
         # An explicit request never survives a process restart. A durable
         # ownership marker does, so a possibly outstanding ON is visible.
-        self.heater_mode="off"
-        self.heater_reason="Wspomaganie CO wyłączone"
+        self.heater_mode="auto"
+        self.heater_reason="AUTO: sterowanie fabryczne"
         self.heater_marker=Path(learning_path).with_name(".adaptive-heater-owned-v1") if learning_path else None
         self.heater_owned=False
         self.heater_uncertain=False
         self.heater_issued=None
-        self.heater_on_until=0
         self.heater_last_write=-1e9
-        self.heater_run_since=None
-        self.heater_samples=[]
-        self.heater_last_stamp=None
         if self.heater_marker is not None:
             try:
                 self.heater_owned=self.heater_marker.exists() or self.heater_marker.is_symlink()
                 if self.heater_owned:
+                    self.heater_mode="off"
                     self.heater_uncertain=True
                     self.heater_reason="Odzyskiwanie po restarcie: oczekiwanie na odczyt A4A"
             except OSError:
@@ -520,13 +517,10 @@ class Runtime:
                 s,f=self.heater_snapshot()
                 if self.heater_blocker(s,f) or self.heater_uncertain:
                     raise ValueError("Heater: brak bezpiecznych warunków CO")
-                self.heater_on_until=time.monotonic()+900
-            elif mode=="auto" and self.heater_uncertain:
-                raise ValueError("Heater: niepotwierdzony poprzedni stan")
+                if f["R141"][1][3]&0x0100 and not self.heater_owned:
+                    raise ValueError("Heater już aktywny fabrycznie; brak przejęcia wyjścia")
             self.heater_mode=mode
             self.heater_reason="Żądanie "+mode+"; oczekiwanie na ocenę"
-            if mode=="off":
-                self.heater_on_until=0
             return self.heater_view()
 
     def heater_snapshot(self):
@@ -645,8 +639,8 @@ class Runtime:
                 if stamp>old_stamp and actual==wanted:
                     self.heater_issued=None
                     self.heater_uncertain=False
-                    if not wanted:
-                        self.heater_mark(False)
+                    if not wanted and not self.heater_mark(False):
+                        return
                     self.heater_reason="Potwierdzono A4A "+("ON" if wanted else "OFF")
                 elif now-issued<90:
                     return
@@ -663,62 +657,42 @@ class Runtime:
                 if self.heater_mode=="on":
                     self.heater_mode="off"
             if priority:
-                self.heater_mode="off"
-                self.heater_run_since=None
-                self.heater_samples=[]
-                self.heater_reason="Priorytet fabryczny/CWU — bez zapisu A04"
-                return
-            if blocker:
-                self.heater_run_since=None
-                self.heater_samples=[]
                 if self.heater_mode=="on":
                     self.heater_mode="off"
-            elif stamp!=self.heater_last_stamp:
-                if (self.heater_last_stamp is None or not 0<stamp-self.heater_last_stamp<=65
-                        or (self.heater_samples and self.heater_samples[-1][2]!=s.target)):
-                    self.heater_run_since=stamp
-                    self.heater_samples=[]
-                if self.heater_run_since is None:
-                    self.heater_run_since=stamp
-                self.heater_samples.append((stamp,s.supply_temp,s.target))
-                self.heater_samples=[x for x in self.heater_samples if stamp-x[0]<=600]
-            self.heater_last_stamp=stamp
-            if self.heater_mode=="on" and now>=self.heater_on_until:
+                self.heater_reason=("Priorytet fabryczny/CWU — bez zapisu A04"
+                                    +(" · własne ON wymaga potwierdzenia OFF" if self.heater_owned else ""))
+                return
+            if blocker and self.heater_mode=="on":
                 self.heater_mode="off"
-            # End any output requested by this controller if the request or
-            # conditions expire. Never disable a native/unowned output.
             if self.heater_owned:
-                stop=(self.heater_mode=="off" or blocker or self.heater_uncertain
-                      or (self.heater_mode=="auto" and (now>=self.heater_on_until or s.supply_temp>=s.target-1)))
-                if stop and actual and now-self.heater_last_write>=60:
+                # OFF and AUTO both release our manual ON. Do not write to
+                # unowned outputs; wait for fresh readback after every write.
+                stop=self.heater_mode!="on" or blocker or self.heater_uncertain
+                if stop and actual and now-self.heater_last_write>=30:
                     self.heater_write(False,now)
                 elif not stop:
-                    self.heater_reason="Wspomaganie CO aktywne (A4A)"
-                return
-            if self.heater_mode=="off" or blocker or self.heater_uncertain or actual:
-                self.heater_reason=blocker or ("Fabryczny Heater aktywny" if actual else "Brak żądania wspomagania")
+                    self.heater_reason="Ręczne wspomaganie CO aktywne (A4A)"
                 return
             if self.heater_mode=="auto":
-                if self.heater_run_since is None or stamp-self.heater_run_since<3600 or len(self.heater_samples)<5:
-                    self.heater_reason="AUTO: oczekiwanie na godzinę ciągłego CO"
-                    return
-                first,last=self.heater_samples[0],self.heater_samples[-1]
-                if last[0]-first[0]<300 or s.target-s.supply_temp<=3 or (last[1]-first[1])*60/(last[0]-first[0])>=.1:
-                    self.heater_reason="AUTO: brak utrzymującego się niedoboru"
-                    return
-                if now-self.heater_last_write<600:
-                    return
-                self.heater_on_until=now+600
-            elif now-self.heater_last_write<60:
+                self.heater_reason="AUTO: sterowanie fabryczne; bez zapisu A04"
                 return
-            self.heater_write(True,now)
+            if self.heater_mode=="off" or blocker or self.heater_uncertain:
+                self.heater_reason=blocker or "OFF: brak własnego wspomagania"
+                return
+            if actual:
+                # Factory output appeared after the manual request: never
+                # claim it or queue a later start.
+                self.heater_mode="auto"
+                self.heater_reason="Fabryczny Heater aktywny; bez przejęcia"
+                return
+            if now-self.heater_last_write>=60:
+                self.heater_write(True,now)
         except Exception:
-            self.heater_mode="off"
-            self.heater_run_since=None
-            self.heater_samples=[]
+            if self.heater_mode=="on" or self.heater_owned:
+                self.heater_mode="off"
             if self.heater_owned:
                 self.heater_uncertain=True
-            self.heater_reason="Brak poprawnego odczytu — żądanie anulowane"
+            self.heater_reason="Brak poprawnego odczytu — ręczne ON anulowane"
 
     def heater_mqtt(self):
         base=str(self.g.get("mqtt_topic","")).rstrip("/")
