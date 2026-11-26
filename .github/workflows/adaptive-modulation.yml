@@ -42,3 +42,10 @@ jobs:
                       if n.name not in {'GetParameters','ReadPump'} or any(k in l.lower() for k in ('r201','mode','settemp','setpoint','r141','r241','frame','compinfo','antifreeze','service_set','threeway','defrost','getparameters','log_status_snapshot')):
                           print(f'{i}: {l}')
           PY
+          grep -R -nE 'def (GetCHTemp|SetCHTemp|GetMode|GetTempCompensation)' /tmp/stable-audit/env/lib/python3.9/site-packages/PyHaier || true
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('/tmp/stable-audit/main.py').read_text().splitlines()
+          for a,b in [(2675,2788),(2575,2605)]:
+              for i in range(a,b): print(f'{i+1}: {s[i]}')
+          PY
