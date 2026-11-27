@@ -79,6 +79,73 @@ class StorageAudit(unittest.TestCase):
             self.assertEqual(list(Path(d).iterdir()),[path])
 
 
+class ExperimentGuardTests(unittest.TestCase):
+    def sample(self,t,**kw):
+        from adaptive.regulator import Sample
+        data=dict(now=t,target=35,return_temp=30,supply_temp=32,hz=25,
+                  requested_hz=25,mode="quiet",relay=True,heating=True,
+                  defrost=False,fresh=True)
+        data.update(kw)
+        return Sample(**data)
+
+    def test_long_run_with_comfort_is_not_a_failure(self):
+        from adaptive.regulator import ExperimentGuard
+        g=ExperimentGuard()
+        for t in range(0,7201,30):
+            self.assertIsNone(g.observe(self.sample(t),21,True))
+        self.assertEqual(g.water_seconds,7200)
+
+    def test_room_drop_and_recovery(self):
+        from adaptive.regulator import ExperimentGuard
+        g=ExperimentGuard()
+        self.assertIsNone(g.observe(self.sample(0),21,True))
+        for t in range(30,630,30):
+            self.assertIsNone(g.observe(self.sample(t),20.5,True))
+        self.assertEqual(g.observe(self.sample(630),20.5,True),"room_shortfall")
+        g.reset()
+        for t in range(660,1560,30):
+            self.assertIsNone(g.observe(self.sample(t,mode="turbo",relay=False,supply_temp=35),20.9,True,True))
+        self.assertEqual(g.observe(self.sample(1560,mode="turbo",relay=False,supply_temp=35),20.9,True,True),"recovered")
+
+    def test_water_only_when_room_unavailable(self):
+        from adaptive.regulator import ExperimentGuard
+        g=ExperimentGuard()
+        for t in range(0,1800,30):
+            self.assertIsNone(g.observe(self.sample(t),None,True))
+        self.assertEqual(g.observe(self.sample(1800),None,True),"water_shortfall")
+        # A fresh comfort reading cancels the water-only fallback.
+        self.assertIsNone(g.observe(self.sample(1830),21,True))
+        self.assertIsNone(g.observe(self.sample(1860,defrost=True),None,True))
+        self.assertEqual(g.water_seconds,0)
+        self.assertIsNone(g.observe(self.sample(2000),None,True))
+
+    def test_weather_retry_and_validation(self):
+        from adaptive.regulator import ExperimentGuard
+        g=ExperimentGuard()
+        self.assertFalse(g.can_retry({"outdoor":-2},-1))
+        self.assertTrue(g.can_retry({"outdoor":-2},0))
+        self.assertFalse(g.can_retry({"outdoor":None},0))
+        self.assertFalse(g.can_retry({"outdoor":-2},None))
+        with self.assertRaises(ValueError):
+            ExperimentGuard(dict(g.DEFAULT,water_minutes=0))
+
+    def test_guard_checkpoint_preserves_cycles_and_deferrals(self):
+        from adaptive.regulator import ExperimentGuard
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/".adaptive-experiment.json"
+            since=time.time()-1000
+            path.write_text(json.dumps({"schema":1,"session":{"since":since,"initial":["eco",False],"counts":[1,0,0,0,0,0]}}))
+            r=StorageAudit().runtime(path)
+            r.experiment_guard.reference=21
+            r.experiment_deferred[1]={"at":since+500,"outdoor":-2,"room":20.5,"target":35,"two":32,"reason":"room_shortfall"}
+            r.experiment_recovering=True
+            r.save_guard_checkpoint()
+            resumed=StorageAudit().runtime(path)
+            self.assertEqual(resumed.experiment_counts()[0],1)
+            self.assertEqual(resumed.experiment_deferred[1]["outdoor"],-2)
+            self.assertEqual(resumed.experiment_guard.reference,21)
+            self.assertTrue(resumed.experiment_recovering)
+
 class PassiveInsightTests(unittest.TestCase):
     def sample(self,now,hz=0,defrost=False,**kw):
         return SimpleNamespace(now=now,hz=hz,defrost=defrost,fresh=True,
