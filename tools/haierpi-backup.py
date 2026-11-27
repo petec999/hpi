@@ -27,7 +27,8 @@ MAX_MEMBERS=128
 REQUIRED={"opt/config.ini","opt/haier/main.py","opt/haier/HPi/GPIO.py"}
 FIXED=REQUIRED|{"opt/haier/charts.pkl","opt/haier/.hpi-web-secret-v1",
                 "opt/haier/haierpi-notify.py","opt/haier/schedule_ch.json",
-                "opt/haier/schedule_dhw.json"}
+                "opt/haier/schedule_dhw.json","opt/haier/.adaptive-owner-v1",
+                "opt/haier/.adaptive-heater-owned-v1"}
 def allowed(name):
     return name in FIXED or bool(re.fullmatch(r"opt/haier/\.adaptive-[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*\.json",name)) or bool(re.fullmatch(r"opt/haier/HPi/[A-Za-z0-9_]+\.py",name))
 def directory():
@@ -230,7 +231,7 @@ def setup():
     target=ROOT/"haierpi-backup.py"
     if Path(__file__).resolve()!=target:
         atomic(target,Path(__file__).read_bytes())
-    service="[Unit]\nDescription=HaierPi private daily backup\n[Service]\nType=oneshot\nExecStart=/opt/haier/env/bin/python /opt/haier/haierpi-backup.py --create\nTimeoutStartSec=120\nUMask=0077\n"
+    service="[Unit]\nDescription=HaierPi private daily backup\n[Service]\nType=oneshot\nExecStart=/opt/haier/env/bin/python /opt/haier/haierpi-backup.py --create\nTimeoutStartSec=120\nNice=10\nIOSchedulingClass=idle\nUMask=0077\n"
     timer="[Unit]\nDescription=Daily HaierPi backup\n[Timer]\nOnCalendar=*-*-* 03:15:00\nPersistent=true\n[Install]\nWantedBy=timers.target\n"
     for suffix,data in (("service",service),("timer",timer)):
         atomic(Path("/etc/systemd/system/haierpi-backup."+suffix),data.encode("ascii"),0o644)
