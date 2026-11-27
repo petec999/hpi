@@ -375,6 +375,29 @@ def status_ui(html):
  $("am-test-count").textContent=total?done+" / "+total+" ukończonych cykli":"Brak danych";
  $("am-test-status").textContent=!amState?"Brak odczytu":v.control==="experiment"?(v.activation_blocker?"Test wybrany – "+v.activation_blocker:"Test aktywny – automatyczna zmiana konfiguracji przy postoju"):v.control==="auto"?"Auto – regulacja adaptacyjna, nie test":ex&&ex.resume_available?"Test nieaktywny – można wznowić":"Test nieaktywny";''')
         html=html.replace('auto:"Adaptive Auto",experiment:"Eksperyment"', 'auto:"Regulacja adaptacyjna",experiment:"Test aktywny"')
+    if 'id="am-recent-decisions"' not in html:
+        html=once(html,'<p id="am-experiment"></p>','<p id="am-experiment"></p><details id="am-recent-decisions"><summary>Ostatnie decyzje i potwierdzenia</summary><button id="am-decisions-refresh">Odśwież decyzje</button><p id="am-decisions-status" role="status"></p><ol id="am-decisions-list"></ol><small>Ostatnie 10 zdarzeń z istniejącego raportu. Odczyt na żądanie, bez dodatkowych zapisów.</small></details>')
+        html=once(html,'function amPaint(a){', '''async function amRefreshDecisions(){
+ const b=$("am-decisions-refresh"),status=$("am-decisions-status"),list=$("am-decisions-list");
+ if(b.disabled)return;
+ b.disabled=true;list.replaceChildren();status.textContent="Odczyt…";
+ const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),10000);
+ try{
+  const r=await fetch("/v2/api/adaptive-report",{cache:"no-store",credentials:"same-origin",signal:ctrl.signal});
+  if(!r.ok||r.redirected)throw Error("Brak dostępu do raportu");
+  const d=await r.json(),events=Array.isArray(d.events)?d.events.slice(-10).reverse():[];
+  for(const e of events){
+   const li=document.createElement("li");
+   li.textContent=new Date(e.at*1000).toLocaleString()+" · "+e.kind+" · "+e.owner+" · "+e.detail;
+   list.append(li);
+  }
+  status.textContent=events.length?"Odczyt: "+new Date().toLocaleTimeString():"Brak zdarzeń";
+ }catch(e){status.textContent="Nie udało się odczytać decyzji: "+e.message;}
+ finally{clearTimeout(timer);b.disabled=false;}
+}
+$("am-decisions-refresh").addEventListener("click",amRefreshDecisions);
+$("am-recent-decisions").addEventListener("toggle",()=>{if($("am-recent-decisions").open)amRefreshDecisions();});
+function amPaint(a){''')
     html=html.replace("Legacy pozostaje domyślne po restarcie.","Zapisany Auto wraca po restarcie po weryfikacji danych.")
     return html
 
