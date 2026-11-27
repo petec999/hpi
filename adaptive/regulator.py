@@ -1620,16 +1620,16 @@ class PassiveInsights:
                 self.recovery=None
             elif old=="defrost" and state!="defrost":
                 if self.defrost_start is not None and state in ("run","idle"):
-                    self.recovery=(now,now-self.defrost_start)
+                    row=[now,now-self.defrost_start,None]
+                    self.defrosts.append(row)
+                    self.recovery=row
                 self.defrost_start=None
             if self.recovery is not None:
-                ended,duration=self.recovery
+                ended=self.recovery[0]
                 if state=="run" and now-ended<=1800:
-                    self.defrosts.append((now,duration,now-ended))
+                    self.recovery[2]=now-ended
                     self.recovery=None
                 elif state not in ("run","idle") or now-ended>1800:
-                    # Complete defrost but recovery not observed; don't invent a duration.
-                    self.defrosts.append((now,duration,None))
                     self.recovery=None
         self.last=(now,state)
         good=(state in ("run","idle") and type(indoor) in (float,int) and
