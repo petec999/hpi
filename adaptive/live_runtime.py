@@ -43,6 +43,7 @@ class Runtime:
         self.heater_marker=Path(learning_path).with_name(".adaptive-heater-owned-v1") if learning_path else None
         self.observer_frames=None
         self.experiment_counts_saved=[0]*len(self.EXPERIMENT_LEVELS)
+        self.experiment_metrics=[[] for _ in self.EXPERIMENT_LEVELS]
         self.experiment_watermark=0
         self.experiment_since=None
         self.experiment_idle=None
@@ -84,11 +85,15 @@ class Runtime:
                     or any(type(n) is not int or not 0<=n<=self.EXPERIMENT_CYCLES for n in counts)
                     or type(watermark) not in (int,float) or not math.isfinite(watermark) or watermark<0):
                 raise ValueError("invalid experiment progress")
+            metrics=session.get("metrics",[[] for _ in self.EXPERIMENT_LEVELS])
+            if not isinstance(metrics,list) or len(metrics)!=len(self.EXPERIMENT_LEVELS) or any(not isinstance(g,list) or len(g)>self.EXPERIMENT_CYCLES or any(not isinstance(x,list) or len(x)!=5 or any(v is not None and (type(v) not in (int,float) or not math.isfinite(v)) for v in x) or x[0] is None for x in g) for g in metrics):
+                raise ValueError("invalid experiment metrics")
+            self.experiment_metrics=metrics
             self.experiment_counts_saved=counts
             self.experiment_watermark=watermark
             self.experiment_since=since
             self.experiment_initial=tuple(initial)
-            self.experiment_saved=True
+            self.experiment_saved=not session.get("finished",False)
         except FileNotFoundError:
             pass
         except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError):
@@ -395,6 +400,7 @@ class Runtime:
                 # Persist before allowing any experiment writes.
                 self.persist_experiment({"since":since,"initial":list(initial)})
                 self.experiment_counts_saved=[0]*len(self.EXPERIMENT_LEVELS)
+                self.experiment_metrics=[[] for _ in self.EXPERIMENT_LEVELS]
                 self.experiment_watermark=0
                 self.experiment_since=since
                 self.experiment_initial=initial
@@ -698,24 +704,35 @@ class Runtime:
                         watermark=max(watermark,at)
         return counts,watermark
 
+    def experiment_samples(self):
+        samples=[list(group) for group in self.experiment_metrics]
+        for r in self.observer.rows:
+            if self.experiment_since is None or r["context"][0]!="experiment" or r["start"]["at"]<self.experiment_since:
+                continue
+            pair=tuple(r["context"][1:3])
+            if pair not in self.EXPERIMENT_LEVELS:
+                continue
+            group=samples[self.EXPERIMENT_LEVELS.index(pair)]
+            at=r["start"]["at"]
+            if len(group)>=self.EXPERIMENT_CYCLES or any(x[0]==at for x in group):
+                continue
+            stop=r["stop"]
+            group.append([at,r.get("run_seconds"),stop.get("fact",[None])[0],
+                          stop["two"][0]-stop["twi"][0],stop.get("outdoor")])
+        return samples
+
     def experiment_comparison(self):
-        # Read-only comparison of retained, accepted cycles in the current session.
-        # Persistent counts may exceed retained samples after history eviction.
         from statistics import median
         counts=self.experiment_counts()
         result=[]
-        for i,pair in enumerate(self.EXPERIMENT_LEVELS):
-            rows=[r for r in self.observer.rows if self.experiment_since is not None
-                  and r["context"][0]=="experiment" and tuple(r["context"][1:3])==pair
-                  and r["start"]["at"]>=self.experiment_since]
-            def med(values):
-                values=list(values)
+        for i,(pair,rows) in enumerate(zip(self.EXPERIMENT_LEVELS,self.experiment_samples())):
+            def med(index):
+                values=[r[index] for r in rows if r[index] is not None]
                 return median(values) if values else None
             result.append({"mode":pair[0],"flimit":pair[1],"completed":counts[i],
-                "retained":len(rows),
-                "run_seconds":med(r["run_seconds"] for r in rows if "run_seconds" in r),
-                "stop_fact":med(r["stop"]["fact"][0] for r in rows if "fact" in r["stop"]),
-                "stop_delta":med(r["stop"]["two"][0]-r["stop"]["twi"][0] for r in rows)})
+                "retained":len(rows),"run_seconds":med(1),"stop_fact":med(2),
+                "stop_delta":med(3),"outdoor":med(4),
+                "quality":"complete" if len(rows)>=self.EXPERIMENT_CYCLES else "partial"})
         return {"since":self.experiment_since,"per_level":self.EXPERIMENT_CYCLES,"rows":result}
 
     def experiment_counts(self):
@@ -725,10 +742,12 @@ class Runtime:
         if not self.experiment_saved or self.experiment_since is None:
             return
         counts,watermark=self.experiment_progress()
-        if watermark==self.experiment_watermark:
+        metrics=self.experiment_samples()
+        if watermark==self.experiment_watermark and metrics==self.experiment_metrics:
             return
         self.persist_experiment({"since":self.experiment_since,"initial":list(self.experiment_initial),
-                                 "counts":counts,"watermark":watermark})
+                                 "counts":counts,"watermark":watermark,"metrics":metrics})
+        self.experiment_metrics=metrics
         self.experiment_counts_saved=counts
         self.experiment_watermark=watermark
 
@@ -767,7 +786,10 @@ class Runtime:
             if done:
                 self.control="manual"
                 try:
-                    self.persist_experiment(None)
+                    self.persist_experiment({"since":self.experiment_since,"initial":list(self.experiment_initial),
+                        "counts":self.experiment_counts(),"watermark":self.experiment_watermark,
+                        "metrics":self.experiment_samples(),"finished":True})
+                    self.experiment_saved=False
                     self.status["reason_pl"]="Eksperyment zakończony – przywrócono konfigurację początkową"
                 except SelectionBlocked:
                     self.status["reason_pl"]="Eksperyment zakończony – konfiguracja przywrócona, błąd zapisu stanu"
