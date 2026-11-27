@@ -1682,3 +1682,96 @@ class PassiveInsights:
                     "recovery_samples":len(recovery),
                     "recovery_median_seconds":median(recovery) if recovery else None},
                 "scope":"RAM only; resets on process restart"}
+
+
+class ExperimentGuard:
+    """Pure comfort guard for the active experiment. No actuator I/O."""
+    DEFAULT={"water_gap":2.0,"water_minutes":30,"room_drop":0.5,
+             "room_minutes":10,"minimum_room":19.0,"retry_warmer":2.0,
+             "recovery_minutes":15}
+
+    @classmethod
+    def validate(cls,value):
+        bounds={"water_gap":(1,5),"water_minutes":(15,90),"room_drop":(.3,1.5),
+                "room_minutes":(5,30),"minimum_room":(10,25),
+                "retry_warmer":(1,5),"recovery_minutes":(10,60)}
+        if not isinstance(value,dict) or set(value)!=set(bounds):
+            raise ValueError("Invalid experiment guard settings")
+        result={}
+        for key,(lo,hi) in bounds.items():
+            n=value[key]
+            if type(n) not in (float,int) or not math.isfinite(n) or not lo<=n<=hi:
+                raise ValueError("Invalid experiment guard setting: "+key)
+            result[key]=float(n)
+        return result
+
+    def __init__(self,settings=None):
+        self.cfg=self.validate(settings if settings is not None else self.DEFAULT)
+        self.reference=None
+        self.reset()
+
+    def reset(self):
+        self.previous=None
+        self.water_since=None
+        self.room_since=None
+        self.recovery_since=None
+        self.water_seconds=0
+        self.room_seconds=0
+        self.recovery_seconds=0
+
+    @staticmethod
+    def valid_room(room):
+        return type(room) in (float,int) and math.isfinite(room) and 5<=room<=40
+
+    def observe(self,s,room,eligible,recovering=False):
+        now=s.now
+        room=room if self.valid_room(room) else None
+        if not eligible or not s.fresh or s.error or s.override or s.defrost or s.dhw:
+            self.reset()
+            return None
+        if self.reference is None and room is not None:
+            self.reference=room
+        previous=self.previous
+        if previous is None or not 0<now-previous[0]<=65 or previous[1:3]!=(s.mode,s.relay) or abs(previous[3]-s.target)>.5 or previous[4]!=recovering:
+            self.reset()
+        self.previous=(now,s.mode,s.relay,s.target,recovering)
+        low_room=room is not None and (room<self.cfg["minimum_room"] or
+                    self.reference is not None and self.reference-room>=self.cfg["room_drop"]-1e-6)
+        water_low=s.heating and s.hz>0 and s.requested_hz>0 and s.target-s.supply_temp>=self.cfg["water_gap"]
+        running=s.heating and s.hz>0 and s.requested_hz>0
+        idle=s.hz==0 and s.requested_hz==0
+        if recovering:
+            # At full-capacity preset, wait until measured comfort is back.
+            # Native idle may satisfy the water condition; never force STOP.
+            room_ok=room is not None and room>=self.cfg["minimum_room"] and (self.reference is None or room>=self.reference-.2-1e-6)
+            if self.reference is None and room is None:
+                room_ok=True  # water-only installations
+            water_ok=idle or (running and s.supply_temp>=s.target-1)
+            good=(s.mode,s.relay)==("turbo",False) and room_ok and water_ok
+            self.recovery_since=(self.recovery_since if self.recovery_since is not None else now) if good else None
+            self.recovery_seconds=now-self.recovery_since if self.recovery_since is not None else 0
+            return "recovered" if self.recovery_seconds>=60*self.cfg["recovery_minutes"] else None
+        # A low room is meaningful even if a native idle occurs. The controller
+        # still cannot change demand or force a compressor start.
+        self.water_since=(self.water_since if self.water_since is not None else now) if water_low else None
+        self.room_since=(self.room_since if self.room_since is not None else now) if low_room else None
+        self.water_seconds=now-self.water_since if self.water_since is not None else 0
+        self.room_seconds=now-self.room_since if self.room_since is not None else 0
+        if self.room_seconds>=60*self.cfg["room_minutes"]:
+            return "room_shortfall"
+        if self.water_seconds>=60*self.cfg["water_minutes"]:
+            return "water_shortfall"
+        return None
+
+    def can_retry(self,record,outdoor):
+        if record is None:
+            return True
+        old=record.get("outdoor")
+        return (type(old) in (int,float) and type(outdoor) in (int,float)
+                and math.isfinite(old) and math.isfinite(outdoor)
+                and outdoor>=old+self.cfg["retry_warmer"])
+
+    def view(self):
+        return {"settings":dict(self.cfg),"reference":self.reference,
+                "water_seconds":self.water_seconds,"room_seconds":self.room_seconds,
+                "recovery_seconds":self.recovery_seconds}
