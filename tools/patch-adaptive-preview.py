@@ -361,6 +361,12 @@ def status_ui(html):
  $("am-storage-files").textContent=Object.entries(sd.state_files||{}).map(([k,n])=>k+": "+mib(n)).join(" · ");
  if(sd.serial && Object.keys(sd.serial).length){const x=sd.serial;$("am-storage-files").textContent+=" · RS485: "+x.valid+" poprawnych / "+x.crc_errors+" CRC / "+x.short_frames+" niepełnych / "+x.reconnects+" ponownych otwarć / "+x.write_timeouts+" timeoutów zapisu";}
  const ex=v.experiment;''')
+    # Upgrade installed dashboards too, not only new installations.
+    if "sd.write_bytes_per_day" not in html:
+        html=once(html,'+" · zapisy procesu: "+mib(sd.write_bytes_bytes);','+" · zapisy procesu: "+mib(sd.write_bytes_bytes)+" · średnio: "+mib(sd.write_bytes_per_day)+"/dobę · wątki: "+(sd.threads??"—")+" · FD: "+(sd.open_fds??"—");')
+    if "sd.serial &&" not in html:
+        html=once(html,' $("am-storage-files").textContent=Object.entries(sd.state_files||{}).map(([k,n])=>k+": "+mib(n)).join(" · ");', ''' $("am-storage-files").textContent=Object.entries(sd.state_files||{}).map(([k,n])=>k+": "+mib(n)).join(" · ");
+ if(sd.serial && Object.keys(sd.serial).length){const x=sd.serial;$("am-storage-files").textContent+=" · RS485: "+x.valid+" poprawnych / "+x.crc_errors+" CRC / "+x.short_frames+" niepełnych / "+x.reconnects+" ponownych otwarć / "+x.write_timeouts+" timeoutów zapisu";}''')
     # Presentation only: keep control values and runtime policy unchanged.
     if 'id="am-test-progress"' not in html:
         html=html.replace('Auto – eksperymentalne</option>', 'Auto – regulacja adaptacyjna</option>')
@@ -440,6 +446,11 @@ el("experiment-comparison-status").textContent=ec&&ec.since?"Sesja od "+dt(ec.si
 const ecNum=(x,k=1)=>x==null?"—":num(x*k,2);
 table("experiment-comparison",["Tryb","FLimit","Postęp","Zachowane cykle","Praca min","Fact STOP Hz","Delta T STOP K"],ec?ec.rows.map(x=>[x.mode,x.flimit?"ON":"OFF",x.completed+"/"+ec.per_level,x.retained,ecNum(x.run_seconds,1/60),ecNum(x.stop_fact),ecNum(x.stop_delta)]):[]);
 const run=el("run-kpis");''')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if "ec.assessment" not in html:
+        html=once(html,'ec&&ec.since?"Sesja od "+dt(ec.since):"Brak sesji"','ec&&ec.since?"Sesja od "+dt(ec.since)+(ec.assessment?" · "+ec.assessment:"")+(ec.outdoor_spread!=null?" · rozpiętość temperatur "+num(ec.outdoor_spread,1)+" K":""):"Brak sesji"')
+        html=once(html,'["Tryb","FLimit","Postęp","Zachowane cykle","Praca min","Fact STOP Hz","Delta T STOP K"],ec?ec.rows.map(x=>[x.mode,x.flimit?"ON":"OFF",x.completed+"/"+ec.per_level,x.retained,ecNum(x.run_seconds,1/60),ecNum(x.stop_fact),ecNum(x.stop_delta)]):[]','["Tryb","FLimit","Postęp","Zachowane cykle","Praca min","Fact STOP Hz","Delta T STOP K","Na zewnątrz °C","Cykle <10 min"],ec?ec.rows.map(x=>[x.mode,x.flimit?"ON":"OFF",x.completed+"/"+ec.per_level,x.retained,ecNum(x.run_seconds,1/60),ecNum(x.stop_fact),ecNum(x.stop_delta),ecNum(x.outdoor),x.duration_samples?x.short_cycles+"/"+x.duration_samples:"—"]):[]')
         line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
     if 'id="passive-diagnostics"' not in html:
