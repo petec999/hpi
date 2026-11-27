@@ -71,5 +71,16 @@ class ThresholdTest(unittest.TestCase):
         self.assertIsNone(m.model(sample(181,twi=30.4,two=30.4,mode="eco"))["start_eta_min"])
         self.assertIsNone(m.model(sample(250,twi=30.4,two=30.4))["start_eta_min"])
 
+    def test_running_forecast_requires_stable_fresh_context(self):
+        m=NativeThresholds()
+        for t in range(0,181,30):
+            s=sample(t,True,twi=33,two=35+t/300)
+            m.observe(s,True,100000+t,"auto")
+        self.assertAlmostEqual(m.model(s)["stop_eta_min"],7.0)
+        self.assertIsNone(m.model(sample(181,True,twi=33,two=35.6,mode="eco"))["stop_eta_min"])
+        self.assertIsNone(m.model(sample(250,True,twi=33,two=35.6))["stop_eta_min"])
+        m.observe(sample(210,True,twi=33,two=35.6),False,100210,"auto")
+        self.assertIsNone(m.model(sample(210,True,twi=33,two=35.6))["stop_eta_min"])
+
 if __name__=="__main__":
     unittest.main()

@@ -335,6 +335,15 @@ def status_ui(html):
         html=once(html,' $("am-stop-margin").textContent=fmt(v.stop_margin)+" K";',' $("am-stop-margin").textContent=tm&&v.supply_temp!=null?fmt(tm.stop_target-v.supply_temp)+" K":"—";')
     if 'href="/v2/adaptive-report"' not in html:
         html=once(html,'<h3>AntiON-OFF v2</h3>','<h3>AntiON-OFF v2</h3><p><a href="/v2/adaptive-report">Raport Adaptive →</a></p>')
+    if 'value="experiment_new"' not in html:
+        html=once(html,'<option value="experiment">Eksperyment – test konfiguracji</option>','<option value="experiment">Eksperyment – rozpocznij / wznów</option><option value="experiment_new">Eksperyment – od nowa</option>')
+        html=once(html,'<p id="am-experiment"></p>','<p id="am-experiment"></p><p id="am-experiment-checkpoint"></p><small>Po restarcie wybierz Eksperyment, aby wznowić zapisane cykle; nie wznawia się sam. Opcja od nowa zeruje postęp nowej sesji, ale zachowuje archiwum pomiarów. Po zakończeniu przywracana jest konfiguracja z początku sesji.</small>')
+        html=once(html,' const ex=v.experiment;', ''' const ex=v.experiment;
+ $("am-experiment-checkpoint").textContent=ex?(ex.storage_error|| (ex.resume_available?"Zapisana sesja gotowa do ręcznego wznowienia":v.control==="experiment"?"Sesja w toku":""))+(ex.initial?" · początkowo: "+ex.initial[0]+(ex.initial[1]?" + FLimit":" / OFF"):""):"";''')
+    if 'id="am-stop-eta"' not in html:
+        html=once(html,'<div class="metric"><span>Do progu STOP Two</span>','<div class="metric"><span>Prognoza STOP Two</span><strong id="am-stop-eta">—</strong></div><div class="metric"><span>Do progu STOP Two</span>')
+        html=once(html,' $("am-start-eta").textContent=', ''' $("am-stop-eta").textContent=tm&&tm.stop_eta_min!=null?fmt(tm.stop_eta_min)+" min (model)":"—";
+ $("am-start-eta").textContent=''')
     if 'id="am-observer-diagnostics"' not in html:
         html=once(html,'<p id="am-hysteresis-time"></p>','<p id="am-hysteresis-time"></p><p id="am-observer-diagnostics"></p><p id="am-observer-rejections"></p><small>Odrzucone próby od uruchomienia usługi, nie wszystkie cykle pompy. Odczyt diagnostyczny, bez zmiany warunków akceptacji.</small>')
         html=once(html,' const hs=(x)=>', ''' const diag=h&&h.diagnostics;
@@ -508,7 +517,9 @@ def heater_status_api(source):
 def experiment_api(source):
     old='choices=("legacy","manual","shadow","auto") if key=="adaptive_control"'
     new='choices=("legacy","manual","shadow","auto","experiment") if key=="adaptive_control"'
-    source=source if new in source else once(source,old,new)
+    latest='choices=("legacy","manual","shadow","auto","experiment","experiment_new") if key=="adaptive_control"'
+    if latest not in source:
+        source=once(source,new if new in source else old,latest)
     old='if current==value:'
     new='if current==value and not (key=="adaptive_control" and value=="manual" and _am.view()["auto_resume_pending"]):'
     return heater_status_api(source if new in source else once(source,old,new))

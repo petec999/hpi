@@ -2,6 +2,7 @@
 import threading
 import time
 import math
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -44,6 +45,10 @@ class Runtime:
         self.experiment_since=None
         self.experiment_idle=None
         self.experiment_initial=None
+        self.experiment_path=Path(learning_path).with_name(".adaptive-experiment-v1.json") if learning_path else None
+        self.experiment_saved=False
+        self.experiment_error=None
+        self.load_experiment()
         self.last_tick=0
         self.pending=None
         self.status={"reason":"Waiting for valid boot telemetry" if self.resume_requested else "Legacy/Manual; no adaptive writes","risk":"paused"}
@@ -52,6 +57,62 @@ class Runtime:
         self.ready_log_frames=None
         self.ready_log_count=0
         self.idle_frame=None
+
+    def load_experiment(self):
+        # Checkpoint is not an actuator owner. Boot always follows load_owner.
+        if self.experiment_path is None:
+            return
+        try:
+            if self.experiment_path.is_symlink() or self.experiment_path.stat().st_size>4096:
+                raise ValueError("invalid experiment checkpoint")
+            data=json.loads(self.experiment_path.read_text(encoding="utf-8"))
+            if not isinstance(data,dict) or data.get("schema")!=1 or "session" not in data:
+                raise ValueError("invalid experiment schema")
+            session=data["session"]
+            if session is None:
+                return
+            since,initial=session["since"],session["initial"]
+            if (type(since) not in (int,float) or not math.isfinite(since) or not 0<since<=time.time()+60
+                    or not isinstance(initial,list) or len(initial)!=2 or initial[0] not in ("eco","quiet","turbo")
+                    or type(initial[1]) is not bool):
+                raise ValueError("invalid experiment session")
+            self.experiment_since=since
+            self.experiment_initial=tuple(initial)
+            self.experiment_saved=True
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError):
+            self.experiment_error="Nie można odczytać zapisu eksperymentu"
+
+    def persist_experiment(self,session):
+        temp=None
+        try:
+            if self.experiment_path is not None:
+                if self.experiment_path.is_symlink():
+                    raise ValueError("invalid experiment path")
+                fd,temp=tempfile.mkstemp(prefix=".experiment-",dir=self.experiment_path.parent)
+                with os.fdopen(fd,"w",encoding="utf-8") as stream:
+                    json.dump({"schema":1,"session":session},stream,allow_nan=False)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temp,self.experiment_path)
+                temp=None
+                fd=os.open(str(self.experiment_path.parent),os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            self.experiment_saved=session is not None
+            self.experiment_error=None
+        except (OSError,ValueError,TypeError):
+            self.experiment_error="Nie można zapisać stanu eksperymentu"
+            raise SelectionBlocked(self.experiment_error) from None
+        finally:
+            if temp is not None:
+                try:
+                    os.unlink(temp)
+                except OSError:
+                    pass
 
     def load_owner(self):
         if self.resume_path is None:
@@ -286,6 +347,9 @@ class Runtime:
 
     def choose(self,mode,expected):
         with self.lock:
+            restart_experiment=mode=="experiment_new"
+            if restart_experiment:
+                mode="experiment"
             if mode not in ("legacy","manual","shadow","auto","experiment") or expected!=self.control:
                 raise SelectionBlocked("Stan sterowania zmienił się; odśwież panel")
             if self.pending is not None:
@@ -315,15 +379,19 @@ class Runtime:
                 self.learning_before=None
                 self.reg.reset()
             self.persist_owner(mode)
+            if mode=="experiment" and (restart_experiment or not self.experiment_saved):
+                since=time.time()
+                initial=(s.mode,s.relay)
+                # Persist before allowing any experiment writes.
+                self.persist_experiment({"since":since,"initial":list(initial)})
+                self.experiment_since=since
+                self.experiment_initial=initial
             self.control=mode
             self.report_event("owner","selected "+mode)
             self.report.interrupt()
             self.thresholds.interrupt()
             self.observer.interrupt("context_changed",time.time())
             self.experiment_idle=None
-            if mode=="experiment":
-                self.experiment_since=time.time()
-                self.experiment_initial=(s.mode,s.relay)
             self.learning.cancel()
             self.learning_before=None
             self.fault=None
@@ -643,7 +711,12 @@ class Runtime:
         if actual==goal:
             if done:
                 self.control="manual"
-                self.status["reason_pl"]="Eksperyment zakończony – przywrócono konfigurację początkową"
+                try:
+                    self.persist_experiment(None)
+                    self.status["reason_pl"]="Eksperyment zakończony – przywrócono konfigurację początkową"
+                except SelectionBlocked:
+                    self.status["reason_pl"]="Eksperyment zakończony – konfiguracja przywrócona, błąd zapisu stanu"
+                    self.fault=self.experiment_error
             else:
                 self.status["reason_pl"]="Eksperyment – konfiguracja gotowa, oczekiwanie na naturalny START"
             return
@@ -912,6 +985,8 @@ class Runtime:
                 relay="1" if s.relay else "0"
                 blocker=self.activation_reason(s,zone,curve)
                 model=self.thresholds.model(s)
+                if blocker is not None or self.pending is not None or not self.flag(self.raw("pch")) or not self.gpio("heatdemandpin"):
+                    model["start_eta_min"]=model["stop_eta_min"]=None
             except Exception:
                 actual=relay=zone=curve=model=None
                 blocker="Brak pełnego, świeżego odczytu pompy lub GPIO"
@@ -922,4 +997,6 @@ class Runtime:
                         auto_resume_pending=self.resume_requested,owner_storage_error=self.resume_error,threshold_model=model,
                         heater=self.heater_view(),curve_settings=self.curve_settings(),learning=self.learning.summary(),hysteresis=self.observer.summary(),
                         experiment={"counts":self.experiment_counts(),"levels":[m+("+FLimit" if l else " / OFF") for m,l in self.EXPERIMENT_LEVELS],
-                                    "per_level":self.EXPERIMENT_CYCLES,"since":self.experiment_since})
+                                    "per_level":self.EXPERIMENT_CYCLES,"since":self.experiment_since,
+                                    "resume_available":self.experiment_saved and self.control!="experiment",
+                                    "initial":self.experiment_initial,"storage_error":self.experiment_error})

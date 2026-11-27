@@ -945,6 +945,7 @@ class NativeThresholds:
         self.phase_since=None
         self.pending=None
         self.idle=deque()
+        self.running=deque()
         self.dirty=False
         self.last_save=None
         self.saved_at=None
@@ -990,6 +991,7 @@ class NativeThresholds:
         self.phase_since=None
         self.pending=None
         self.idle.clear()
+        self.running.clear()
 
     def observe(self,s,eligible,wall,owner):
         vals=(s.now,s.target,s.return_temp,s.supply_temp,s.hz,s.requested_hz,wall)
@@ -1042,6 +1044,12 @@ class NativeThresholds:
                 self.idle.popleft()
         else:
             self.idle.clear()
+        if active and s.hz>0:
+            self.running.append((s.now,s.supply_temp-s.target))
+            while self.running and s.now-self.running[0][0]>180:
+                self.running.popleft()
+        else:
+            self.running.clear()
 
     @classmethod
     def estimate(cls,edge,rows):
@@ -1072,8 +1080,17 @@ class NativeThresholds:
                 eta=0
             elif rate<-.03:
                 eta=round(min(180,margin/-rate),1) if margin/-rate<=180 else None
+        stop_margin=s.target+stop["offset"]-s.supply_temp if s.hz>0 and s.requested_hz>0 else None
+        stop_eta=None
+        if stop_margin is not None and self.context is not None and self.context[1:]==(s.mode,s.relay,s.target) and len(self.running)>=4 and 0<=s.now-self.running[-1][0]<=65 and self.running[-1][0]-self.running[0][0]>=90:
+            rate=trend(list(self.running),1)
+            if stop_margin<=0:
+                stop_eta=0
+            elif rate>.03 and stop_margin/rate<=180:
+                stop_eta=round(stop_margin/rate,1)
         return {"start":start,"stop":stop,"start_target":s.target+start["offset"],"stop_target":s.target+stop["offset"],
                 "start_margin":round(margin,2) if margin is not None else None,"start_eta_min":eta,
+                "stop_margin":round(stop_margin,2) if stop_margin is not None else None,"stop_eta_min":stop_eta,
                 "storage_error":self.error,"unsaved":self.dirty}
 
     def summary(self):

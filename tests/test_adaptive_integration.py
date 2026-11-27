@@ -268,6 +268,38 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(self.r.status["proposed"],"eco / FLimit OFF")
         self.assertFalse(self.writes)
 
+    def test_experiment_checkpoint_manual_resume_and_new_session(self):
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/"learning.json"
+            self.r=Runtime(self.g,path)
+            self.refresh()
+            with patch("adaptive.live_runtime.time.time",return_value=1700000000):
+                self.r.choose("experiment","legacy")
+            since=self.r.experiment_since
+            original=self.r.experiment_initial
+            self.r.observer.rows.append({"context":["experiment","eco",False,32],
+                "start":{"at":since+1,"twi":[-2,-2],"two":[-2,-2]},
+                "stop":{"at":since+900,"twi":[1,1],"two":[5,5]}})
+            self.r.observer.dirty=True
+            self.r.observer.save_if_due(1000)
+            self.r=Runtime(self.g,path)
+            self.assertEqual(self.r.control,"manual")
+            self.assertFalse(self.r.resume_requested)
+            self.assertTrue(self.r.view()["experiment"]["resume_available"])
+            self.assertEqual(self.r.experiment_counts()[0],1)
+            self.refresh()
+            self.r.tick()
+            self.assertFalse(self.writes)
+            self.r.choose("experiment","manual")
+            self.assertEqual(self.r.experiment_since,since)
+            self.assertEqual(self.r.experiment_initial,original)
+            self.assertEqual(self.r.experiment_counts()[0],1)
+            with patch("adaptive.live_runtime.time.time",return_value=1700002000):
+                self.r.choose("experiment_new","experiment")
+            self.assertEqual(self.r.experiment_counts(),[0]*6)
+            self.assertEqual(len(self.r.observer.rows),1)
+            self.assertFalse(self.writes)
+
     def test_experiment_priority_cancels(self):
         self.r.choose("experiment","legacy")
         self.r.priority_write("preset","quiet")

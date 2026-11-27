@@ -27,12 +27,12 @@ Repeat with `--apply` after a successful dry-run and when a brief service restar
 
 Auto does not command compressor frequency, demand or water setpoint. It preserves native and priority protections. Saved Auto waits for two distinct fresh sets of frames and eligible normal CO before resuming after restart. Manual/Legacy selection cancels resume. Failed commands or prolonged telemetry loss may disarm to Manual.
 
-The experiment has no calendar deadline; completion restores the original combination at an eligible idle, then selects Manual. Cancellation/restart does not guarantee restoration.
+The experiment has no calendar deadline; completion restores the original combination at an eligible idle, then selects Manual. Its checkpoint survives restart, but it never automatically resumes: explicitly select Experiment to continue or Experiment – od nowa to begin a new session. The original combination is retained; cancellation/pause/restart does not itself restore it. Existing sessions started before checkpoint support cannot be reliably recovered. Progress is based on saved accepted cycles (bounded history); in-flight cycles are not saved.
 
 ## Diagnostics and data
 
 - **Hysteresis rejection diagnostics:** current phase, blocker and rejected attempts by reason since service startup, without additional RS485 traffic. Strict cycles still require stable target and configuration. Frame timestamps and decoded values come from the same captured frame set.
-- **Native threshold estimation:** empirical START near target −2 K (Twi/Two idle proxy); STOP near target +5 K (Two). Estimates require repeated stable observations; defaults remain when evidence is insufficient. Neither is a manufacturer-confirmed threshold.
+- **Native threshold estimation:** empirical START near target −2 K (Twi/Two idle proxy); STOP near target +5 K (Two). Estimates require repeated stable observations; defaults remain when evidence is insufficient. Neither is a manufacturer-confirmed threshold. START/STOP ETA is a linear trend approximation shown only with recent stable samples in the matching context.
 - **Last 24 hours:** read-only sampled compressor runtime, starts, CO, DHW, defrost, protection and missing-data coverage over 96 finished UTC quarters. No inference of power or energy. Storage is bounded, separate from the historical CO performance report.
 - **Adaptive report:** `/v2/adaptive-report`, authenticated JSON and CSV, weather/target-matched Auto and Legacy groups, frequency-confirmed running time, continuous-operation KPIs, threshold samples and decision history.
 - **Heater A4A:** read-only status, observed starts/runtime and last 128 transitions. The experimental A04 writer and MQTT controls were retired after unsuccessful field switching. No replacement writer is enabled. Existing core service/protection logic remains intact.
@@ -43,6 +43,7 @@ The experiment has no calendar deadline; completion restores the original combin
 
 | File in /opt/haier | Bound / dirty save interval |
 | --- | --- |
+| .adaptive-experiment-v1.json | Original configuration and session start; atomic on selection/completion; no automatic resume |
 | .adaptive-owner-v1 | Selected owner; atomic on selection |
 | .adaptive-learning-two-v3.json | 1024 contexts, 512 KiB load cap; 30 min |
 | .adaptive-hysteresis-v1.json | 128 cycles; 5 min |
