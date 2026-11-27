@@ -149,8 +149,10 @@ def main():
             for path,raw,new in pending:
                 if path.read_bytes()!=raw:
                     raise RuntimeError("File changed during installation: "+str(path))
-                GPIO["atomic_write"](path,new)
+                # Record rollback before writing: an exception after replace
+                # must still restore the original bytes.
                 written.append((path,raw))
+                GPIO["atomic_write"](path,new)
                 print("Verified on disk SHA256:",verify_installed(path,new,interpreter),path,flush=True)
             systemctl("start","haier")
             print("Checking new service and complete RS485 frames...",flush=True)
