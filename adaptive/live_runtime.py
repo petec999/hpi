@@ -677,6 +677,7 @@ class Runtime:
             except Exception:
                 self.thresholds.interrupt()
         except Exception:
+            self.building_previous=None
             self.operation.interrupt()
             self.observer.interrupt("telemetry_unavailable",time.time())
             self.report.interrupt()
@@ -721,9 +722,11 @@ class Runtime:
             at=r["start"]["at"]
             if len(group)>=self.EXPERIMENT_CYCLES or any(x[0]==at for x in group):
                 continue
-            stop=r["stop"]
+            stop=r.get("stop",{})
+            if "two" not in stop or "twi" not in stop:
+                continue
             group.append([at,r.get("run_seconds"),stop.get("fact",[None])[0],
-                          stop["two"][0]-stop["twi"][0],stop.get("outdoor")])
+                          stop["two"][0]-stop["twi"][0],stop.get("outdoor") if type(stop.get("outdoor")) in (int,float) else None])
         return samples
 
     def experiment_comparison(self):
