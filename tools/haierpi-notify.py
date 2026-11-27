@@ -101,8 +101,15 @@ def snapshot(s):
             raise ValueError("Invalid deferral")
     return {"session":s["since"],"counts":counts,
             "done":[counts[i]>=3 or continuous[i] is not None for i in range(6)],
+            "continuous":[x is not None for x in continuous],
             "deferred":[x["at"] if x is not None else None for x in deferred],
             "finished":s.get("finished") is True}
+
+def progress_text(cur):
+    return ("Konfiguracje ukończone: %d/6. Pełne cykle: %d/18 (maks.). Próby ciągłe: %d. "
+            "Nieukończone z odnotowanym odłożeniem: %d." %
+            (sum(cur["done"]),sum(cur["counts"]),sum(cur["continuous"]),
+             sum(not done and at is not None for done,at in zip(cur["done"],cur["deferred"]))))
 
 def evaluate(s,old,cfg,now):
     """Pure transition logic. Return notification lines and next dedup state."""
@@ -110,27 +117,46 @@ def evaluate(s,old,cfg,now):
     same=bool(old and old.get("session")==cur["session"])
     if not same:
         old={"session":cur["session"],"counts":[0]*6,"done":[False]*6,
-             "deferred":[None]*6,"finished":False,"last_progress":now,"stall_sent":False}
+             "continuous":[False]*6,"deferred":[None]*6,"finished":False,
+             "last_progress":now,"stall_sent":False}
+    # Migrate the old monitor's saved dedup state without repeating a
+    # continuous trial that was already known to be a completed configuration.
+    old_cont=old.get("continuous",[d and n<3 for d,n in zip(old["done"],old["counts"])])
     lines=[]
-    progress=any(cur[k]!=old.get(k) for k in ("counts","done","deferred","finished"))
+    progress=any(cur[k]!=old.get(k) for k in ("counts","done","deferred","finished")) or cur["continuous"]!=old_cont
     last_progress=now if progress else old.get("last_progress",now)
     stall_sent=False if progress else bool(old.get("stall_sent"))
-    if cfg["finished"] and cur["finished"] and not old.get("finished"):
-        lines.append("Eksperyment zakończony. Ukończone konfiguracje: %d/6. Raport Adaptive jest dostępny w WWW v2."%sum(cur["done"]))
-    if not cur["finished"]:
-        if cfg["shortfall"]:
-            for i,rec in enumerate(s.get("deferred",[None]*6)):
-                if rec is not None and cur["deferred"][i]!=old["deferred"][i]:
-                    outdoor=rec.get("outdoor")
-                    weather=(" przy %.1f°C"%outdoor) if type(outdoor) in (float,int) else ""
-                    lines.append("Ochrona komfortu: odłożono "+LABELS[i]+weather+".")
-        if cfg["progress"]:
-            for i,done in enumerate(cur["done"]):
-                if done and not old["done"][i]:
-                    lines.append("Ukończona konfiguracja: "+LABELS[i]+".")
-        if cfg["stalled"] and not stall_sent and now-last_progress>=cfg["stall_hours"]*3600:
-            lines.append("Od %d h bez nowego wyniku zapisanej sesji. Test może być wstrzymany, czekać na postój lub pogodę. Sprawdź WWW v2."%cfg["stall_hours"])
-            stall_sent=True
+    finished=cfg["finished"] and cur["finished"] and not old.get("finished")
+    if cfg["shortfall"] and not cur["finished"]:
+        for i,rec in enumerate(s.get("deferred",[None]*6)):
+            if rec is not None and cur["deferred"][i]!=old["deferred"][i]:
+                outdoor=rec.get("outdoor")
+                weather=(" przy %.1f°C"%outdoor) if type(outdoor) in (float,int) else ""
+                lines.append("Ochrona komfortu: odłożono "+LABELS[i]+weather+
+                             " (%d/3 pełnych cykli)."%cur["counts"][i])
+    if cfg["progress"]:
+        for i,label in enumerate(LABELS):
+            delta=cur["counts"][i]-old["counts"][i]
+            trial=cur["continuous"][i] and not old_cont[i]
+            if delta>0 or trial:
+                parts=[]
+                if delta>0:
+                    parts.append(("Zaliczono cykl" if delta==1 else "Zaliczono %d cykle"%delta)+
+                                 " – %d/3 pełnych cykli"%cur["counts"][i])
+                if trial:
+                    parts.append("Zaliczono próbę ciągłą 3 h")
+                if cur["done"][i] and not old["done"][i]:
+                    parts.append("konfiguracja ukończona")
+                lines.append(label+": "+"; ".join(parts)+".")
+    if finished:
+        lines.append("Eksperyment zakończony. Raport Adaptive jest dostępny w WWW v2.")
+    if not cur["finished"] and cfg["stalled"] and not stall_sent and now-last_progress>=cfg["stall_hours"]*3600:
+        lines.append("Od %d h bez nowego wyniku zapisanej sesji. Test może być wstrzymany, czekać na postój lub pogodę. Sprawdź WWW v2."%cfg["stall_hours"])
+        stall_sent=True
+    if lines:
+        # Keep the totals in the same push, including when several checkpoint
+        # changes are coalesced by one poll.
+        lines[-1]+="\n"+progress_text(cur)
     cur.update(last_progress=last_progress,stall_sent=stall_sent)
     return lines,cur
 
@@ -216,14 +242,42 @@ WantedBy=timers.target
     subprocess.run(["systemctl","is-active",UNIT+".timer"],check=True)
     print("OK: notify."+service+"; monitoring enabled. No HaierPi restart.")
 
+def upgrade():
+    """Update an existing installation without reselecting phone/resetting state."""
+    if os.geteuid()!=0:
+        raise ValueError("Run upgrade as root")
+    cfg=settings()
+    cfg["progress"]=True
+    subprocess.run(["systemctl","stop",UNIT+".timer"],check=True)
+    try:
+        # Let any in-flight push finish before changing code or configuration.
+        deadline=time.monotonic()+35
+        while True:
+            status=subprocess.check_output(["systemctl","show","-p","ActiveState","--value",UNIT+".service"],text=True).strip()
+            if status in ("inactive","failed"):
+                break
+            if time.monotonic()>=deadline:
+                raise RuntimeError("Monitor is still busy")
+            time.sleep(.5)
+        atomic(SCRIPT,Path(__file__).read_bytes())
+        save(CONFIG,cfg)
+    finally:
+        subprocess.run(["systemctl","start",UNIT+".timer"],check=True)
+    print("OK: cycle and configuration notifications enabled; existing state preserved.")
+
 def selftest():
     s={"since":100,"counts":[0]*6,"continuous":[None]*6,"deferred":[None]*6}
     cfg=dict(DEFAULT,progress=True)
     lines,old=evaluate(s,None,cfg,100)
     assert not lines
+    s["counts"][0]=1
+    lines,old=evaluate(s,old,cfg,150)
+    assert len(lines)==1 and "1/3" in lines[0] and "0/6" in lines[0] and "1/18" in lines[0]
+    lines,old=evaluate(s,old,cfg,151)
+    assert not lines
     s["counts"][0]=3
     lines,old=evaluate(s,old,cfg,200)
-    assert len(lines)==1 and "Eco / OFF" in lines[0]
+    assert len(lines)==1 and "Eco / OFF" in lines[0] and "1/6" in lines[0] and "3/18" in lines[0]
     lines,old=evaluate(s,old,cfg,201)
     assert not lines
     s["deferred"][2]={"at":210,"outdoor":-2}
@@ -234,10 +288,16 @@ def selftest():
     lines,old=evaluate(s,old,cfg,211+48*3600)
     assert not lines
     s["continuous"][1]={}
+    lines,old=evaluate(s,old,cfg,215+48*3600)
+    assert len(lines)==1 and "próbę ciągłą" in lines[0] and "2/6" in lines[0]
+    legacy=dict(old)
+    del legacy["continuous"]
+    lines,old=evaluate(s,legacy,cfg,216+48*3600)
+    assert not lines
     s["counts"]=[3,0,3,3,3,3]
     s["finished"]=True
     lines,old=evaluate(s,old,cfg,220+48*3600)
-    assert len(lines)==1 and "6/6" in lines[0]
+    assert len(lines)==5 and "6/6" in lines[-1] and "15/18" in lines[-1]
     lines,old=evaluate(s,old,cfg,221+48*3600)
     assert not lines
     print("Self-test OK")
@@ -247,9 +307,10 @@ if __name__=="__main__":
         cmd=sys.argv[1] if len(sys.argv)==2 else ""
         if cmd=="--selftest": selftest()
         elif cmd=="--setup": selftest(); setup()
+        elif cmd=="--upgrade": selftest(); upgrade()
         elif cmd=="--poll": poll()
         elif cmd=="--test": push(settings()["service"],"HaierPi – TEST","Test powiadomienia.")
-        else: raise ValueError("Use --setup, --poll, --test or --selftest")
+        else: raise ValueError("Use --setup, --upgrade, --poll, --test or --selftest")
     except Exception as e:
         # Never print token, URL, response body or request headers.
         if isinstance(e,(ValueError,RuntimeError)) and not type(e).__module__.startswith("requests"):
