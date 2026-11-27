@@ -79,6 +79,10 @@ class EnergyMonitor:
         self.rows=deque(maxlen=2881)
         self.session=None
         self.experiment={}
+        self.cycle_path=self.path.with_name('.adaptive-energy-cycles-v1.json') if self.path else None
+        self.cycle_session=None
+        self.cycles={}
+        self.cycle_error=None
         try:
             if self.path and self.path.exists():
                 if self.path.is_symlink() or self.path.stat().st_size>4096:
@@ -86,6 +90,7 @@ class EnergyMonitor:
                 self.cfg=validate(json.loads(self.path.read_text()))
         except (OSError,ValueError,TypeError):
             self.error="Nie można odczytać ustawień energii"
+        self.load_cycles()
 
     def mqtt_topics(self,cfg):
         return {cfg[k] for k in FIELDS if cfg["enabled"] and cfg[k] and
@@ -132,6 +137,9 @@ class EnergyMonitor:
             self.rows.clear()
             self.session=None
             self.experiment={}
+            self.cycle_session=None
+            self.cycles={}
+            self.cycle_error=None
 
     def mqtt_connect(self,client):
         with self.lock:
@@ -267,7 +275,7 @@ class EnergyMonitor:
             with self.lock:
                 self.busy=False
 
-    def poll(self,now,state):
+    def poll(self,now,state,cycles=(),session=None):
         self.sync_mqtt()
         with self.lock:
             if not self.cfg["enabled"] or self.busy or (self.last_poll is not None and now-self.last_poll<self.cfg["interval"]):
@@ -276,6 +284,7 @@ class EnergyMonitor:
             self.last_poll=now
             cfg=dict(self.cfg)
             generation=self.generation
+            wall=time.time()
         def run():
             try:
                 values,failures=self.read_values(cfg)
@@ -285,7 +294,8 @@ class EnergyMonitor:
                         self.current=values if ended-now<=20 else {}
                         self.current_at=ended
                         self.error=("Brak świeżych danych: "+", ".join(failures)) if failures else None
-                        self.accept(now,state,values) if ended-now<=20 else self.accept(now,None,{})
+                        self.accept(now,state,values,wall) if ended-now<=20 else self.accept(now,None,{},wall)
+                        self.record_cycles(session,cycles)
             finally:
                 with self.lock:
                     self.busy=False
@@ -296,17 +306,17 @@ class EnergyMonitor:
                 self.busy=False
             raise
 
-    def accept(self,now,state,values):
+    def accept(self,now,state,values,wall=None):
         # Caller holds lock. No interpolation across missing samples or mode transitions.
         old=self.last
-        self.last=(now,state,dict(values))
+        self.last=(now,state,dict(values),wall)
         session=state[3] if state else None
         if session is not None and session!=self.session:
             self.session=session
             self.experiment={}
         if old is None:
             return
-        t,prev,a=old
+        t,prev,a,old_wall=old
         dt=now-t
         if not 0<dt<=self.cfg["interval"]+35:
             return
@@ -325,7 +335,8 @@ class EnergyMonitor:
         if stable and group=="co_run" and "flow" in a and "flow" in values:
             if 0<=prev[2]<=30 and 0<=state[2]<=30:
                 heat=1.163*(a["flow"]*prev[2]+values["flow"]*state[2])*dt/7200
-        row=(now,group,mode,dt,e,heat)
+        end_wall=wall if wall is not None and old_wall is not None and abs((wall-old_wall)-dt)<=5 else None
+        row=(now,group,mode,dt,e,heat,end_wall)
         self.rows.append(row)
         if stable and session is not None and group in ("co_run","co_idle"):
             self.add(self.experiment,mode,row)
@@ -336,7 +347,7 @@ class EnergyMonitor:
     def add(target,key,row):
         if key is None:
             return
-        _,_,_,dt,e,heat=row
+        _,_,_,dt,e,heat=row[:6]
         b=target.setdefault(key,{"seconds":0,"kwh":0.0,"paired_kwh":0.0,"heat_kwh":0.0,"paired_seconds":0})
         b["seconds"]+=dt
         b["kwh"]+=e
@@ -344,6 +355,93 @@ class EnergyMonitor:
             b["heat_kwh"]+=heat
             b["paired_kwh"]+=e
             b["paired_seconds"]+=dt
+
+
+    def load_cycles(self):
+        if self.cycle_path is None:
+            return
+        try:
+            if self.cycle_path.is_symlink() or self.cycle_path.stat().st_size>16384:
+                raise ValueError("Invalid cycle file")
+            d=json.loads(self.cycle_path.read_text())
+            if d["schema"]!=1 or d["settings"]!=self.cfg:
+                return
+            session=d["session"]
+            if type(session) not in (int,float) or not math.isfinite(session) or session<=0:
+                raise ValueError("Invalid cycle session")
+            if not isinstance(d["cycles"],list) or len(d["cycles"])>18:
+                raise ValueError("Invalid cycles")
+            result={}
+            for row in d["cycles"]:
+                keys={"start","stop","mode","duration_seconds","covered_seconds","paired_seconds","kwh","heat_kwh","paired_kwh","cop_estimate"}
+                if not isinstance(row,dict) or set(row)!=keys or row["mode"] not in tuple(m+f for m in ("eco","quiet","turbo") for f in (" + FLimit"," / FLimit OFF")):
+                    raise ValueError("Invalid cycle")
+                for k,v in row.items():
+                    if k=="mode":
+                        continue
+                    if v is None and k in ("kwh","heat_kwh","paired_kwh","cop_estimate"):
+                        continue
+                    if type(v) not in (int,float) or not math.isfinite(v) or v<0:
+                        raise ValueError("Invalid cycle value")
+                if not session<=row["start"]<row["stop"] or not 0<=row["paired_seconds"]<=row["covered_seconds"]<=row["duration_seconds"]+5:
+                    raise ValueError("Invalid cycle coverage")
+                result[row["start"]]=row
+            self.cycle_session=session
+            self.cycles=result
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError,KeyError):
+            self.cycle_error="Nie można odczytać bilansu cykli"
+
+    def save_cycles(self):
+        if self.cycle_path is None:
+            return
+        temp=None
+        try:
+            if self.cycle_path.is_symlink():
+                raise ValueError("Invalid cycle path")
+            fd,temp=tempfile.mkstemp(prefix=".energy-cycles-",dir=self.cycle_path.parent)
+            with os.fdopen(fd,"w",encoding="utf-8") as f:
+                json.dump({"schema":1,"settings":self.cfg,"session":self.cycle_session,
+                           "cycles":list(self.cycles.values())},f,allow_nan=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp,self.cycle_path)
+            temp=None
+            self.cycle_error=None
+        except (OSError,ValueError):
+            self.cycle_error="Nie można zapisać bilansu cykli"
+        finally:
+            if temp is not None:
+                try: os.unlink(temp)
+                except OSError: pass
+
+    def record_cycles(self,session,cycles):
+        # Only intervals wholly inside a completed cycle, in the same
+        # observed configuration and CO-running state. Never extrapolate.
+        if session is None or self.last is None or self.last[3] is None:
+            return
+        if session!=self.cycle_session:
+            self.cycle_session=session
+            self.cycles={}
+        changed=False
+        for start,stop,mode in cycles:
+            if start in self.cycles or start<session or not start<stop<=self.last[3] or len(self.cycles)>=18:
+                continue
+            rows=[r for r in self.rows if r[6] is not None and r[1]=="co_run" and r[2]==mode
+                  and start<=r[6]-r[3] and r[6]<=stop]
+            bucket={}
+            for r in rows:
+                self.add(bucket,mode,r)
+            b=bucket.get(mode,{"seconds":0,"kwh":0,"paired_seconds":0,"heat_kwh":0,"paired_kwh":0})
+            self.cycles[start]={"start":start,"stop":stop,"mode":mode,"duration_seconds":stop-start,
+                "covered_seconds":b["seconds"],"paired_seconds":b["paired_seconds"],
+                "kwh":b["kwh"] if rows else None,"heat_kwh":b["heat_kwh"] if b["paired_seconds"] else None,
+                "paired_kwh":b["paired_kwh"] if b["paired_seconds"] else None,
+                "cop_estimate":b["heat_kwh"]/b["paired_kwh"] if b["paired_seconds"]>=300 and b["paired_kwh"]>=.05 else None}
+            changed=True
+        if changed:
+            self.save_cycles()
 
     def summary(self,now=None):
         now=time.monotonic() if now is None else now
@@ -362,6 +460,7 @@ class EnergyMonitor:
                     "current":dict(self.current) if self.current_at is not None and 0<=now-self.current_at<=MAX_READ_AGE else {},
                     "busy":self.busy,"groups_24h":expose(totals),"modes_24h":expose(modes),
                     "experiment":expose(self.experiment),"session":self.session,
+                    "cycles":list(self.cycles.values()),"cycle_session":self.cycle_session,"cycle_error":self.cycle_error,
                     "electricity_estimated":not bool(self.cfg["energy"]),"flow_estimated":self.cfg["flow_source"]=="manual",
                     "coverage_seconds":sum(v["seconds"] for v in totals.values()),
                     "scope":"RAM only; sampling estimates, not calibrated heat measurement"}
