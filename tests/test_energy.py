@@ -131,6 +131,24 @@ class EnergyTests(unittest.TestCase):
             restarted.record_cycles(1000,[(1360,1390,mode)])
             self.assertIsNone(restarted.summary()["cycles"][1]["kwh"])
 
+    def test_meter_average_power_uses_only_contiguous_increments(self):
+        m=self.configured()
+        self.assertIsNone(m.meter_average_power(0))
+        for i in range(11):
+            m.accept(i*30,None,{"energy":10+i*.025})
+        v=m.meter_average_power(300)
+        self.assertAlmostEqual(v["kw"],3)
+        self.assertEqual(v["seconds"],300)
+        self.assertIsNone(m.meter_average_power(400))
+        m.accept(330,None,{"energy":0})
+        self.assertIsNone(m.meter_average_power(330))
+        m.accept(360,None,{"energy":.025})
+        self.assertIsNone(m.meter_average_power(360))
+        m.accept(390,None,{"energy":.05})
+        self.assertAlmostEqual(m.meter_average_power(390)["kw"],3)
+        m.accept(420,None,{})
+        self.assertIsNone(m.meter_average_power(420))
+
     def test_ui_patch(self):
         fixture=("""
 _WV_HTML = '<nav></nav>'
