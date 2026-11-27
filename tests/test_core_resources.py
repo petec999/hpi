@@ -1,4 +1,8 @@
 import ast
+import configparser
+import io
+import os
+import tempfile
 import logging
 import runpy
 import threading
@@ -45,6 +49,24 @@ class ResourceGuards(unittest.TestCase):
             PATCH["patch"]("pass")
         with self.assertRaises(ValueError):
             PATCH["patch"](PATCH["MARK"]+"\n")
+
+    def test_config_atomic_and_noop(self):
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/"config.ini"
+            cfg=configparser.ConfigParser()
+            cfg["test"]={"a":"1"}
+            env={"threading":threading,"os":os,"io":io,"tempfile":tempfile,"config":cfg}
+            exec(PATCH["CONFIG_HELPER"].replace("/opt/config.ini",str(path)),env)
+            save=env["_hpi_save_config"]
+            save()
+            st=path.stat()
+            save()
+            self.assertEqual(st.st_ino,path.stat().st_ino)
+            cfg["test"]["a"]="2"
+            save()
+            self.assertIn("a = 2",path.read_text())
+            self.assertEqual(path.stat().st_mode & 0o777,0o600)
+            self.assertEqual(list(Path(d).iterdir()),[path])
 
     def test_helper_compiles(self):
         ast.parse(PATCH["HELPER"])
