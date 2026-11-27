@@ -59,8 +59,9 @@ class Runtime:
         self.experiment_guard=ExperimentGuard()
         self.experiment_deferred=[None]*len(self.EXPERIMENT_LEVELS)
         self.experiment_recovering=False
-        self.continuous_trial=ContinuousTrial()
+        self.continuous_trial=ContinuousTrial(duration=1800)
         self.experiment_continuous=[None]*len(self.EXPERIMENT_LEVELS)
+        self.experiment_windows=[[] for _ in self.EXPERIMENT_LEVELS]
         self.load_experiment_guard()
         self.load_experiment()
         self.last_tick=0
@@ -77,7 +78,7 @@ class Runtime:
         if self.experiment_path is None:
             return
         try:
-            if self.experiment_path.is_symlink() or self.experiment_path.stat().st_size>8192:
+            if self.experiment_path.is_symlink() or self.experiment_path.stat().st_size>32768:
                 raise ValueError("invalid experiment checkpoint")
             data=json.loads(self.experiment_path.read_text(encoding="utf-8"))
             if not isinstance(data,dict) or data.get("schema")!=1 or "session" not in data:
@@ -116,7 +117,8 @@ class Runtime:
             session=dict(session,guard_reference=getattr(getattr(self,'experiment_guard',None),'reference',None),
                          deferred=getattr(self,'experiment_deferred',[None]*len(self.EXPERIMENT_LEVELS)),
                          recovering=bool(getattr(self,'experiment_recovering',False)),
-                         continuous=getattr(self,"experiment_continuous",[None]*len(self.EXPERIMENT_LEVELS)))
+                         continuous=getattr(self,"experiment_continuous",[None]*len(self.EXPERIMENT_LEVELS)),
+                         windows=getattr(self,"experiment_windows",[[] for _ in self.EXPERIMENT_LEVELS]))
         temp=None
         try:
             if self.experiment_path is not None:
@@ -218,13 +220,22 @@ class Runtime:
         continuous=session.get("continuous",[None]*len(self.EXPERIMENT_LEVELS))
         if not isinstance(continuous,list) or len(continuous)!=len(self.EXPERIMENT_LEVELS):
             raise ValueError("Invalid continuous trials")
-        for record in continuous:
-            if record is None:
-                continue
+        windows=session.get("windows",[[] for _ in self.EXPERIMENT_LEVELS])
+        if (not isinstance(windows,list) or len(windows)!=len(self.EXPERIMENT_LEVELS)
+                or any(not isinstance(group,list) or len(group)>6 for group in windows)):
+            raise ValueError("Invalid trial windows")
+        records=[(record,False) for record in continuous if record is not None]
+        records.extend((record,True) for group in windows for record in group)
+        for record,partial in records:
             keys={"start","stop","seconds","outdoor_min","outdoor_max","target_min","target_max","room_min","room_max"}
             stats={"run_seconds","idle_seconds","defrost_seconds","transition_seconds","starts","short_cycles","defrosts"}
-            if not isinstance(record,dict) or set(record) not in (keys,keys|{"energy"},keys|stats,keys|stats|{"energy"}) or any(type(record[k]) not in (int,float) or not math.isfinite(record[k]) for k in keys):
+            if not isinstance(record,dict) or set(record) not in (keys,keys|{"energy"},keys|stats,keys|stats|{"energy"},keys|stats|{"energy","blocks"}) or any(type(record[k]) not in (int,float) or not math.isfinite(record[k]) for k in keys):
                 raise ValueError("Invalid continuous trial")
+            blocks=record.get("blocks",1)
+            if type(blocks) is not int or blocks not in (1,6) or partial and blocks!=1:
+                raise ValueError("Invalid trial block count")
+            if partial and not stats<=set(record):
+                raise ValueError("Missing trial statistics")
             if stats<=set(record):
                 if any(type(record[k]) not in (int,float) or not math.isfinite(record[k]) or not 0<=record[k]<=record["seconds"] for k in stats):
                     raise ValueError("Invalid trial statistics")
@@ -247,17 +258,23 @@ class Runtime:
                 if not 0<=energy["paired_seconds"]<=energy["seconds"]<=record["seconds"]+20:
                     raise ValueError("Invalid continuous energy coverage")
             if not (session["since"]<=record["start"]<record["stop"]<=time.time()+60 and
-                    10800<=record["seconds"]<=10865 and abs(record["stop"]-record["start"]-record["seconds"])<=20 and
+                    (1800<=record["seconds"]<=1865 if partial else 10800<=record["seconds"]<=10800+65*blocks) and
+                    (abs(record["stop"]-record["start"]-record["seconds"])<=20 if blocks==1 else
+                     record["stop"]-record["start"]>=record["seconds"]-120) and
                     -60<=record["outdoor_min"]<=record["outdoor_max"]<=60 and
-                    record["outdoor_max"]-record["outdoor_min"]<=2+1e-6 and
+                    (blocks==6 or record["outdoor_max"]-record["outdoor_min"]<=2+1e-6) and
                     10<=record["target_min"]<=record["target_max"]<=65 and
-                    record["target_max"]-record["target_min"]<=1.0+1e-6 and
+                    (blocks==6 or record["target_max"]-record["target_min"]<=1.0+1e-6) and
                     5<=record["room_min"]<=record["room_max"]<=40 and
-                    record["room_max"]-record["room_min"]<=.5+1e-6):
+                    (blocks==6 or record["room_max"]-record["room_min"]<=.5+1e-6)):
                 raise ValueError("Invalid continuous trial range")
+        for group in windows:
+            if any(a["stop"]>b["start"] for a,b in zip(group,group[1:])):
+                raise ValueError("Overlapping trial windows")
+        self.experiment_windows=windows
         self.experiment_continuous=continuous
         if not hasattr(self,"continuous_trial"):
-            self.continuous_trial=ContinuousTrial()
+            self.continuous_trial=ContinuousTrial(duration=1800)
         self.experiment_deferred=deferred
         self.experiment_recovering=recovering
         if not hasattr(self,"experiment_guard"):
@@ -589,6 +606,7 @@ class Runtime:
                 self.experiment_deferred=[None]*len(self.EXPERIMENT_LEVELS)
                 self.experiment_recovering=False
                 self.experiment_continuous=[None]*len(self.EXPERIMENT_LEVELS)
+                self.experiment_windows=[[] for _ in self.EXPERIMENT_LEVELS]
                 self.experiment_guard.reference=self.fresh_room_sensor('intemp',time.time())
                 self.save_guard_checkpoint()
             self.experiment_guard.reset()
@@ -931,6 +949,34 @@ class Runtime:
                           stop["two"][0]-stop["twi"][0],stop.get("outdoor",[None])[0] if isinstance(stop.get("outdoor"),list) else stop.get("outdoor")])
         return samples
 
+    @staticmethod
+    def combine_trial_windows(group):
+        # Sum measured windows, never count gaps as operating time.
+        result={"start":group[0]["start"],"stop":group[-1]["stop"],"blocks":len(group)}
+        for k in ("seconds","run_seconds","idle_seconds","defrost_seconds","transition_seconds","starts","short_cycles","defrosts"):
+            result[k]=sum(w[k] for w in group)
+        for k in ("outdoor","room","target"):
+            result[k+"_min"]=min(w[k+"_min"] for w in group)
+            result[k+"_max"]=max(w[k+"_max"] for w in group)
+        energy=[w["energy"] for w in group if w.get("energy") is not None]
+        result["energy"]=None
+        if energy:
+            keys=("seconds","kwh","paired_seconds","paired_kwh","net_heat_kwh","defrost_kwh","defrost_heat_kwh",
+                  "defrost_seconds","defrost_paired_seconds")
+            totals={k:sum(e[k] for e in energy) for k in keys}
+            e=EnergyMonitor.net_result(totals,result["seconds"])
+            e["flow_estimated"]=any(x["flow_estimated"] for x in energy)
+            e["electricity_estimated"]=any(x["electricity_estimated"] for x in energy)
+            # Missing/changed source provenance or mixed weather means descriptive
+            # energy only, not a comparable COP.
+            if (len(energy)!=len(group) or len({(x["flow_estimated"],x["electricity_estimated"]) for x in energy})!=1
+                    or any(x["cop_net"] is None for x in energy)
+                    or result["outdoor_max"]-result["outdoor_min"]>2
+                    or result["target_max"]-result["target_min"]>1):
+                e["cop_net"]=None
+            result["energy"]=e
+        return result
+
     def experiment_comparison(self):
         from statistics import median
         counts=self.experiment_counts()
@@ -946,6 +992,7 @@ class Runtime:
                 "duration_samples":sum(1 for r in rows if r[1] is not None),
                 "deferred":getattr(self,"experiment_deferred",[None]*len(self.EXPERIMENT_LEVELS))[i],
                 "continuous":getattr(self,"experiment_continuous",[None]*len(self.EXPERIMENT_LEVELS))[i],
+                "windows":getattr(self,"experiment_windows",[[] for _ in self.EXPERIMENT_LEVELS])[i],
                 "quality":"complete" if len(rows)>=self.EXPERIMENT_CYCLES else "continuous" if getattr(self,"experiment_continuous",[None]*len(self.EXPERIMENT_LEVELS))[i] is not None else "partial"})
         groups=self.experiment_samples()
         outdoor=[sample[4] for rows in groups for sample in rows if sample[4] is not None]
@@ -1065,11 +1112,19 @@ class Runtime:
         if trial is not None:
             mode=actual[0]+(" + FLimit" if actual[1] else " / FLimit OFF")
             trial["energy"]=self.energy.window_summary(trial["start"],trial["stop"],mode,self.experiment_since)
-            self.experiment_continuous[current_index]=trial
+            group=self.experiment_windows[current_index]
+            old=list(group)
+            if not group or group[-1]["stop"]<=trial["start"]:
+                group.append(trial)
+            if len(group)>=6:
+                self.experiment_continuous[current_index]=self.combine_trial_windows(group)
+                self.experiment_windows[current_index]=[]
             try:
                 self.save_guard_checkpoint()
-                self.report_event("confirmed","Próba ciągła 3 h: "+self.status["actual"])
+                self.report_event("confirmed","Okno eksploatacji 30 min: "+self.status["actual"]+
+                    " ("+str(len(group))+"/6)")
             except SelectionBlocked:
+                self.experiment_windows[current_index]=old
                 self.experiment_continuous[current_index]=None
         if normal_defrost:
             self.experiment_idle=None
@@ -1563,4 +1618,5 @@ class Runtime:
                                     "initial":self.experiment_initial,"storage_error":self.experiment_error,"guard":self.guard_view(),
                                     "continuous":self.experiment_continuous,"continuous_seconds":self.continuous_trial.seconds,
                                     "continuous_reason":self.continuous_trial.reason,
+                                    "windows":self.experiment_windows,
                                     "continuous_stats":self.continuous_trial.stats})
