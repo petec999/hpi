@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from adaptive.energy import EnergyMonitor
 from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch, HeaterCounter, OperationMonitor, PassiveInsights
 
 class SelectionBlocked(ValueError):
@@ -42,6 +43,7 @@ class Runtime:
         # Prior experimental ON marker is diagnostic only after retirement.
         self.heater_marker=Path(learning_path).with_name(".adaptive-heater-owned-v1") if learning_path else None
         self.insights=PassiveInsights()
+        self.energy=EnergyMonitor(g,Path(learning_path).with_name('.adaptive-energy-config-v1.json') if learning_path else None)
         self.observer_frames=None
         self.experiment_counts_saved=[0]*len(self.EXPERIMENT_LEVELS)
         self.experiment_metrics=[[] for _ in self.EXPERIMENT_LEVELS]
@@ -573,6 +575,7 @@ class Runtime:
                 data["learning"]["saved_at"]=None
             data["experiment_comparison"]=self.experiment_comparison()
             data["diagnostics"]=self.diagnostic_summary()
+            data["energy"]=self.energy.summary()
             data["operation_24h"]=self.operation.summary(time.time())
             data["thresholds"]=self.thresholds.summary()
             data["register_watch"]=self.register_watch.summary(time.monotonic())
@@ -900,6 +903,19 @@ class Runtime:
             self.observe_heater(now)
             self.observe_registers(now)
             self.observe_hysteresis()
+            try:
+                sample,zone,curve,_=self.snapshot()
+                co=self.flag(self.raw('pch'))
+                group=('fault' if sample.error else 'defrost' if sample.defrost else 'protection' if sample.override else 'dhw' if sample.dhw else 'co_run' if co and sample.hz>0 else 'co_idle' if co else 'other')
+                mode=sample.mode+(' + FLimit' if sample.relay else ' / FLimit OFF')
+                session=self.experiment_since if self.control=='experiment' and self.experiment_saved else None
+                state=(group,mode,sample.supply_temp-sample.return_temp,session)
+            except Exception:
+                state=None
+            try:
+                self.energy.poll(now,state)
+            except Exception:
+                pass
             if self.resume_requested:
                 self.resume_auto()
                 return
