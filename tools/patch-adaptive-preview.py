@@ -613,9 +613,10 @@ def experiment_api(source):
 
 def learning_block():
     policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")
-    runtime=(ROOT/"adaptive/live_runtime.py").read_text(encoding="utf-8").replace("from adaptive.regulator import","from _hpi_adaptive_policy import")
+    energy=(ROOT/"adaptive/energy.py").read_text(encoding="utf-8")
+    runtime=(ROOT/"adaptive/live_runtime.py").read_text(encoding="utf-8").replace("from adaptive.regulator import","from _hpi_adaptive_policy import").replace("from adaptive.energy import","from _hpi_adaptive_energy import")
     block=MARK+"\nimport sys as _am_sys, types as _am_types\n"
-    for name,code in (("_hpi_adaptive_policy",policy),("_hpi_adaptive_runtime",runtime)):
+    for name,code in (("_hpi_adaptive_policy",policy),("_hpi_adaptive_energy",energy),("_hpi_adaptive_runtime",runtime)):
         block+=f'_am_module = _am_types.ModuleType({name!r})\n_am_sys.modules[{name!r}] = _am_module\nexec(compile({code!r}, {name!r}, "exec"), _am_module.__dict__)\n'
     block+='_am = _am_module.Runtime(globals(), learning_path="/opt/haier/.adaptive-learning-two-v3.json")\n# HOME-IOT ADAPTIVE MODULATION END'
     return block
