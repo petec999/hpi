@@ -918,7 +918,14 @@ class Runtime:
             except Exception:
                 pass
             try:
-                self.energy.poll(now,state)
+                cycle_rows=[]
+                if self.energy.settings()["enabled"] and self.experiment_since is not None:
+                    for row in self.observer.rows:
+                        context=row["context"]
+                        if context[0]=="experiment" and row["start"]["at"]>=self.experiment_since:
+                            mode=context[1]+(" + FLimit" if context[2] else " / FLimit OFF")
+                            cycle_rows.append((row["start"]["at"],row["stop"]["at"],mode))
+                self.energy.poll(now,state,cycle_rows,self.experiment_since)
             except Exception:
                 pass
             if self.resume_requested:
