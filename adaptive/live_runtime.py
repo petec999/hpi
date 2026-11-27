@@ -7,7 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 from adaptive.energy import EnergyMonitor
-from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch, HeaterCounter, OperationMonitor, PassiveInsights, ExperimentGuard
+from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch, HeaterCounter, OperationMonitor, PassiveInsights, ExperimentGuard, ContinuousTrial
 
 class SelectionBlocked(ValueError):
     """Safe, fixed activation reason exposed to authenticated UI."""
@@ -59,6 +59,8 @@ class Runtime:
         self.experiment_guard=ExperimentGuard()
         self.experiment_deferred=[None]*len(self.EXPERIMENT_LEVELS)
         self.experiment_recovering=False
+        self.continuous_trial=ContinuousTrial()
+        self.experiment_continuous=[None]*len(self.EXPERIMENT_LEVELS)
         self.load_experiment_guard()
         self.load_experiment()
         self.last_tick=0
@@ -75,7 +77,7 @@ class Runtime:
         if self.experiment_path is None:
             return
         try:
-            if self.experiment_path.is_symlink() or self.experiment_path.stat().st_size>4096:
+            if self.experiment_path.is_symlink() or self.experiment_path.stat().st_size>8192:
                 raise ValueError("invalid experiment checkpoint")
             data=json.loads(self.experiment_path.read_text(encoding="utf-8"))
             if not isinstance(data,dict) or data.get("schema")!=1 or "session" not in data:
@@ -113,7 +115,8 @@ class Runtime:
         if session is not None and session.get('since')==self.experiment_since:
             session=dict(session,guard_reference=getattr(getattr(self,'experiment_guard',None),'reference',None),
                          deferred=getattr(self,'experiment_deferred',[None]*len(self.EXPERIMENT_LEVELS)),
-                         recovering=bool(getattr(self,'experiment_recovering',False)))
+                         recovering=bool(getattr(self,'experiment_recovering',False)),
+                         continuous=getattr(self,"experiment_continuous",[None]*len(self.EXPERIMENT_LEVELS)))
         temp=None
         try:
             if self.experiment_path is not None:
@@ -212,6 +215,27 @@ class Runtime:
                     continue
                 if type(v) not in (int,float) or not math.isfinite(v) or not lo<=v<=hi:
                     raise ValueError("Invalid deferral value")
+        continuous=session.get("continuous",[None]*len(self.EXPERIMENT_LEVELS))
+        if not isinstance(continuous,list) or len(continuous)!=len(self.EXPERIMENT_LEVELS):
+            raise ValueError("Invalid continuous trials")
+        for record in continuous:
+            if record is None:
+                continue
+            keys={"start","stop","seconds","outdoor_min","outdoor_max","target_min","target_max","room_min","room_max"}
+            if not isinstance(record,dict) or set(record)!=keys or any(type(v) not in (int,float) or not math.isfinite(v) for v in record.values()):
+                raise ValueError("Invalid continuous trial")
+            if not (session["since"]<=record["start"]<record["stop"]<=time.time()+60 and
+                    10800<=record["seconds"]<=10865 and abs(record["stop"]-record["start"]-record["seconds"])<=20 and
+                    -60<=record["outdoor_min"]<=record["outdoor_max"]<=60 and
+                    record["outdoor_max"]-record["outdoor_min"]<=2 and
+                    10<=record["target_min"]<=record["target_max"]<=65 and
+                    record["target_max"]-record["target_min"]<=.5+1e-6 and
+                    5<=record["room_min"]<=record["room_max"]<=40 and
+                    record["room_max"]-record["room_min"]<=.3+1e-6):
+                raise ValueError("Invalid continuous trial range")
+        self.experiment_continuous=continuous
+        if not hasattr(self,"continuous_trial"):
+            self.continuous_trial=ContinuousTrial()
         self.experiment_deferred=deferred
         self.experiment_recovering=recovering
         if not hasattr(self,"experiment_guard"):
@@ -542,9 +566,11 @@ class Runtime:
                 self.experiment_initial=initial
                 self.experiment_deferred=[None]*len(self.EXPERIMENT_LEVELS)
                 self.experiment_recovering=False
+                self.experiment_continuous=[None]*len(self.EXPERIMENT_LEVELS)
                 self.experiment_guard.reference=self.fresh_room_sensor('intemp',time.time())
                 self.save_guard_checkpoint()
             self.experiment_guard.reset()
+            self.continuous_trial.reset()
             self.control=mode
             self.report_event("owner","selected "+mode)
             self.report.interrupt()
@@ -897,7 +923,8 @@ class Runtime:
                 "short_cycles":sum(1 for r in rows if r[1] is not None and 0<r[1]<600),
                 "duration_samples":sum(1 for r in rows if r[1] is not None),
                 "deferred":getattr(self,"experiment_deferred",[None]*len(self.EXPERIMENT_LEVELS))[i],
-                "quality":"complete" if len(rows)>=self.EXPERIMENT_CYCLES else "partial"})
+                "continuous":getattr(self,"experiment_continuous",[None]*len(self.EXPERIMENT_LEVELS))[i],
+                "quality":"complete" if len(rows)>=self.EXPERIMENT_CYCLES else "continuous" if getattr(self,"experiment_continuous",[None]*len(self.EXPERIMENT_LEVELS))[i] is not None else "partial"})
         groups=self.experiment_samples()
         outdoor=[sample[4] for rows in groups for sample in rows if sample[4] is not None]
         spread=max(outdoor)-min(outdoor) if len(outdoor)>=2 else None
@@ -955,6 +982,7 @@ class Runtime:
                      "risk":"paused","actual":s.mode+(" + FLimit" if s.relay else " / FLimit OFF"),
                      "target":s.target,"return_temp":s.return_temp,"supply_temp":s.supply_temp}
         if not eligible:
+            self.continuous_trial.reset()
             self.experiment_idle=None
             self.status["reason_pl"]="Eksperyment wstrzymany – warunek priorytetowy lub brak zapotrzebowania"
             return
@@ -976,7 +1004,21 @@ class Runtime:
         elif before_ref is None and self.experiment_guard.reference is not None:
             try: self.save_guard_checkpoint()
             except SelectionBlocked: pass
-        remaining=[i for i,n in enumerate(counts) if n<self.EXPERIMENT_CYCLES]
+        current_index=self.EXPERIMENT_LEVELS.index(actual)
+        can_observe=(not self.experiment_recovering and decision is None and
+                     counts[current_index]<self.EXPERIMENT_CYCLES and
+                     self.experiment_continuous[current_index] is None and
+                     self.experiment_guard.can_retry(self.experiment_deferred[current_index],outdoor))
+        trial=self.continuous_trial.observe(s,room,outdoor,self.experiment_guard.reference,
+                    self.experiment_guard.cfg["minimum_room"],can_observe,wall)
+        if trial is not None:
+            self.experiment_continuous[current_index]=trial
+            try:
+                self.save_guard_checkpoint()
+                self.report_event("confirmed","Próba ciągła 3 h: "+self.status["actual"])
+            except SelectionBlocked:
+                self.experiment_continuous[current_index]=None
+        remaining=[i for i,n in enumerate(counts) if n<self.EXPERIMENT_CYCLES and self.experiment_continuous[i] is None]
         candidates=[i for i in remaining if self.experiment_guard.can_retry(self.experiment_deferred[i],outdoor)]
         done=not remaining
         if self.experiment_recovering:
@@ -1021,6 +1063,8 @@ class Runtime:
         self.status["proposed"]=goal[0]+(" + FLimit" if goal[1] else " / FLimit OFF")
         if not self.idle_snapshot_valid(s,zone,curve):
             self.experiment_idle=None
+            if self.experiment_continuous[current_index] is not None:
+                self.status["reason_pl"]="Próba ciągła zaliczona – oczekiwanie na naturalny STOP przed zmianą konfiguracji"
             return
         with self.frames_lock:
             stamp=self.frames["R241"][0]
@@ -1456,4 +1500,5 @@ class Runtime:
                         experiment={"counts":self.experiment_counts(),"levels":[m+("+FLimit" if l else " / OFF") for m,l in self.EXPERIMENT_LEVELS],
                                     "per_level":self.EXPERIMENT_CYCLES,"since":self.experiment_since,
                                     "resume_available":self.experiment_saved and self.control!="experiment",
-                                    "initial":self.experiment_initial,"storage_error":self.experiment_error,"guard":self.guard_view()})
+                                    "initial":self.experiment_initial,"storage_error":self.experiment_error,"guard":self.guard_view(),
+                                    "continuous":self.experiment_continuous,"continuous_seconds":self.continuous_trial.seconds})
