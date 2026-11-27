@@ -222,8 +222,22 @@ class Runtime:
             if record is None:
                 continue
             keys={"start","stop","seconds","outdoor_min","outdoor_max","target_min","target_max","room_min","room_max"}
-            if not isinstance(record,dict) or set(record)!=keys or any(type(v) not in (int,float) or not math.isfinite(v) for v in record.values()):
+            if not isinstance(record,dict) or set(record) not in (keys,keys|{"energy"}) or any(type(record[k]) not in (int,float) or not math.isfinite(record[k]) for k in keys):
                 raise ValueError("Invalid continuous trial")
+            energy=record.get("energy")
+            if energy is not None:
+                ekeys={"seconds","kwh","paired_seconds","paired_kwh","net_heat_kwh","defrost_kwh","defrost_heat_kwh",
+                       "defrost_seconds","defrost_paired_seconds","paired_fraction","time_fraction","cop_net",
+                       "flow_estimated","electricity_estimated"}
+                if not isinstance(energy,dict) or set(energy)!=ekeys or any(type(energy[k]) is not bool for k in ("flow_estimated","electricity_estimated")):
+                    raise ValueError("Invalid continuous energy")
+                for k,v in energy.items():
+                    if k in ("flow_estimated","electricity_estimated") or v is None and k in ("cop_net","time_fraction"):
+                        continue
+                    if type(v) not in (int,float) or not math.isfinite(v):
+                        raise ValueError("Invalid continuous energy value")
+                if not 0<=energy["paired_seconds"]<=energy["seconds"]<=record["seconds"]+20:
+                    raise ValueError("Invalid continuous energy coverage")
             if not (session["since"]<=record["start"]<record["stop"]<=time.time()+60 and
                     10800<=record["seconds"]<=10865 and abs(record["stop"]-record["start"]-record["seconds"])<=20 and
                     -60<=record["outdoor_min"]<=record["outdoor_max"]<=60 and
@@ -1012,6 +1026,8 @@ class Runtime:
         trial=self.continuous_trial.observe(s,room,outdoor,self.experiment_guard.reference,
                     self.experiment_guard.cfg["minimum_room"],can_observe,wall)
         if trial is not None:
+            mode=actual[0]+(" + FLimit" if actual[1] else " / FLimit OFF")
+            trial["energy"]=self.energy.window_summary(trial["start"],trial["stop"],mode,self.experiment_since)
             self.experiment_continuous[current_index]=trial
             try:
                 self.save_guard_checkpoint()
@@ -1162,10 +1178,13 @@ class Runtime:
                     sample,zone,curve,_=self.snapshot(frames)
                     power=int(frames["R101"][1][0])&255
                     co=bool(power&1 and power&4 and not power&2) and self.flag(self.raw("pch"))
-                    group=('fault' if sample.error else 'defrost' if sample.defrost else 'protection' if sample.override else 'dhw' if sample.dhw else 'co_run' if co and sample.hz>0 else 'co_idle' if co else 'other')
+                    group=('fault' if sample.error else 'dhw' if sample.dhw else 'protection' if sample.override else 'defrost' if co and sample.defrost else 'co_run' if co and sample.hz>0 and not sample.defrost else 'co_idle' if co and not sample.defrost else 'other')
                     mode=sample.mode+(' + FLimit' if sample.relay else ' / FLimit OFF')
                     session=self.experiment_since if self.control=='experiment' and self.experiment_saved and not self.experiment_recovering else None
-                    state=(group,mode,sample.supply_temp-sample.return_temp,session)
+                    circulation=str(self.g["PyHaier"].GetPump(list(frames["R141"][1]))).strip().upper()
+                    circulation=True if circulation=="ON" else False if circulation=="OFF" else None
+                    outdoor=self.fresh_room_sensor("outtemp",time.time())
+                    state=(group,mode,sample.supply_temp-sample.return_temp,session,outdoor,sample.target,circulation)
             except Exception:
                 pass
             try:
