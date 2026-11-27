@@ -105,7 +105,7 @@ class Regulator:
             raise ValueError("Invalid settings")
         if settings.window<90 or settings.urgent_deficit<=settings.deficit_band:
             raise ValueError("Invalid policy bands")
-        self.history=deque()
+        self.history=deque(maxlen=256)
         self.last=None
         self.level=None
         self.target=None
@@ -366,7 +366,7 @@ class Learning:
             return
         t["last"]=s.now
         t["samples"].append((s.now,s.target-s.return_temp,s.hz,s.target-s.supply_temp))
-        t["samples"]=[x for x in t["samples"] if s.now-x[0]<=120]
+        t["samples"]=[x for x in t["samples"] if s.now-x[0]<=120][-256:]
         if s.now-t["start"]<90 or len(t["samples"])<3:
             return
         e=median(x[1] for x in t["samples"])
@@ -944,8 +944,8 @@ class NativeThresholds:
         self.stable_since=None
         self.phase_since=None
         self.pending=None
-        self.idle=deque()
-        self.running=deque()
+        self.idle=deque(maxlen=256)
+        self.running=deque(maxlen=256)
         self.dirty=False
         self.last_save=None
         self.saved_at=None
