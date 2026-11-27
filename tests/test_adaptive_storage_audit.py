@@ -149,6 +149,58 @@ class ExperimentGuardTests(unittest.TestCase):
         self.assertEqual(g.seconds,0)
         self.assertIsNone(g.window)
 
+    def test_winter_blocks_include_defrost_and_idle_and_reject_idle_only(self):
+        from adaptive.regulator import ContinuousTrial
+        g=ContinuousTrial(duration=1800)
+        trial=None
+        for t in range(0,2701,30):
+            idle=1200<=t<1380
+            d=1500<=t<1680
+            trial=g.observe(self.sample(t,defrost=d,heating=not idle,hz=0 if idle else 25,
+                          requested_hz=0 if idle else 25),21,1 if t<1800 else 2,21,19,True,1000+t)
+        self.assertIsNotNone(trial)
+        self.assertEqual(trial["seconds"],1800)
+        self.assertEqual(trial["defrosts"],1)
+        self.assertEqual(trial["starts"],1)
+        self.assertGreater(trial["idle_seconds"],0)
+        self.assertGreater(trial["defrost_seconds"],0)
+        self.assertEqual(sum(trial[k] for k in ("run_seconds","idle_seconds","defrost_seconds","transition_seconds")),1800)
+        g=ContinuousTrial(duration=1800)
+        for t in range(0,2701,30):
+            self.assertIsNone(g.observe(self.sample(t,hz=0,requested_hz=0,heating=False),21,1,21,19,True,1000+t))
+        self.assertEqual(g.reason,"insufficient_heating")
+
+    def test_winter_partial_windows_survive_restart_and_exclude_gaps(self):
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/".adaptive-experiment.json"
+            since=time.time()-20000
+            path.write_text(json.dumps({"schema":1,"session":{"since":since,"initial":["eco",False],"counts":[1,0,0,0,0,0]}}))
+            r=StorageAudit().runtime(path)
+            def window(i):
+                start=since+100+i*3000
+                return dict(start=start,stop=start+1800,seconds=1800,
+                    outdoor_min=0,outdoor_max=1,target_min=35,target_max=36,room_min=20.8,room_max=21,
+                    run_seconds=1440,idle_seconds=120,defrost_seconds=180,transition_seconds=60,
+                    starts=1,short_cycles=0,defrosts=1,energy=None)
+            r.experiment_windows[0]=[window(i) for i in range(3)]
+            r.save_guard_checkpoint()
+            r=StorageAudit().runtime(path)
+            self.assertEqual(len(r.experiment_windows[0]),3)
+            self.assertEqual(r.experiment_counts()[0],1)
+            r.experiment_windows[0].extend(window(i) for i in range(3,6))
+            result=r.combine_trial_windows(r.experiment_windows[0])
+            self.assertEqual(result["seconds"],10800)
+            self.assertEqual(result["blocks"],6)
+            self.assertEqual(result["defrosts"],6)
+            self.assertGreater(result["stop"]-result["start"],result["seconds"])
+            r.experiment_continuous[0]=result
+            r.experiment_windows[0]=[]
+            r.save_guard_checkpoint()
+            r=StorageAudit().runtime(path)
+            self.assertEqual(r.experiment_continuous[0]["seconds"],10800)
+            self.assertEqual(r.experiment_continuous[0]["starts"],6)
+            self.assertFalse(r.experiment_windows[0])
+
     def test_continuous_trial_checkpoint(self):
         with tempfile.TemporaryDirectory() as d:
             path=Path(d)/".adaptive-experiment.json"
