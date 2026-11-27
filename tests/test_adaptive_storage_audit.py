@@ -129,6 +129,37 @@ class ExperimentGuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ExperimentGuard(dict(g.DEFAULT,water_minutes=0))
 
+    def test_continuous_trial_separate_from_hysteresis(self):
+        from adaptive.regulator import ContinuousTrial
+        g=ContinuousTrial()
+        for t in range(0,11700,30):
+            self.assertIsNone(g.observe(self.sample(t),21,1,21,19,True,1000+t))
+        trial=g.observe(self.sample(11700),21,1,21,19,True,12700)
+        self.assertEqual(trial["seconds"],10800)
+        self.assertEqual(trial["start"],1900)
+        self.assertEqual(trial["stop"],12700)
+        self.assertEqual(g.seconds,0)
+        for t in range(12000,12960,30):
+            g.observe(self.sample(t),21,1,21,19,True,1000+t)
+        self.assertGreater(g.seconds,0)
+        g.observe(self.sample(12960,defrost=True),21,1,21,19,True,13960)
+        self.assertEqual(g.seconds,0)
+        self.assertIsNone(g.window)
+
+    def test_continuous_trial_checkpoint(self):
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/".adaptive-experiment.json"
+            since=time.time()-12000
+            path.write_text(json.dumps({"schema":1,"session":{"since":since,"initial":["eco",False],"counts":[1,0,0,0,0,0]}}))
+            r=StorageAudit().runtime(path)
+            r.experiment_continuous[0]={"start":since+900,"stop":since+11700,"seconds":10800,
+                "outdoor_min":0,"outdoor_max":1,"target_min":35,"target_max":35.5,"room_min":21,"room_max":21.1,"energy":None}
+            r.save_guard_checkpoint()
+            resumed=StorageAudit().runtime(path)
+            self.assertEqual(resumed.experiment_counts()[0],1)
+            self.assertEqual(resumed.experiment_comparison()["rows"][0]["quality"],"continuous")
+            self.assertEqual(resumed.experiment_continuous[0]["seconds"],10800)
+
     def test_guard_checkpoint_preserves_cycles_and_deferrals(self):
         from adaptive.regulator import ExperimentGuard
         with tempfile.TemporaryDirectory() as d:
