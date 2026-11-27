@@ -1541,3 +1541,144 @@ class OperationMonitor:
                     os.unlink(temp)
                 except OSError:
                     pass
+
+
+class PassiveInsights:
+    """Bounded, process-local observations; no control output or file I/O."""
+    WEEK=7*86400
+    GAP=65
+    RESOURCE_PERIOD=900
+    THERMAL_WINDOW=1800
+    SETTLE=600
+
+    def __init__(self):
+        self.resources=deque(maxlen=673)
+        self.thermal=deque(maxlen=336)
+        self.defrosts=deque(maxlen=512)
+        self.last=None
+        self.segment=None
+        self.defrost_start=None
+        self.recovery=None
+
+    def interrupt(self):
+        self.last=self.segment=self.defrost_start=self.recovery=None
+
+    def prune(self,now):
+        for rows in (self.resources,self.thermal,self.defrosts):
+            while rows and rows[0][0]<now-self.WEEK:
+                rows.popleft()
+
+    def resource_due(self,now):
+        return not self.resources or now-self.resources[-1][0]>=self.RESOURCE_PERIOD
+
+    def resource(self,now,data):
+        if not self.resource_due(now):
+            return
+        keys=("VmRSS_bytes","VmHWM_bytes","write_bytes_bytes","threads","open_fds")
+        values={k:data[k] for k in keys if type(data.get(k)) is int and data[k]>=0}
+        if values:
+            self.resources.append((now,values))
+        self.prune(now)
+
+    def stability(self,now,window):
+        rows=[x for x in self.resources if now-window<=x[0]<=now]
+        out={"samples":len(rows),"span_seconds":0,"max_gap_seconds":None,"complete":False}
+        if len(rows)<2:
+            return out
+        span=rows[-1][0]-rows[0][0]
+        if span<=0:
+            return out
+        gap=max(b[0]-a[0] for a,b in zip(rows,rows[1:]))
+        out.update(span_seconds=round(span),max_gap_seconds=round(gap),
+                   complete=span>=window-2*self.RESOURCE_PERIOD and
+                   gap<=2*self.RESOURCE_PERIOD and now-rows[-1][0]<=2*self.RESOURCE_PERIOD)
+        for key in ("VmRSS_bytes","threads","open_fds"):
+            values=[d[key] for _,d in rows if key in d]
+            if len(values)==len(rows):
+                out[key]={"first":values[0],"last":values[-1],"peak":max(values),
+                          "delta":values[-1]-values[0]}
+        a,b=rows[0][1].get("write_bytes_bytes"),rows[-1][1].get("write_bytes_bytes")
+        if a is not None and b is not None and b>=a and span>=3600:
+            out["write_bytes_per_day"]=round((b-a)*86400/span)
+        return out
+
+    def observe(self,s,co_enabled,indoor=None,outdoor=None):
+        now=s.now
+        if not s.fresh or not math.isfinite(now):
+            self.interrupt()
+            return
+        prev=self.last
+        if prev is None or not 0<now-prev[0]<=self.GAP:
+            self.interrupt()
+            prev=None
+        blocked=bool(s.error or s.override or s.dhw)
+        state="blocked" if blocked else "defrost" if s.defrost else "run" if co_enabled and s.hz>0 else "idle" if co_enabled else "other"
+        if prev is not None:
+            old=prev[1]
+            if state=="defrost" and old in ("run","idle"):
+                self.defrost_start=now
+                self.recovery=None
+            elif old=="defrost" and state!="defrost":
+                if self.defrost_start is not None and state in ("run","idle"):
+                    self.recovery=(now,now-self.defrost_start)
+                self.defrost_start=None
+            if self.recovery is not None:
+                ended,duration=self.recovery
+                if state=="run" and now-ended<=1800:
+                    self.defrosts.append((now,duration,now-ended))
+                    self.recovery=None
+                elif state not in ("run","idle") or now-ended>1800:
+                    # Complete defrost but recovery not observed; don't invent a duration.
+                    self.defrosts.append((now,duration,None))
+                    self.recovery=None
+        self.last=(now,state)
+        good=(state in ("run","idle") and type(indoor) in (float,int) and
+              type(outdoor) in (float,int) and -10<indoor<45 and -50<outdoor<50)
+        if not good:
+            self.segment=None
+        else:
+            seg=self.segment
+            if seg is None or seg["state"]!=state or abs(indoor-seg["last_indoor"])>0.5:
+                self.segment={"state":state,"since":now,"start":None,"last_indoor":indoor}
+            else:
+                seg["last_indoor"]=indoor
+                if now-seg["since"]>=self.SETTLE:
+                    if seg["start"] is None:
+                        seg.update(start=now,indoor=indoor,out_min=outdoor,out_max=outdoor,
+                                   outdoor_sum=outdoor,n=1)
+                    else:
+                        seg["out_min"]=min(seg["out_min"],outdoor)
+                        seg["out_max"]=max(seg["out_max"],outdoor)
+                        seg["outdoor_sum"]+=outdoor
+                        seg["n"]+=1
+                        span=now-seg["start"]
+                        if span>=self.THERMAL_WINDOW:
+                            delta=(indoor+seg["indoor"])/2-seg["outdoor_sum"]/seg["n"]
+                            if seg["out_max"]-seg["out_min"]<=2 and delta>=5:
+                                rate=(indoor-seg["indoor"])*3600/span
+                                self.thermal.append((now,state,span,rate,delta))
+                            seg["start"]=None
+        self.prune(now)
+
+    def summary(self,now):
+        self.prune(now)
+        thermal={}
+        for state in ("run","idle"):
+            rows=[r for r in self.thermal if r[1]==state]
+            thermal[state]={"windows":len(rows),"hours":round(sum(r[2] for r in rows)/3600,2),
+                            "median_k_h":round(median(r[3] for r in rows),3) if len(rows)>=3 else None}
+        # Empirical cooling time scale only, not a measured heat capacity.
+        # Ignore sensor quantization / almost flat or warming idle windows.
+        cooling=[r[4]/(-r[3]) for r in self.thermal if r[1]=="idle" and r[3]<=-0.2]
+        thermal["cooling_windows"]=len(cooling)
+        thermal["cooling_proxy_h"]=round(median(cooling),1) if len(cooling)>=3 else None
+        defrosts=[r for r in self.defrosts if now-86400<=r[0]<=now]
+        recovery=[r[2] for r in defrosts if r[2] is not None]
+        return {"stability_24h":self.stability(now,86400),
+                "stability_7d":self.stability(now,self.WEEK),
+                "thermal":thermal,
+                "defrost_24h":{"completed":len(defrosts),
+                    "median_seconds":median(r[1] for r in defrosts) if defrosts else None,
+                    "recovery_samples":len(recovery),
+                    "recovery_median_seconds":median(recovery) if recovery else None},
+                "scope":"RAM only; resets on process restart"}
