@@ -746,6 +746,8 @@ class Runtime:
             result.append({"mode":pair[0],"flimit":pair[1],"completed":counts[i],
                 "retained":len(rows),"run_seconds":med(1),"stop_fact":med(2),
                 "stop_delta":med(3),"outdoor":med(4),
+                "short_cycles":sum(1 for r in rows if r[1] is not None and 0<r[1]<600),
+                "duration_samples":sum(1 for r in rows if r[1] is not None),
                 "quality":"complete" if len(rows)>=self.EXPERIMENT_CYCLES else "partial"})
         outdoor=[r["outdoor"] for r in result if r["outdoor"] is not None]
         spread=max(outdoor)-min(outdoor) if len(outdoor)>=2 else None
@@ -1158,7 +1160,7 @@ class Runtime:
             result["threads"]=int(next(line.split()[1] for line in Path("/proc/self/status").read_text().splitlines() if line.startswith("Threads:")))
         except (OSError,ValueError,IndexError,StopIteration):
             pass
-        result["serial"]=dict(self.g.get("_hpi_serial_stats",{}))
+        result["serial"]=dict(getattr(self,"g",{}).get("_hpi_serial_stats",{}))
         return result
 
     def view(self):
