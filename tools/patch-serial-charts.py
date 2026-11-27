@@ -44,6 +44,10 @@ def _hpi_send(register, frame, timeout_s=12.0):
     global _hpi_command, newframe, writed
     if event.is_set():
         return False
+    if (not isinstance(register,(list,tuple)) or not isinstance(frame,(list,tuple))
+            or len(register)!=len(frame) or len(frame) not in (1,6)
+            or any(type(v) is not int or not 0<=v<=65535 for v in frame)):
+        return False
     # The reader must never acquire this controller-side lock.
     with _am.serial_lock:
         with _hpi_mailbox_lock:
@@ -97,9 +101,17 @@ def _hpi_save_charts():
     with _hpi_chart_lock:
         rows=[collections.deque(globals()[name],maxlen=8640) for name in names]
     path=os.path.realpath("charts.pkl")
+    try:
+        st=os.stat(path)
+    except FileNotFoundError:
+        st=None
     fd,tmp=tempfile.mkstemp(prefix=".charts-",dir=os.path.dirname(path))
     try:
         with os.fdopen(fd,"wb") as stream:
+            if st is not None:
+                os.fchmod(stream.fileno(),st.st_mode & 0o777)
+                if os.geteuid()==0:
+                    os.fchown(stream.fileno(),st.st_uid,st.st_gid)
             pickle.dump(rows,stream)
             stream.flush()
             os.fsync(stream.fileno())
@@ -209,6 +221,10 @@ def patch(source):
     once("        global writed\n        if count == 6:","        if count == 6:")
     once("        time.sleep(1)\n        modbus.connect()\n        for x in range(5):\n            time.sleep(1)",
          "        if event.wait(1) or time.monotonic() >= deadline:\n            return False\n        if not modbus.connect():\n            return False\n        for x in range(5):\n            if event.wait(1) or time.monotonic() >= deadline:\n                return False")
+    once('                logging.info(f"Modbus write result: {result}")\n                time.sleep(0.1)',
+         '                logging.info(f"Modbus write result: {result}")\n                if result.isError():\n                    continue\n                time.sleep(0.1)')
+    once('                result=modbus.read_holding_registers(register, count, unit=17)\n                logging.info(f"Newframe[0]: {newframe[0]}")',
+         '                result=modbus.read_holding_registers(register, count, unit=17)\n                if result.isError() or len(result.registers)!=count:\n                    return False\n                logging.info(f"Newframe[0]: {newframe[0]}")')
     once('                    writed = "1"\n                    break','                    return True')
     once('        modbus.close()\n        gpiocontrol("modbus","0")\n        return True','        return False')
     once('            WriteRegisters(len(newframe[1]))\n        except:\n            gpiocontrol("modbus", "0")',
