@@ -1146,6 +1146,19 @@ class Runtime:
                         result[key + "_bytes"] = int(value.split()[0]) * multiplier
             except (OSError, ValueError, IndexError):
                 pass
+        try:
+            # Linux /proc starttime is clock ticks since boot, not wall time.
+            fields=Path("/proc/self/stat").read_text().rsplit(")",1)[1].split()
+            uptime=time.monotonic()-int(fields[19])/os.sysconf("SC_CLK_TCK")
+            if uptime>0:
+                result["uptime_seconds"]=round(uptime)
+                if uptime>=3600 and "write_bytes_bytes" in result:
+                    result["write_bytes_per_day"]=round(result["write_bytes_bytes"]*86400/uptime)
+            result["open_fds"]=max(0,len(os.listdir("/proc/self/fd"))-1)
+            result["threads"]=int(next(line.split()[1] for line in Path("/proc/self/status").read_text().splitlines() if line.startswith("Threads:")))
+        except (OSError,ValueError,IndexError,StopIteration):
+            pass
+        result["serial"]=dict(self.g.get("_hpi_serial_stats",{}))
         return result
 
     def view(self):
