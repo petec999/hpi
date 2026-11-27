@@ -185,7 +185,10 @@ class EnergyMonitor:
             if resp.status_code!=200:
                 raise ValueError("HA request failed")
             raw=bytearray()
+            deadline=time.monotonic()+5
             for chunk in resp.iter_content(4096):
+                if time.monotonic()>deadline:
+                    raise ValueError('HA response deadline')
                 raw.extend(chunk)
                 if len(raw)>32768:
                     raise ValueError("HA response too large")
@@ -223,6 +226,22 @@ class EnergyMonitor:
             except Exception:
                 failures.append(field)
         return values,failures
+
+    def probe(self,data):
+        cfg=validate(data)
+        self.check_topics(cfg)
+        # MQTT testing uses existing subscriptions; never subscribe to draft topics.
+        with self.lock:
+            if self.busy or (getattr(self,"last_probe",None) is not None and time.monotonic()-self.last_probe<10):
+                raise ValueError("Odczyt zajęty lub test wykonywany zbyt często")
+            self.last_probe=time.monotonic()
+            self.busy=True
+        try:
+            values,failures=self.read_values(cfg)
+            return {"values":values,"missing":failures,"mqtt_requires_saved_settings":bool(self.mqtt_topics(cfg)-self.mqtt_topics(self.settings()))}
+        finally:
+            with self.lock:
+                self.busy=False
 
     def poll(self,now,state):
         self.sync_mqtt()
