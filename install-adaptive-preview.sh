@@ -20,7 +20,7 @@ FILES=(
   patches/stable-gpio.py patches/stable-mqtt.py
   tools/install-mqtt-watchdog.py tools/install-1454-core.py
   tools/install-web-ui-v2.py tools/patch-adaptive-preview.py
-  tools/patch-core-resources.py tools/patch-serial-charts.py tools/install-adaptive-preview.py
+  tools/patch-core-resources.py tools/patch-serial-charts.py tools/patch-local-auth.py tools/install-adaptive-preview.py
 )
 for path in "${FILES[@]}"; do
   mkdir -p "$STAGE/$(dirname "$path")"
