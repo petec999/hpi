@@ -143,6 +143,9 @@ class ExperimentGuardTests(unittest.TestCase):
             g.observe(self.sample(t),21,1,21,19,True,1000+t)
         self.assertGreater(g.seconds,0)
         g.observe(self.sample(12960,defrost=True),21,1,21,19,True,13960)
+        self.assertGreater(g.seconds,0)
+        self.assertIsNotNone(g.window)
+        g.observe(self.sample(13000,dhw=True),21,1,21,19,True,14000)
         self.assertEqual(g.seconds,0)
         self.assertIsNone(g.window)
 
