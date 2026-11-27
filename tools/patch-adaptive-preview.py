@@ -357,8 +357,9 @@ def status_ui(html):
         html=once(html,'<p id="am-experiment"></p>','<p id="am-experiment"></p><details><summary>Diagnostyka systemowa RAM / SD</summary><p id="am-storage-diagnostics"></p><p id="am-storage-files"></p><small>Zapisy procesu od uruchomienia, nie fizyczne zużycie karty SD. Bez zapisywania historii diagnostyki.</small></details>')
         html=once(html,' const ex=v.experiment;', ''' const sd=v.storage_diagnostics||{};
  const mib=x=>Number.isFinite(x)?(x/1048576).toFixed(2)+" MiB":"—";
- $("am-storage-diagnostics").textContent="RAM: "+mib(sd.VmRSS_bytes)+" · maksimum: "+mib(sd.VmHWM_bytes)+" · wolne: "+mib(sd.disk_free_bytes)+" / "+mib(sd.disk_total_bytes)+" · zapisy procesu: "+mib(sd.write_bytes_bytes);
+ $("am-storage-diagnostics").textContent="RAM: "+mib(sd.VmRSS_bytes)+" · maksimum: "+mib(sd.VmHWM_bytes)+" · wolne: "+mib(sd.disk_free_bytes)+" / "+mib(sd.disk_total_bytes)+" · zapisy procesu: "+mib(sd.write_bytes_bytes)+" · średnio: "+mib(sd.write_bytes_per_day)+"/dobę · wątki: "+(sd.threads??"—")+" · FD: "+(sd.open_fds??"—");
  $("am-storage-files").textContent=Object.entries(sd.state_files||{}).map(([k,n])=>k+": "+mib(n)).join(" · ");
+ if(sd.serial && Object.keys(sd.serial).length){const x=sd.serial;$("am-storage-files").textContent+=" · RS485: "+x.valid+" poprawnych / "+x.crc_errors+" CRC / "+x.short_frames+" niepełnych / "+x.reconnects+" ponownych otwarć / "+x.write_timeouts+" timeoutów zapisu";}
  const ex=v.experiment;''')
     # Presentation only: keep control values and runtime policy unchanged.
     if 'id="am-test-progress"' not in html:
