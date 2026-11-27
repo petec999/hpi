@@ -7,7 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 from adaptive.energy import EnergyMonitor
-from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch, HeaterCounter, OperationMonitor, PassiveInsights
+from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch, HeaterCounter, OperationMonitor, PassiveInsights, ExperimentGuard
 
 class SelectionBlocked(ValueError):
     """Safe, fixed activation reason exposed to authenticated UI."""
@@ -54,6 +54,12 @@ class Runtime:
         self.experiment_path=Path(learning_path).with_name(".adaptive-experiment-v1.json") if learning_path else None
         self.experiment_saved=False
         self.experiment_error=None
+        self.experiment_guard_path=Path(learning_path).with_name('.adaptive-experiment-guard-v1.json') if learning_path else None
+        self.experiment_guard_error=None
+        self.experiment_guard=ExperimentGuard()
+        self.experiment_deferred=[None]*len(self.EXPERIMENT_LEVELS)
+        self.experiment_recovering=False
+        self.load_experiment_guard()
         self.load_experiment()
         self.last_tick=0
         self.pending=None
@@ -91,6 +97,7 @@ class Runtime:
             metrics=session.get("metrics",[[] for _ in self.EXPERIMENT_LEVELS])
             if not isinstance(metrics,list) or len(metrics)!=len(self.EXPERIMENT_LEVELS) or any(not isinstance(g,list) or len(g)>self.EXPERIMENT_CYCLES or any(not isinstance(x,list) or len(x)!=5 or any(v is not None and (type(v) not in (int,float) or not math.isfinite(v)) for v in x) or x[0] is None for x in g) for g in metrics):
                 raise ValueError("invalid experiment metrics")
+            self.load_experiment_guard_state(session)
             self.experiment_metrics=metrics
             self.experiment_counts_saved=counts
             self.experiment_watermark=watermark
@@ -103,6 +110,10 @@ class Runtime:
             self.experiment_error="Nie można odczytać zapisu eksperymentu"
 
     def persist_experiment(self,session):
+        if session is not None and session.get('since')==self.experiment_since:
+            session=dict(session,guard_reference=getattr(getattr(self,'experiment_guard',None),'reference',None),
+                         deferred=getattr(self,'experiment_deferred',[None]*len(self.EXPERIMENT_LEVELS)),
+                         recovering=bool(getattr(self,'experiment_recovering',False)))
         temp=None
         try:
             if self.experiment_path is not None:
@@ -131,6 +142,128 @@ class Runtime:
                     os.unlink(temp)
                 except OSError:
                     pass
+
+
+    def load_experiment_guard(self):
+        if self.experiment_guard_path is None:
+            return
+        try:
+            p=self.experiment_guard_path
+            if p.is_symlink() or p.stat().st_size>2048:
+                raise ValueError("Invalid guard settings file")
+            self.experiment_guard=ExperimentGuard(json.loads(p.read_text(encoding="utf-8")))
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError):
+            self.experiment_guard_error="Błąd ustawień ochrony; użyto bezpiecznych wartości domyślnych"
+
+    def guard_settings(self):
+        return dict(self.experiment_guard.cfg)
+
+    def save_experiment_guard(self,value,expected):
+        value=ExperimentGuard.validate(value)
+        expected=ExperimentGuard.validate(expected)
+        with self.lock:
+            if self.pending is not None or self.control=="experiment" or self.guard_settings()!=expected:
+                raise SelectionBlocked("Zatrzymaj test, odśwież ustawienia i spróbuj ponownie")
+            if value==expected:
+                return
+            temp=None
+            try:
+                p=self.experiment_guard_path
+                if p is not None:
+                    if p.is_symlink():
+                        raise ValueError("Invalid guard settings path")
+                    fd,temp=tempfile.mkstemp(prefix=".experiment-guard-",dir=p.parent)
+                    with os.fdopen(fd,"w",encoding="utf-8") as f:
+                        json.dump(value,f,allow_nan=False)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(temp,p)
+                    temp=None
+                self.experiment_guard.cfg=value
+                self.experiment_guard.reset()
+                self.experiment_guard_error=None
+            except (OSError,ValueError):
+                self.experiment_guard_error="Nie można zapisać ustawień ochrony"
+                raise SelectionBlocked(self.experiment_guard_error) from None
+            finally:
+                if temp is not None:
+                    try: os.unlink(temp)
+                    except OSError: pass
+
+    def load_experiment_guard_state(self,session):
+        # Older checkpoints contain no guard metadata.
+        ref=session.get("guard_reference")
+        deferred=session.get("deferred",[None]*len(self.EXPERIMENT_LEVELS))
+        recovering=session.get("recovering",False)
+        if ref is not None and not ExperimentGuard.valid_room(ref):
+            raise ValueError("Invalid room reference")
+        if type(recovering) is not bool or not isinstance(deferred,list) or len(deferred)!=len(self.EXPERIMENT_LEVELS):
+            raise ValueError("Invalid guard state")
+        for record in deferred:
+            if record is None:
+                continue
+            if not isinstance(record,dict) or set(record)!={"at","outdoor","room","target","two","reason"} or record["reason"] not in ("room_shortfall","water_shortfall"):
+                raise ValueError("Invalid deferral")
+            for key,lo,hi in (("at",session["since"],time.time()+60),("outdoor",-60,60),("room",5,40),("target",10,65),("two",-10,85)):
+                v=record[key]
+                if v is None and key in ("outdoor","room"):
+                    continue
+                if type(v) not in (int,float) or not math.isfinite(v) or not lo<=v<=hi:
+                    raise ValueError("Invalid deferral value")
+        self.experiment_deferred=deferred
+        self.experiment_recovering=recovering
+        if not hasattr(self,"experiment_guard"):
+            self.experiment_guard=ExperimentGuard()
+        self.experiment_guard.reference=ref
+
+    def save_guard_checkpoint(self):
+        counts,watermark=self.experiment_progress()
+        metrics=self.experiment_samples()
+        self.persist_experiment({"since":self.experiment_since,"initial":list(self.experiment_initial),
+                                 "counts":counts,"watermark":watermark,"metrics":metrics})
+        self.experiment_counts_saved=counts
+        self.experiment_watermark=watermark
+        self.experiment_metrics=metrics
+
+    def guard_view(self):
+        guard=getattr(self,"experiment_guard",None)
+        if guard is None:
+            guard=ExperimentGuard()
+        return dict(guard.view(),deferred=getattr(self,"experiment_deferred",[None]*len(self.EXPERIMENT_LEVELS)),
+                    recovering=getattr(self,"experiment_recovering",False),settings_error=getattr(self,"experiment_guard_error",None))
+
+    def guard_recover(self,s,zone,curve):
+        # Safety recovery is a capacity increase only: release FLimit first,
+        # then select the native Turbo preset. No demand/target/START/STOP writes.
+        if (s.mode,s.relay)==("turbo",False):
+            return
+        with self.serial_lock:
+            current,z,target,_=self.snapshot()
+            if (self.activation_reason(current,z,target) is not None or not self.gpio("heatdemandpin")
+                    or not self.flag(self.raw("pch")) or (current.mode,current.relay)!=(s.mode,s.relay)
+                    or abs(current.target-s.target)>.25 or self.g.get("newframe")):
+                return
+            running=current.heating and current.hz>0 and current.requested_hz>0
+            if not running and not self.idle_snapshot_valid(current,z,target):
+                return
+            if running and current.supply_temp>=current.target+self.thresholds.model(current)["stop"]["offset"]-self.reg.cfg.stop_margin:
+                return
+            mode,relay=(current.mode,False) if current.relay else ("turbo",False)
+            issued=time.monotonic()
+            self.pending=(mode,relay,issued+90,issued)
+            self.observer.interrupt("context_changed",time.time())
+            self.experiment_idle=None
+            self.report_event("issued","Ochrona komfortu: "+mode+" / FLimit OFF")
+            if current.relay:
+                _,ok=self.g["flimitchange"]("0")
+                if ok!="success" or self.gpio("freqlimitpin"):
+                    self.fail("experiment recovery FLimit readback mismatch")
+            else:
+                _,ok=self.g["new_presetchange"](mode)
+                if ok is not True:
+                    self.fail("experiment recovery preset write not acknowledged")
 
     def load_owner(self):
         if self.resume_path is None:
@@ -407,6 +540,11 @@ class Runtime:
                 self.experiment_watermark=0
                 self.experiment_since=since
                 self.experiment_initial=initial
+                self.experiment_deferred=[None]*len(self.EXPERIMENT_LEVELS)
+                self.experiment_recovering=False
+                self.experiment_guard.reference=self.fresh_room_sensor('intemp',time.time())
+                self.save_guard_checkpoint()
+            self.experiment_guard.reset()
             self.control=mode
             self.report_event("owner","selected "+mode)
             self.report.interrupt()
@@ -680,7 +818,7 @@ class Runtime:
                 self.report.observe(s,self.control,eligible,wall,outdoor)
             except Exception:
                 self.report.interrupt()
-            self.observer.observe(s,self.control,eligible and self.pending is None,wall,outdoor=outdoor,reason=reason)
+            self.observer.observe(s,"manual" if self.control=="experiment" and self.experiment_recovering else self.control,eligible and self.pending is None,wall,outdoor=outdoor,reason=reason)
             try:
                 self.thresholds.observe(s,eligible and self.pending is None,wall,self.control)
             except Exception:
@@ -758,6 +896,7 @@ class Runtime:
                 "stop_delta":med(3),"outdoor":med(4),
                 "short_cycles":sum(1 for r in rows if r[1] is not None and 0<r[1]<600),
                 "duration_samples":sum(1 for r in rows if r[1] is not None),
+                "deferred":getattr(self,"experiment_deferred",[None]*len(self.EXPERIMENT_LEVELS))[i],
                 "quality":"complete" if len(rows)>=self.EXPERIMENT_CYCLES else "partial"})
         groups=self.experiment_samples()
         outdoor=[sample[4] for rows in groups for sample in rows if sample[4] is not None]
@@ -777,7 +916,7 @@ class Runtime:
             if r["duration_samples"]>=3 and r["short_cycles"]>=2:
                 observations.append(r["mode"]+(" + FLimit" if r["flimit"] else " / FLimit OFF")+": co najmniej 2 z 3 cykli poniżej 10 min; sprawdź taktowanie i zapotrzebowanie.")
         return {"since":self.experiment_since,"per_level":self.EXPERIMENT_CYCLES,"rows":result,
-                "outdoor_spread":spread,"comparable":comparable,"observations":observations,
+                "outdoor_spread":spread,"comparable":comparable,"observations":observations,"guard":self.guard_view(),
                 "assessment":"Porównanie opisowe: podobna pogoda, brak pomiaru energii" if comparable else
                     "Za mało cykli lub zbyt różne / nieznane warunki pogodowe"}
 
@@ -798,20 +937,84 @@ class Runtime:
         self.experiment_watermark=watermark
 
     def experiment_tick(self,s,zone,curve):
-        # Opt-in, native idle only. Never change demand, water target or Fset.
+        # Regular experiment changes occur at native idle. Comfort recovery
+        # is the only permitted running change and can only increase capacity.
         counts=self.experiment_counts()
-        idx=next((i for i,n in enumerate(counts) if n<self.EXPERIMENT_CYCLES),None)
-        done=idx is None
-        goal=self.experiment_initial if done else self.EXPERIMENT_LEVELS[idx]
         actual=(s.mode,s.relay)
-        label=lambda x:x[0]+("+FLimit" if x[1] else " / FLimit OFF")
-        self.status={"reason":"experiment: passive during active cycle","reason_pl":"Eksperyment – obserwacja cyklu, bez zmian podczas pracy",
-                     "risk":"paused","actual":label(actual),"proposed":label(goal),"target":s.target,
-                     "return_temp":s.return_temp}
-        if self.activation_reason(s,zone,curve) is not None or not self.gpio("heatdemandpin"):
+        wall=time.time()
+        room=self.fresh_room_sensor("intemp",wall)
+        outdoor=self.fresh_room_sensor("outtemp",wall)
+        eligible=self.activation_reason(s,zone,curve) is None and self.gpio("heatdemandpin") and self.flag(self.raw("pch"))
+        before_ref=self.experiment_guard.reference
+        decision=self.experiment_guard.observe(s,room,eligible,self.experiment_recovering)
+        self.status={"reason":"experiment observation","reason_pl":"Eksperyment – obserwacja cyklu, bez zmian podczas pracy",
+                     "risk":"paused","actual":s.mode+(" + FLimit" if s.relay else " / FLimit OFF"),
+                     "target":s.target,"return_temp":s.return_temp,"supply_temp":s.supply_temp}
+        if not eligible:
             self.experiment_idle=None
             self.status["reason_pl"]="Eksperyment wstrzymany – warunek priorytetowy lub brak zapotrzebowania"
             return
+        if decision in ("room_shortfall","water_shortfall") and not self.experiment_recovering:
+            i=self.EXPERIMENT_LEVELS.index(actual)
+            self.experiment_deferred[i]={"at":wall,"outdoor":outdoor,"room":room,"target":s.target,
+                                         "two":s.supply_temp,"reason":decision}
+            self.experiment_recovering=True
+            self.experiment_guard.reset()
+            self.observer.interrupt("context_changed",wall)
+            self.experiment_idle=None
+            self.report_event("fault","Ochrona komfortu: odłożono "+self.status["actual"]+" ("+decision+")")
+            try:
+                self.save_guard_checkpoint()
+            except SelectionBlocked:
+                # Restore capacity even if disk persistence failed. Never
+                # automatically resume weaker testing until checkpoint succeeds.
+                pass
+        elif before_ref is None and self.experiment_guard.reference is not None:
+            try: self.save_guard_checkpoint()
+            except SelectionBlocked: pass
+        remaining=[i for i,n in enumerate(counts) if n<self.EXPERIMENT_CYCLES]
+        candidates=[i for i in remaining if self.experiment_guard.can_retry(self.experiment_deferred[i],outdoor)]
+        done=not remaining
+        if self.experiment_recovering:
+            self.status.update(reason_pl="Ochrona komfortu – przywracanie mocy: Turbo / FLimit OFF",
+                               proposed="turbo / FLimit OFF",risk="shortfall")
+            self.experiment_idle=None
+            if actual!=("turbo",False):
+                self.guard_recover(s,zone,curve)
+                return
+            if self.experiment_error:
+                try: self.save_guard_checkpoint()
+                except SelectionBlocked: return
+            if decision!="recovered":
+                self.status["reason_pl"]="Ochrona komfortu – Turbo bez limitu; oczekiwanie na stabilizację"
+                return
+            if not done and not candidates:
+                self.status["reason_pl"]="Komfort odzyskany – oczekiwanie na cieplejsze warunki do pozostałych prób"
+                return
+            # Re-enter the experiment only in native idle, not mid-cycle.
+            if not self.idle_snapshot_valid(s,zone,curve):
+                self.status["reason_pl"]="Komfort odzyskany – oczekiwanie na naturalny STOP"
+                return
+            self.experiment_recovering=False
+            try:
+                self.save_guard_checkpoint()
+            except SelectionBlocked:
+                self.experiment_recovering=True
+                return
+            self.experiment_guard.reset()
+            self.observer.interrupt("context_changed",wall)
+        if not done and not candidates:
+            # E.g. after manually resuming a saved session in cold weather.
+            # Do not keep a deferred restricted configuration running.
+            self.experiment_recovering=True
+            self.experiment_guard.reset()
+            try: self.save_guard_checkpoint()
+            except SelectionBlocked: pass
+            self.status["reason_pl"]="Pozostałe próby odłożone – ochrona komfortu"
+            self.guard_recover(s,zone,curve)
+            return
+        goal=self.experiment_initial if done else self.EXPERIMENT_LEVELS[candidates[0]]
+        self.status["proposed"]=goal[0]+(" + FLimit" if goal[1] else " / FLimit OFF")
         if not self.idle_snapshot_valid(s,zone,curve):
             self.experiment_idle=None
             return
@@ -913,7 +1116,7 @@ class Runtime:
                     co=bool(power&1 and power&4 and not power&2) and self.flag(self.raw("pch"))
                     group=('fault' if sample.error else 'defrost' if sample.defrost else 'protection' if sample.override else 'dhw' if sample.dhw else 'co_run' if co and sample.hz>0 else 'co_idle' if co else 'other')
                     mode=sample.mode+(' + FLimit' if sample.relay else ' / FLimit OFF')
-                    session=self.experiment_since if self.control=='experiment' and self.experiment_saved else None
+                    session=self.experiment_since if self.control=='experiment' and self.experiment_saved and not self.experiment_recovering else None
                     state=(group,mode,sample.supply_temp-sample.return_temp,session)
             except Exception:
                 pass
@@ -1249,4 +1452,4 @@ class Runtime:
                         experiment={"counts":self.experiment_counts(),"levels":[m+("+FLimit" if l else " / OFF") for m,l in self.EXPERIMENT_LEVELS],
                                     "per_level":self.EXPERIMENT_CYCLES,"since":self.experiment_since,
                                     "resume_available":self.experiment_saved and self.control!="experiment",
-                                    "initial":self.experiment_initial,"storage_error":self.experiment_error})
+                                    "initial":self.experiment_initial,"storage_error":self.experiment_error,"guard":self.guard_view()})
