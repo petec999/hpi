@@ -220,6 +220,11 @@ def patch(source):
     source=replace_func(source,"ReadPump",READER)
     source=replace_func(source,"set_newframe","def set_newframe(register, frame):\n    return _hpi_send(register,frame)")
     source=replace_func(source,"_send_and_wait","def _send_and_wait(frame, timeout_s=12.0):\n    return _hpi_send(R101,frame,timeout_s)",parent="statechange")
+    # Do not let another caller interleave the wake-up and target mode writes.
+    once('            ok = True\n            if (not _is_on) and str(newstate).strip().lower() != \'off\':',
+         '            with _am.serial_lock:\n                ok = True\n                if (not _is_on) and str(newstate).strip().lower() != \'off\':')
+    once('                ok = _send_and_wait(PyHaier.SetState(R101, "on"), timeout_s=12.0)\n                # tiny pause so ReadPump can refresh R101; not required but helps with stability\n                time.sleep(0.3)\n\n            if ok:\n                ok = _send_and_wait(PyHaier.SetState(R101, newstate), timeout_s=12.0)',
+         '                    ok = _send_and_wait(PyHaier.SetState(R101, "on"), timeout_s=12.0)\n                    # Wait for the next observed state as in the original code.\n                    time.sleep(0.3)\n\n                if ok:\n                    ok = _send_and_wait(PyHaier.SetState(R101, newstate), timeout_s=12.0)')
     # Collect a complete chart row before publishing it; readers see all or none.
     once('    if _do_chart: datechart.append(str(now))','    _chart_row={}\n    if _do_chart: _chart_row["datechart"]=str(now)')
     pattern=r'(?m)^    if _do_chart: (\w+)\.append\((.*)\)$'
