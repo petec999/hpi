@@ -191,19 +191,31 @@ def health():
             return
         time.sleep(5)
     raise RuntimeError("No fresh pump telemetry")
+def status(operation,state,message):
+    atomic(directory()/".last-operation.json",json.dumps({"operation":operation,"state":state,"message":message,"at":time.time()}).encode("utf-8"))
+def last_operation():
+    try:
+        return json.loads(stable_read(directory()/".last-operation.json"))
+    except (OSError,ValueError):
+        return None
 def restore(name):
     # Only local private backups. Never restore an uploaded or untrusted
     # archive: application Python and pickle are executable content.
     with locked():
         data=validate(archive_path(name))
         if not active("haier.service"): raise ValueError("Restore requires a working installation")
-        pre=create(rotate=False)
-        old=sources()
         notify=active("haierpi-notify.timer")
-        if notify: ctl("stop","haierpi-notify.timer","haierpi-notify.service")
+        pre=None
         touched=[]
+        stopped=False
         try:
+            if notify: ctl("stop","haierpi-notify.timer","haierpi-notify.service")
             ctl("stop","haier.service")
+            stopped=True
+            # Snapshot after shutdown, including last writes made by the
+            # service. Keep the pre-restore archive even if restore fails.
+            pre=create(rotate=False)
+            old=validate(archive_path(pre))
             for n,b in data.items():
                 p=Path("/")/n
                 if p.is_symlink(): raise ValueError("Unexpected symlink")
@@ -215,13 +227,16 @@ def restore(name):
             ctl("start","haier.service")
             health()
             print("Restore OK; pre-restore backup: "+pre)
+            return pre
         except BaseException:
-            ctl("stop","haier.service")
-            for p,b,mode in reversed(touched):
-                if b is None: p.unlink(missing_ok=True)
-                else: atomic(p,b,mode)
-            ctl("start","haier.service")
-            print("Restore failed; rollback attempted. Backup: "+pre)
+            if stopped:
+                if touched:
+                    ctl("stop","haier.service")
+                    for p,b,mode in reversed(touched):
+                        if b is None: p.unlink(missing_ok=True)
+                        else: atomic(p,b,mode)
+                ctl("start","haier.service")
+            print("Restore failed; rollback attempted. Backup: "+str(pre))
             raise
         finally:
             if notify: ctl("start","haierpi-notify.timer")
@@ -251,8 +266,24 @@ def main():
     a=p.parse_args()
     if a.setup: setup()
     elif a.create:
-        with locked(): print(create())
-    elif a.restore: restore(a.restore)
+        with locked():
+            status("backup","running","Tworzenie kopii")
+            try:
+                name=create()
+                status("backup","success","Utworzono: "+name)
+                print(name)
+            except Exception:
+                status("backup","error","Nie utworzono kopii. Sprawdź dziennik usługi.")
+                raise
+    elif a.restore:
+        # The restore unit is singleton. A lock conflict or failure is visible.
+        status("restore","running","Przywracanie: "+a.restore)
+        try:
+            pre=restore(a.restore)
+            status("restore","success","Przywrócono kopię. Kopia sprzed przywrócenia: "+pre)
+        except Exception:
+            status("restore","error","Przywracanie nieudane. Sprawdź dziennik i stan HaierPi; podjęto próbę rollbacku, jeśli zmieniono pliki.")
+            raise
     elif a.verify: print("OK:",len(validate(archive_path(a.verify))),"files")
     else: print(json.dumps(archives()))
 if __name__=="__main__":
