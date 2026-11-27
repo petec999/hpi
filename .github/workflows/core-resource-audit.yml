@@ -15,5 +15,6 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: bash -n install-adaptive-preview.sh
-      - run: python -m py_compile tools/patch-core-resources.py tools/install-adaptive-preview.py
+      - run: python -m py_compile tools/patch-core-resources.py tools/patch-serial-charts.py tools/install-adaptive-preview.py
       - run: python -m unittest discover -s tests -p test_core_resources.py -v
+      - run: python -m unittest discover -s tests -p test_serial_charts.py -v
