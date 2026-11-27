@@ -64,6 +64,7 @@ class EnergyMonitor:
         self.g=g
         self.path=Path(path) if path else None
         self.lock=threading.RLock()
+        self.sync_lock=threading.Lock()
         self.cfg=dict(DEFAULT)
         self.generation=0
         self.busy=False
@@ -139,23 +140,42 @@ class EnergyMonitor:
             self.mqtt_values={}
         self.sync_mqtt()
 
-    def sync_mqtt(self):
+    def mqtt_disconnect(self,client):
         with self.lock:
-            client=self.client
-            wanted=self.mqtt_topics(self.cfg)
-            try:
+            if self.client is client:
+                self.client=None
+                self.subscribed=set()
+                self.mqtt_values={}
+
+    def sync_mqtt(self):
+        # Never invoke Paho while holding the measurement lock: callbacks
+        # can run on a different thread with Paho's internal locks held.
+        if not self.sync_lock.acquire(blocking=False):
+            return
+        try:
+            with self.lock:
+                client=self.client
+                wanted=self.mqtt_topics(self.cfg)
                 self.check_topics(self.cfg)
-                if client is None or not client.is_connected():
-                    return
-                for topic in self.subscribed-wanted:
-                    client.unsubscribe(topic)
-                    self.subscribed.discard(topic)
-                for topic in wanted-self.subscribed:
-                    rc,_=client.subscribe(topic,qos=0)
-                    if rc==0:
-                        self.subscribed.add(topic)
-            except Exception:
-                pass
+                subscribed=set(self.subscribed)
+            if client is None or not client.is_connected():
+                return
+            for topic in subscribed-wanted:
+                rc,_=client.unsubscribe(topic)
+                if rc==0:
+                    with self.lock:
+                        if self.client is client:
+                            self.subscribed.discard(topic)
+            for topic in wanted-subscribed:
+                rc,_=client.subscribe(topic,qos=0)
+                if rc==0:
+                    with self.lock:
+                        if self.client is client:
+                            self.subscribed.add(topic)
+        except Exception:
+            pass
+        finally:
+            self.sync_lock.release()
 
     def mqtt_message(self,client,msg):
         with self.lock:
@@ -163,7 +183,9 @@ class EnergyMonitor:
                 return False
             try:
                 self.check_topics(self.cfg)
-                # Retained values have no measurement timestamp.
+            except ValueError:
+                return False
+            try:
                 if not msg.retain and len(msg.payload)<=64:
                     self.mqtt_values[msg.topic]=(time.monotonic(),msg.payload.decode("ascii"))
             except (ValueError,UnicodeError):
