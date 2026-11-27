@@ -137,7 +137,7 @@ def archives():
         if NAME.fullmatch(p.name) and not p.is_symlink() and p.is_file():
             s=p.stat()
             result.append({"name":p.name,"size":s.st_size,"created":s.st_mtime})
-    return sorted(result,key=lambda r:r["name"],reverse=True)
+    return sorted(result,key=lambda r:(r["created"],r["name"]),reverse=True)
 def archive_path(name):
     if not isinstance(name,str) or not NAME.fullmatch(name):
         raise ValueError("Invalid backup name")
@@ -169,7 +169,9 @@ def create(rotate=True):
         try: os.fsync(d)
         finally: os.close(d)
         if rotate:
-            for old in archives()[7:]:
+            # Always retain the new verified archive, even with clock changes.
+            older=[a for a in archives() if a["name"]!=name]
+            for old in older[6:]:
                 archive_path(old["name"]).unlink()
         return name
     finally:
