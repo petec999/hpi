@@ -70,6 +70,7 @@ class EnergyMonitor:
         self.last_poll=None
         self.last=None
         self.current={}
+        self.current_at=None
         self.error=None
         self.mqtt_values={}
         self.subscribed=set()
@@ -124,6 +125,7 @@ class EnergyMonitor:
             self.generation+=1
             self.last_poll=self.last=None
             self.current={}
+            self.current_at=None
             self.error=None
             self.mqtt_values={}
             self.rows.clear()
@@ -258,7 +260,8 @@ class EnergyMonitor:
                 ended=time.monotonic()
                 with self.lock:
                     if generation==self.generation:
-                        self.current=values
+                        self.current=values if ended-now<=20 else {}
+                        self.current_at=ended
                         self.error=("Brak świeżych danych: "+", ".join(failures)) if failures else None
                         self.accept(now,state,values) if ended-now<=20 else self.accept(now,None,{})
             finally:
@@ -334,7 +337,7 @@ class EnergyMonitor:
                 return {k:dict(v,cop_estimate=(v["heat_kwh"]/v["paired_kwh"]
                      if v["paired_seconds"]>=300 and v["paired_kwh"]>=.05 else None)) for k,v in rows.items()}
             return {"settings":dict(self.cfg),"error":self.error,
-                    "current":dict(self.current) if self.last_poll is not None and 0<=now-self.last_poll<=MAX_READ_AGE else {},
+                    "current":dict(self.current) if self.current_at is not None and 0<=now-self.current_at<=MAX_READ_AGE else {},
                     "busy":self.busy,"groups_24h":expose(totals),"modes_24h":expose(modes),
                     "experiment":expose(self.experiment),"session":self.session,
                     "electricity_estimated":not bool(self.cfg["energy"]),"flow_estimated":self.cfg["flow_source"]=="manual",
