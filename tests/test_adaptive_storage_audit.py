@@ -177,6 +177,13 @@ class ExperimentGuardTests(unittest.TestCase):
             self.assertEqual(resumed.experiment_guard.reference,21)
             self.assertTrue(resumed.experiment_recovering)
 
+class NotificationTests(unittest.TestCase):
+    def test_notification_transitions(self):
+        import runpy
+        path=Path(__file__).resolve().parents[1]/"tools/haierpi-notify.py"
+        runpy.run_path(str(path))["selftest"]()
+
+
 class PassiveInsightTests(unittest.TestCase):
     def sample(self,now,hz=0,defrost=False,**kw):
         return SimpleNamespace(now=now,hz=hz,defrost=defrost,fresh=True,
