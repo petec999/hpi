@@ -349,5 +349,32 @@ class BackupTests(unittest.TestCase):
         self.assertIn("systemd-run",result)
         compile(result,"main.py","exec")
 
+class WinterDashboardTests(unittest.TestCase):
+    def test_existing_dashboard_const_collision_and_idempotence(self):
+        import runpy
+        import shutil
+        import subprocess
+        patch=runpy.run_path(str(Path(__file__).resolve().parents[1]/"tools/patch-adaptive-preview.py"))
+        upgrade=patch["winter_status_ui"]
+        html='''<p id="am-continuous-status"></p>
+<script>
+function amPaint(v){
+ const ex=v.experiment;
+ const continuous=[];
+ const reasons={target_changed:"change"};
+ $("am-continuous-status").textContent=ex?"old":"";
+}
+</script>'''
+        fixed=upgrade(html)
+        self.assertIn("const amWinterReasons=",fixed)
+        self.assertEqual(fixed.count("const reasons="),1)
+        broken=fixed.replace("amWinterReasons","reasons")
+        self.assertEqual(upgrade(broken),fixed)
+        self.assertEqual(upgrade(fixed),fixed)
+        node=shutil.which("node")
+        if node:
+            js=fixed.split("<script>",1)[1].split("</script>",1)[0]
+            subprocess.run([node,"--check","-"],input=js,text=True,check=True)
+
 if __name__ == "__main__":
     unittest.main()
