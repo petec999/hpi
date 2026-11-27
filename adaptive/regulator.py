@@ -1243,6 +1243,9 @@ class RegisterWatch:
         if changed:
             self.add(wall,"edge",old,f,oldctx,c,changed)
             self.last_sample=now
+        elif any((old["R141"][i]^f["R141"][i])&mask for i,mask in ((3,0xfe00),(9,0xff00),(10,0xff00),(14,0x001e),(15,0x0010))):
+            self.add(wall,"candidate",old,f,oldctx,c,[])
+            self.last_sample=now
         elif flags["dhw_enabled"]:
             candidate=any((old[bank][i]^f[bank][i])&mask
                           for bank,indices in self.CANDIDATES.items() for i,mask in indices.items())
@@ -1279,6 +1282,79 @@ class RegisterWatch:
                 "current":copy.deepcopy(self.last[1]) if fresh else None,
                 "flags":copy.deepcopy(self.last[3]) if fresh else None,
                 "context":copy.deepcopy(self.last[2]) if fresh else None}
+
+    # Read-only register reference. Existing fields: PyHaier; candidates:
+    # kmalysiak/haier-monoblok-modbus and Elektroda topic3994059.
+    # H/L mean high/low byte; bits numbered 0..15 in the full word.
+    DESCRIPTIONS={
+        101:"H: command/readback; L: bit0 ON, bit1 COOL, bit2 HEAT, bit7 TANK; bit3/5 heater/pump request",
+        102:"H: CO setpoint x0.5 C; L: compensation (raw-30)/2; alternative cooling interpretation unverified",
+        103:"Unknown",104:"Unknown; low nibble preserved by PyHaier writes",
+        105:"H/L unknown; L: alternative DHW setpoint hypothesis, conflicts with R106",
+        106:"H: DHW setpoint x0.5 C; L: DHW compensation (raw-30)/2",
+        141:"H: bit1 DHW, bit2 CO, bit3 antifreeze, bit5 defrost; L: error",
+        142:"Unknown",143:"Unknown",
+        144:"H: bit0 heater, bit1 pump; phase code after masking heater (candidate); L unknown",
+        145:"Unknown",146:"H unknown; L: packed Twi/Two upper nibbles",
+        147:"H: Twi low byte; L: Two low byte",
+        148:"H: packed Thi/Tho upper nibbles; L: Thi low byte",
+        149:"H: Tho low byte; L unknown",
+        150:"H: hours since compressor start (candidate); L unknown",
+        151:"H: duplicate hours counter (candidate); L unknown",
+        152:"Unknown",153:"Unknown",154:"DHW sensor temperature x0.1 C",
+        155:"H unknown; L: bits1 COOL,2 HEAT,3 TANK,4 50% power (candidates)",
+        156:"State mask unknown; bit4 additional defrost indication (candidate)",
+        201:"H unknown/readback; L: 0 Eco, 1 Quiet, 2 Turbo",
+        241:"H: operating mode (candidate); L: last error",
+        242:"Unknown; possible error/status, not confirmed",
+        243:"H unknown; L: actual compressor Hz",
+        244:"H: requested compressor Hz; L: fan1 RPM /5",
+        245:"H: fan2 RPM /5; L unknown",
+        246:"H: EEV position; L: Pd target x0.2",
+        247:"H: Pd actual x0.2; L: packed Pd saturation upper nibbles",
+        248:"H/L: Pd saturation low bytes",
+        249:"H/L: Ps target/actual x0.2",
+        250:"H: packed Ps saturation upper nibbles; L: Ps target saturation low byte",
+        251:"H: Ps actual saturation low byte; L: packed Td/Ts upper nibbles",
+        252:"H/L: Td/Ts low bytes",253:"H: packed Tao/Tdef upper nibbles; L: Tao low byte",
+        254:"H: Tdef low byte; L unknown",255:"H unknown; L: compressor temperature x0.1 C",
+        256:"H: inverter current x0.2 A; L: voltage x4 V",
+        257:"Unknown",258:"Unknown",259:"H: firmware /10; L unknown",
+        260:"H/L: archive errors 1 and 2",261:"H: archive error 3; L: unknown / candidate extra error",
+        262:"H/L: unknown / candidate extra error bytes",
+    }
+    # Separate hypotheses from confirmed PyHaier signals. No control uses this.
+    @classmethod
+    def decode_registers(cls,frames):
+        if not cls.valid(frames):
+            return {"rows":[],"signals":[]}
+        words={int(bank[1:])+i:v for bank,values in frames.items() for i,v in enumerate(values)}
+        def hi(n): return words[n]>>8
+        def lo(n): return words[n]&255
+        def signal(label,address,value,quality,description):
+            return dict(label=label,address=address,value=value,quality=quality,description=description)
+        phase=hi(144)&0xfe
+        phase_names={16:"Postoj",18:"Rozruch",24:"Wygaszanie",26:"Praca"}
+        signals=[
+            signal("Faza pracy","R144 H",phase_names.get(phase,"Nieznana")+" ("+str(phase)+")","candidate","Kod po usunieciu bitu grzalki; sprawdzic z Hz"),
+            signal("Czas od startu 1","R150 H",hi(150),"candidate","Prawdopodobne godziny od startu sprezarki"),
+            signal("Czas od startu 2","R151 H",hi(151),"candidate","Prawdopodobny duplikat R150 H"),
+            signal("Ograniczenie mocy","R155 bit4",bool(words[155]&16),"candidate","Mozliwa flaga 50% mocy; nie utozsamiac automatycznie z FLimit"),
+            signal("Chlodzenie","R155 bit1",bool(words[155]&2),"candidate","Hipoteza stanu pracy"),
+            signal("Grzanie CO","R155 bit2",bool(words[155]&4),"candidate","Hipoteza stanu pracy"),
+            signal("CWU","R155 bit3",bool(words[155]&8),"candidate","Hipoteza stanu pracy"),
+            signal("Defrost dodatkowy","R156 bit4",bool(words[156]&16),"candidate","Porownac z R141 bit13"),
+            signal("Defrost PyHaier","R141 bit13",bool(words[141]&8192),"known","Istniejacy odczyt PyHaier"),
+            signal("Pompa obiegowa","R144 bit9",bool(words[144]&512),"known","Istniejacy odczyt PyHaier"),
+            signal("Grzalka","R144 bit8",bool(words[144]&256),"known","Istniejacy odczyt PyHaier"),
+            signal("Czestotliwosc rzeczywista","R243 L",lo(243),"known","Hz"),
+            signal("Czestotliwosc zadana","R244 H",hi(244),"known","Hz"),
+            signal("Dodatkowe bajty bledow","R261 L / R262 H,L",[lo(261),hi(262),lo(262)],"unknown","Surowe bajty; niepotwierdzona historia bledow"),
+        ]
+        rows=[dict(register=n,value=v,high=v>>8,low=v&255,
+                   bits=[j for j in range(16) if v&(1<<j)],
+                   description=cls.DESCRIPTIONS.get(n,"Unknown")) for n,v in sorted(words.items())]
+        return dict(rows=rows,signals=signals)
 
     def save_if_due(self,now):
         if not self.dirty or self.path is None or (self.last_save is not None and now-self.last_save<self.SAVE_INTERVAL):

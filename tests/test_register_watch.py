@@ -66,6 +66,39 @@ class RegisterWatchTest(unittest.TestCase):
             w.save_if_due(1800)
             self.assertEqual(RegisterWatch(p).events,w.events)
 
+    def test_register_decode_and_co_candidate(self):
+        a=frames()
+        a["R141"][3]=0x1b00
+        a["R141"][9]=0x0200
+        a["R141"][10]=0x0200
+        a["R141"][15]=16
+        d=RegisterWatch.decode_registers(a)
+        self.assertEqual(len(d["rows"]),45)
+        self.assertEqual(len({r["register"] for r in d["rows"]}),45)
+        self.assertEqual(d["signals"][0]["value"],"Praca (26)")
+        self.assertEqual(d["signals"][1]["value"],2)
+        self.assertEqual(d["signals"][0]["quality"],"candidate")
+        self.assertEqual(RegisterWatch.decode_registers({})["rows"],[])
+        w=RegisterWatch()
+        w.observe(a,(0,)*4,{},0,1000)
+        a["R141"][15]=0
+        w.observe(a,(30,)*4,{},30,1030)
+        self.assertEqual(w.events[-1]["kind"],"candidate")
+
+    def test_register_page_patch(self):
+        import ast, runpy, shutil, subprocess
+        p=runpy.run_path(str(Path(__file__).resolve().parents[1]/"tools/patch-adaptive-preview.py"))
+        source="_WV_HTML = "+repr('<a href="/v2/adaptive-report">Raport Adaptive →</a>')+"\n# HOME-IOT WEB UI V2 END\n"
+        s=p["registers_page_api"](source)
+        self.assertEqual(p["registers_page_api"](s),s)
+        compile(s,"test","exec")
+        self.assertIn('@login_required\ndef _wv_registers_json',s)
+        html=ast.literal_eval(next(l for l in s.splitlines() if l.startswith("_WV_REGISTERS_HTML = ")).split("=",1)[1].strip())
+        self.assertIn("/v2/api/registers",html)
+        node=shutil.which("node")
+        if node:
+            subprocess.run([node,"--check","-"],input=html.split("<script>")[1].split("</script>")[0],text=True,check=True)
+
     def test_cap(self):
         w=RegisterWatch()
         a=frames()

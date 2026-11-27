@@ -786,6 +786,19 @@ class Runtime:
             data["heater_counter"]=self.heater_counter.summary(time.monotonic())
             return data
 
+    def register_view(self):
+        # Independent of the selected regulator mode; only cached Modbus frames.
+        with self.lock:
+            now=time.monotonic()
+            with self.frames_lock:
+                f=dict(self.frames)
+            fresh=set(f)==set(self.SIZES) and all(0<=now-t<=self.MAX_AGE for t,_ in f.values())
+            decoded=RegisterWatch.decode_registers({k:list(v) for k,(_,v) in f.items()}) if fresh else {"rows":[],"signals":[]}
+            data=self.register_watch.summary(now)
+            return dict(decoded, fresh=fresh and bool(decoded["rows"]), events=data["events"],
+                        saved_at=data["saved_at"], unsaved=data["unsaved"], storage_error=data["storage_error"],
+                        limit=data["limit"])
+
     def heater_view(self):
         data=self.heater_counter.summary(time.monotonic())
         # Do not silently write OFF or delete a prior ownership marker.
