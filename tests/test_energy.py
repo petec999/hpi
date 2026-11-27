@@ -1,0 +1,128 @@
+import ast
+import json
+import runpy
+import tempfile
+import time
+import unittest
+from datetime import datetime,timezone
+from pathlib import Path
+from types import SimpleNamespace
+from adaptive.energy import EnergyMonitor, DEFAULT, validate, convert
+
+PATCH=runpy.run_path(str(Path(__file__).resolve().parents[1]/"tools/patch-energy.py"))
+class EnergyTests(unittest.TestCase):
+    def configured(self,**kw):
+        m=EnergyMonitor({})
+        m.save(dict(DEFAULT,enabled=True,energy="sensor.energy",flow_source="manual",manual_flow=1.15,**kw))
+        return m
+
+    def test_validation(self):
+        for data in (dict(DEFAULT,enabled=True),dict(DEFAULT,manual_flow=float("nan")),dict(DEFAULT,energy="sensor.x/../../abc"),dict(DEFAULT,energy_unit="J")):
+            with self.assertRaises(ValueError):
+                validate(data)
+        self.assertAlmostEqual(convert("flow",20,"l/min"),1.2)
+        self.assertEqual(convert("energy",1200,"Wh"),1.2)
+        m=EnergyMonitor({"mqtt_topic":"haier","ha_mqtt_discovery_prefix":"homeassistant"})
+        with self.assertRaises(ValueError):
+            m.save(dict(DEFAULT,enabled=True,source="mqtt",energy="haier/power/set"))
+
+    def test_counter_and_paired_cop(self):
+        m=self.configured()
+        state=("co_run","eco / FLimit OFF",5,1000)
+        for i in range(11):
+            m.accept(i*30,state,{"energy":10+i*.025,"flow":1.15})
+        d=m.summary(300)
+        b=d["groups_24h"]["co_run"]
+        self.assertAlmostEqual(b["kwh"],.25)
+        self.assertAlmostEqual(b["heat_kwh"],1.163*1.15*5/12)
+        self.assertAlmostEqual(b["cop_estimate"],1.163*1.15*5/3)
+        self.assertAlmostEqual(d["experiment"][state[1]]["kwh"],.25)
+        m.accept(330,("co_idle",state[1],0,1000),{"energy":10.3})
+        self.assertIn("unassigned",m.summary(330)["groups_24h"])
+        m.accept(360,None,{"energy":0})
+        m.accept(600,state,{"energy":1})
+        self.assertAlmostEqual(sum(v["kwh"] for v in m.summary(600)["groups_24h"].values()),.3)
+
+    def test_power_estimate_and_no_flow(self):
+        m=EnergyMonitor({})
+        m.save(dict(DEFAULT,enabled=True,power="sensor.power"))
+        m.accept(0,None,{"power":2})
+        m.accept(60,None,{"power":4})
+        d=m.summary(60)
+        self.assertTrue(d["electricity_estimated"])
+        self.assertAlmostEqual(d["groups_24h"]["unassigned"]["kwh"],.05)
+        self.assertIsNone(d["groups_24h"]["unassigned"]["cop_estimate"])
+
+    def test_ha_freshness_and_units(self):
+        state={"state":"2500","attributes":{"unit_of_measurement":"Wh"},
+               "last_updated":datetime.now(timezone.utc).isoformat()}
+        class Response:
+            status_code=200
+            def __enter__(self):return self
+            def __exit__(self,*args):pass
+            def iter_content(self,n):yield json.dumps(state).encode()
+        def get(url,**kwargs):
+            self.assertEqual(url,"http://ha.local:8123/api/states/sensor.energy")
+            self.assertFalse(kwargs["allow_redirects"])
+            return Response()
+        m=EnergyMonitor({"haaddr":"http://ha.local","haport":"8123","hakey":"fixture","requests":SimpleNamespace(get=get)})
+        self.assertEqual(m.read_ha("sensor.energy","energy","Wh"),2.5)
+        with self.assertRaises(ValueError):
+            m.read_ha("sensor.energy","energy","kWh")
+        state["last_updated"]="2000-01-01T00:00:00Z"
+        with self.assertRaises(ValueError):
+            m.read_ha("sensor.energy","energy","Wh")
+
+    def test_mqtt_exact_topic_and_retained(self):
+        m=EnergyMonitor({"mqtt_topic":"haier"})
+        m.save(dict(DEFAULT,enabled=True,source="mqtt",energy="meter/total"))
+        class Client:
+            def is_connected(self):return True
+            def subscribe(self,topic,qos=0):return (0,1)
+            def unsubscribe(self,topic):return (0,1)
+        c=Client()
+        m.mqtt_connect(c)
+        msg=SimpleNamespace(topic="meter/total",payload=b"12",retain=True)
+        self.assertTrue(m.mqtt_message(c,msg))
+        self.assertEqual(m.read_values(m.cfg)[1],["energy"])
+        msg.retain=False
+        self.assertTrue(m.mqtt_message(c,msg))
+        self.assertEqual(m.read_values(m.cfg)[0]["energy"],12)
+        msg.topic="haier/power/set"
+        self.assertFalse(m.mqtt_message(c,msg))
+
+    def test_config_persist_and_bounded_history(self):
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/"energy.json"
+            m=EnergyMonitor({},path)
+            m.save(dict(DEFAULT,enabled=True,energy="sensor.energy"))
+            self.assertEqual(EnergyMonitor({},path).cfg,m.cfg)
+            self.assertEqual(path.stat().st_mode&0o777,0o600)
+            before=path.stat().st_ino
+            m.save(m.cfg)
+            self.assertEqual(before,path.stat().st_ino)
+            for i in range(4000):
+                m.accept(i*30,None,{"energy":i*.001})
+            self.assertLessEqual(len(m.rows),2881)
+            self.assertLessEqual(m.summary(3999*30)["coverage_seconds"],86430)
+
+    def test_ui_patch(self):
+        fixture=("""
+_WV_HTML = '<nav></nav>'
+_WV_ADAPTIVE_REPORT_HTML = '<header></header>'
+def on_connect(client, userdata, flags, rc):
+    pass
+def on_message(client,userdata,msg):
+    if msg.topic == str(mqtt_topic) + "/haierpi/watchdog_heartbeat":
+        return
+# HOME-IOT WEB UI V2 END
+""")
+        out=PATCH["patch"](fixture)
+        self.assertEqual(out,PATCH["patch"](out))
+        self.assertIn("/v2/energy",out)
+        self.assertIn("@login_required",out)
+        self.assertIn("X-HaierPi-CSRF",out)
+        ast.parse(out)
+
+if __name__=="__main__":
+    unittest.main()
