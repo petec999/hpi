@@ -1,6 +1,6 @@
-# Adaptive — current handover (2026-11-26)
+# Adaptive — current handover (2026-11-27)
 
-Use the [branch README](../README.md) as the current installation reference. Last verified functional commit: `5cfd14153e394ef0296e3192b53f2a7169a2c51e`, [CI](https://github.com/petec999/hpi/actions/runs/45886053115).
+Use the [branch README](../README.md) as the current installation reference. Last verified functional commit: `f252db5bae2c6a47a7a1258a2cafdc2b6651c8df`, [CI](https://github.com/petec999/hpi/actions/runs/45943635658).
 
 ## Current design
 

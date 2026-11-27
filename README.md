@@ -2,14 +2,14 @@
 
 Opt-in anti-cycling supervision for existing HaierPi Stable 1.4.5 installations, with authenticated WWW v2, bounded online learning and read-only diagnostics.
 
-**Current functional revision (2026-11-26):** [`5cfd1415`](https://github.com/petec999/hpi/commit/5cfd14153e394ef0296e3192b53f2a7169a2c51e) — [Python 3.9/3.11 and Stable writer audit passed](https://github.com/petec999/hpi/actions/runs/45886053115). This is an experimental preview, not a production release. Physical acceptance of the latest version remains open.
+**Current functional revision (2026-11-27):** [`f252db5b`](https://github.com/petec999/hpi/commit/f252db5bae2c6a47a7a1258a2cafdc2b6651c8df) — [Python 3.9/3.11 and Stable writer audit passed](https://github.com/petec999/hpi/actions/runs/45943635658). This is an experimental preview, not a production release. Physical acceptance of the latest version remains open.
 
 ## Install / update
 
 On the HaierPi host, as root, only on a compatible existing installation:
 
 ```bash
-REF=5cfd14153e394ef0296e3192b53f2a7169a2c51e
+REF=f252db5bae2c6a47a7a1258a2cafdc2b6651c8df
 curl -fsSL "https://raw.githubusercontent.com/petec999/hpi/$REF/install-adaptive-preview.sh" -o /tmp/install-adaptive-preview.sh && bash /tmp/install-adaptive-preview.sh "$REF" --dry-run
 ```
 
