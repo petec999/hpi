@@ -360,6 +360,21 @@ def status_ui(html):
  $("am-storage-diagnostics").textContent="RAM: "+mib(sd.VmRSS_bytes)+" · maksimum: "+mib(sd.VmHWM_bytes)+" · wolne: "+mib(sd.disk_free_bytes)+" / "+mib(sd.disk_total_bytes)+" · zapisy procesu: "+mib(sd.write_bytes_bytes);
  $("am-storage-files").textContent=Object.entries(sd.state_files||{}).map(([k,n])=>k+": "+mib(n)).join(" · ");
  const ex=v.experiment;''')
+    # Presentation only: keep control values and runtime policy unchanged.
+    if 'id="am-test-progress"' not in html:
+        html=html.replace('Auto – eksperymentalne</option>', 'Auto – regulacja adaptacyjna</option>')
+        html=html.replace('Eksperyment – rozpocznij / wznów</option>', 'Test aktywny – rozpocznij / wznów</option>')
+        html=html.replace('Eksperyment – od nowa</option>', 'Test aktywny – od nowa</option>')
+        html=html.replace('Auto jest eksperymentalne.', 'Auto reguluje moc; Test aktywny porównuje konfiguracje. Obserwacja nie zmienia konfiguracji przez Adaptive.')
+        html=once(html,'<p id="am-experiment"></p>','<p id="am-experiment"></p><p id="am-test-status" role="status"></p><label>Postęp testu <progress id="am-test-progress" max="18" value="0" style="width:100%"></progress></label><p id="am-test-count"></p><small>Aby przerwać test, wybierz inny tryb sterowania. Zapisany postęp można wznowić.</small>')
+        html=once(html,' const ex=v.experiment;', ''' const ex=v.experiment;
+ const total=ex&&Array.isArray(ex.levels)?ex.levels.length*ex.per_level:0;
+ const done=ex&&Array.isArray(ex.counts)?ex.counts.reduce((a,b)=>a+b,0):0;
+ $("am-test-progress").max=total||18;
+ $("am-test-progress").value=done;
+ $("am-test-count").textContent=total?done+" / "+total+" ukończonych cykli":"Brak danych";
+ $("am-test-status").textContent=!amState?"Brak odczytu":v.control==="experiment"?(v.activation_blocker?"Test wybrany – "+v.activation_blocker:"Test aktywny – automatyczna zmiana konfiguracji przy postoju"):v.control==="auto"?"Auto – regulacja adaptacyjna, nie test":ex&&ex.resume_available?"Test nieaktywny – można wznowić":"Test nieaktywny";''')
+        html=html.replace('auto:"Adaptive Auto",experiment:"Eksperyment"', 'auto:"Regulacja adaptacyjna",experiment:"Test aktywny"')
     html=html.replace("Legacy pozostaje domyślne po restarcie.","Zapisany Auto wraca po restarcie po weryfikacji danych.")
     return html
 
