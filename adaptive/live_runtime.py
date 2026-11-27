@@ -564,6 +564,7 @@ class Runtime:
                 data["learning"]["saved_at"]=self.learning.path.stat().st_mtime if self.learning.path and self.learning.path.exists() else None
             except OSError:
                 data["learning"]["saved_at"]=None
+            data["experiment_comparison"]=self.experiment_comparison()
             data["operation_24h"]=self.operation.summary(time.time())
             data["thresholds"]=self.thresholds.summary()
             data["register_watch"]=self.register_watch.summary(time.monotonic())
@@ -696,6 +697,26 @@ class Runtime:
                         counts[i]=min(self.EXPERIMENT_CYCLES,counts[i]+1)
                         watermark=max(watermark,at)
         return counts,watermark
+
+    def experiment_comparison(self):
+        # Read-only comparison of retained, accepted cycles in the current session.
+        # Persistent counts may exceed retained samples after history eviction.
+        from statistics import median
+        counts=self.experiment_counts()
+        result=[]
+        for i,pair in enumerate(self.EXPERIMENT_LEVELS):
+            rows=[r for r in self.observer.rows if self.experiment_since is not None
+                  and r["context"][0]=="experiment" and tuple(r["context"][1:3])==pair
+                  and r["start"]["at"]>=self.experiment_since]
+            def med(values):
+                values=list(values)
+                return median(values) if values else None
+            result.append({"mode":pair[0],"flimit":pair[1],"completed":counts[i],
+                "retained":len(rows),
+                "run_seconds":med(r["run_seconds"] for r in rows if "run_seconds" in r),
+                "stop_fact":med(r["stop"]["fact"][0] for r in rows if "fact" in r["stop"]),
+                "stop_delta":med(r["stop"]["two"][0]-r["stop"]["twi"][0] for r in rows)})
+        return {"since":self.experiment_since,"per_level":self.EXPERIMENT_CYCLES,"rows":result}
 
     def experiment_counts(self):
         return self.experiment_progress()[0]
