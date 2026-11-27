@@ -1732,8 +1732,15 @@ class ExperimentGuard:
         if self.reference is None and room is not None:
             self.reference=room
         previous=self.previous
-        if previous is None or not 0<now-previous[0]<=65 or previous[1:3]!=(s.mode,s.relay) or abs(previous[3]-s.target)>.5 or previous[4]!=recovering:
+        if previous is None or not 0<now-previous[0]<=65 or previous[1:3]!=(s.mode,s.relay) or previous[4]!=recovering:
             self.reset()
+        elif abs(previous[3]-s.target)>.5:
+            # A changed water target starts a new water confirmation, but
+            # does not erase independently measured cooling of the house.
+            self.water_since=None
+            self.water_seconds=0
+            self.recovery_since=None
+            self.recovery_seconds=0
         self.previous=(now,s.mode,s.relay,s.target,recovering)
         low_room=room is not None and (room<self.cfg["minimum_room"] or
                     self.reference is not None and self.reference-room>=self.cfg["room_drop"]-1e-6)
