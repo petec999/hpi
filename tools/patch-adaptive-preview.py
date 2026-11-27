@@ -325,9 +325,21 @@ $("am-g-save").addEventListener("click",async()=>{
     html=once(html,' const ex=v.experiment;',' const ex=v.experiment;guardPaint(v);')
     return html
 
+def winter_status_ui(html):
+    old='Konfiguracja ukończona: trzy zaakceptowane cykle albo osobna próba ciągła 3 h po stabilizacji.'
+    new='Konfiguracja ukończona: trzy czyste cykle albo sześć zapisanych okien po 30 min (również postoje i defrost).'
+    if old in html:
+        html=once(html,old,new)
+    if 'amWinterProgress' not in html:
+        line=next(l for l in html.splitlines() if '$("am-continuous-status").textContent=' in l)
+        html=once(html,line,''' const amWinterProgress=ex&&Array.isArray(ex.windows)?ex.windows:[];
+ const reasons={comfort_or_telemetry:"komfort lub dane",new_context_or_gap:"nowy kontekst / przerwa",weather_target_or_room_range:"zmiana warunków",priority_or_no_demand:"priorytet lub brak zapotrzebowania",insufficient_heating:"brak dostatecznej pracy CO"};
+ $("am-continuous-status").textContent=ex&&ex.since?"Bieżące okno: "+Math.round((ex.continuous_seconds||0)/60)+" / 30 min"+(ex.continuous_reason?" · "+(reasons[ex.continuous_reason]||ex.continuous_reason):"")+" · zapisane: "+ex.levels.map((label,i)=>label+" "+(continuous[i]?6:((amWinterProgress[i]||[]).length))+"/6").join(" | "):"";''')
+    return html
+
 def continuous_ui(html):
     if 'id="am-continuous-status"' in html:
-        return html
+        return winter_status_ui(html)
     html=once(html,'<p id="am-test-count"></p>','<p id="am-test-count"></p><p id="am-continuous-status"></p><small>Konfiguracja ukończona: trzy zaakceptowane cykle albo osobna próba ciągła 3 h po stabilizacji. Bez wymuszania STOP; zwykła zmiana dopiero na naturalnym postoju.</small>')
     html=once(html,' $("am-test-count").textContent=total?done+" / "+total+" ukończonych cykli":"Brak danych";',''' const continuous=ex&&Array.isArray(ex.continuous)?ex.continuous:[];
  const completed=ex?ex.counts.filter((n,i)=>n>=ex.per_level||continuous[i]).length:0;
@@ -336,7 +348,7 @@ def continuous_ui(html):
  $("am-test-progress").value=completed;
  $("am-test-count").textContent=ex?completed+" / "+ex.levels.length+" konfiguracji ukończonych · "+done+" pełnych cykli":"Brak danych";
  $("am-continuous-status").textContent=ex&&ex.since?"Próba ciągła: "+Math.round((ex.continuous_seconds||0)/60)+" / 180 min"+(continuous.some(Boolean)?" · zaliczone: "+continuous.map((x,i)=>x?ex.levels[i]:"").filter(Boolean).join(", "):""):"";''')
-    return html
+    return winter_status_ui(html)
 
 def guard_api(source):
     if '    out["experiment_guard"]' in source:
@@ -548,6 +560,16 @@ const run=el("run-kpis");''')
         html=once(html,'<p id="experiment-comparison-status">','<h3>Próby ciągłe (oddzielnie od cykli)</h3><div class="scroll"><table id="experiment-continuous-report"></table></div><small>3 h normalnej eksploatacji po 15 min stabilizacji, z postojami i odszranianiem. COP netto dotyczy tylko zmierzonych przedziałów.</small><p id="experiment-comparison-status">')
         html=once(html,'const run=el("run-kpis");','''table("experiment-continuous-report",["Tryb","Czas min","Pogoda °C","Nastawa °C","Dom °C","Prąd kWh","Ciepło netto kWh","Pokrycie czasu %","COP próbek"],ec?ec.rows.filter(x=>x.continuous).map(x=>{const c=x.continuous,e=c.energy;return [x.mode+(x.flimit?" + FLimit":" / OFF"),ecNum(c.seconds,1/60),ecNum(c.outdoor_min)+" – "+ecNum(c.outdoor_max),ecNum(c.target_min)+" – "+ecNum(c.target_max),ecNum(c.room_min)+" – "+ecNum(c.room_max),ecNum(e&&e.kwh),ecNum(e&&e.net_heat_kwh),ecNum(e&&e.time_fraction,100),ecNum(e&&e.cop_net)]}):[]);
 const run=el("run-kpis");''')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'winterWindowRows' not in html:
+        old='Stabilne 3 h pracy bez STOP i defrostu, po 15 min stabilizacji; COP dotyczy tylko zmierzonych przedziałów. Nie zastępuje bilansu z defrostem.'
+        new='3 h normalnej eksploatacji po 15 min stabilizacji, z postojami i odszranianiem. COP netto dotyczy tylko zmierzonych przedziałów.'
+        note='Sześć okien po 30 min; zapis po każdym oknie, przerwy nie są wliczane. COP netto tylko przy dostatecznym pokryciu i podobnych warunkach; starty i defrosty są obserwowanymi przejściami.'
+        html=once(html,old if old in html else new,note)
+        line_js=next(l for l in html.splitlines() if 'table("experiment-continuous-report",' in l)
+        html=once(html,line_js,'''const winterWindowRows=ec?ec.rows.flatMap(x=>x.continuous?[{x,c:x.continuous,label:"Suma"}]:(x.windows||[]).map((c,i)=>({x,c,label:"Okno "+(i+1)}))):[];
+table("experiment-continuous-report",["Tryb","Próba","Min","Pogoda °C","Nastawa °C","Dom °C","Starty","Krótkie","Defrosty","Defrost min","Prąd kWh","Defrost kWh","Ciepło netto kWh","Pokrycie %","COP netto"],winterWindowRows.map(({x,c,label})=>{const e=c.energy;return [x.mode+(x.flimit?" + FLimit":" / OFF"),label,ecNum(c.seconds,1/60),ecNum(c.outdoor_min)+" – "+ecNum(c.outdoor_max),ecNum(c.target_min)+" – "+ecNum(c.target_max),ecNum(c.room_min)+" – "+ecNum(c.room_max),ecNum(c.starts),ecNum(c.short_cycles),ecNum(c.defrosts),ecNum(c.defrost_seconds,1/60),ecNum(e&&e.kwh),ecNum(e&&e.defrost_kwh),ecNum(e&&e.net_heat_kwh),ecNum(e&&e.time_fraction,100),ecNum(e&&e.cop_net)]}));''')
         line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
     if 'id="passive-diagnostics"' not in html:
