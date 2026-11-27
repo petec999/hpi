@@ -21,6 +21,7 @@ RES=runpy.run_path(str(ROOT/"tools/patch-core-resources.py"))
 SERIAL=runpy.run_path(str(ROOT/"tools/patch-serial-charts.py"))
 AUTH=runpy.run_path(str(ROOT/"tools/patch-local-auth.py"))
 ENERGY=runpy.run_path(str(ROOT/"tools/patch-energy.py"))
+BACKUP=runpy.run_path(str(ROOT/"tools/patch-backup.py"))
 
 def safe_literals(source):
     # Keep generated long HTML and embedded module literals ASCII on disk,
@@ -64,7 +65,7 @@ def plan(root):
         old=raw.decode("utf-8")
         if rel=="main.py":
             base=CORE["MQTT"]["patch"](GPIO["patch_main"](CORE["WD"]["patch"](old)))
-            new=ENERGY["patch"](AUTH["patch"](SERIAL["patch"](RES["patch"](AM["patch"](base)))))
+            new=BACKUP["patch"](ENERGY["patch"](AUTH["patch"](SERIAL["patch"](RES["patch"](AM["patch"](base))))))
         else:
             new=GPIO["patch_gpio"](old)
         if rel=="main.py":
