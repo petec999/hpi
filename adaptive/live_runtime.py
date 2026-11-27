@@ -720,13 +720,19 @@ class Runtime:
                 continue
             group=samples[self.EXPERIMENT_LEVELS.index(pair)]
             at=r["start"]["at"]
-            if len(group)>=self.EXPERIMENT_CYCLES or any(x[0]==at for x in group):
+            existing=next((x for x in group if x[0]==at),None)
+            if existing is not None:
+                outdoor=r.get("stop",{}).get("outdoor")
+                if existing[4] is None and isinstance(outdoor,list) and outdoor and outdoor[0] is not None:
+                    group[group.index(existing)]=existing[:4]+[outdoor[0]]
+                continue
+            if len(group)>=self.EXPERIMENT_CYCLES:
                 continue
             stop=r.get("stop",{})
             if "two" not in stop or "twi" not in stop:
                 continue
             group.append([at,r.get("run_seconds"),stop.get("fact",[None])[0],
-                          stop["two"][0]-stop["twi"][0],stop.get("outdoor") if type(stop.get("outdoor")) in (int,float) else None])
+                          stop["two"][0]-stop["twi"][0],stop.get("outdoor",[None])[0] if isinstance(stop.get("outdoor"),list) else stop.get("outdoor")])
         return samples
 
     def experiment_comparison(self):
@@ -741,7 +747,14 @@ class Runtime:
                 "retained":len(rows),"run_seconds":med(1),"stop_fact":med(2),
                 "stop_delta":med(3),"outdoor":med(4),
                 "quality":"complete" if len(rows)>=self.EXPERIMENT_CYCLES else "partial"})
-        return {"since":self.experiment_since,"per_level":self.EXPERIMENT_CYCLES,"rows":result}
+        outdoor=[r["outdoor"] for r in result if r["outdoor"] is not None]
+        spread=max(outdoor)-min(outdoor) if len(outdoor)>=2 else None
+        complete=all(r["quality"]=="complete" for r in result)
+        comparable=complete and len(outdoor)==len(result) and spread<=2
+        return {"since":self.experiment_since,"per_level":self.EXPERIMENT_CYCLES,"rows":result,
+                "outdoor_spread":spread,"comparable":comparable,
+                "assessment":"Porównanie opisowe: podobna pogoda, brak pomiaru energii" if comparable else
+                    "Za mało cykli lub zbyt różne / nieznane warunki pogodowe"}
 
     def experiment_counts(self):
         return self.experiment_progress()[0]
