@@ -99,7 +99,7 @@ def snapshot(s):
     for x in deferred:
         if x is not None and (type(x.get("at")) not in (int,float) or not math.isfinite(x["at"])):
             raise ValueError("Invalid deferral")
-    return {"session":s["since"],"counts":counts,
+    return {"session":s["since"],"counts":list(counts),
             "done":[counts[i]>=3 or continuous[i] is not None for i in range(6)],
             "continuous":[x is not None for x in continuous],
             "deferred":[x["at"] if x is not None else None for x in deferred],
