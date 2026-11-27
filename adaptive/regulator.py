@@ -1787,3 +1787,62 @@ class ExperimentGuard:
         return {"settings":dict(self.cfg),"reference":self.reference,
                 "water_seconds":self.water_seconds,"room_seconds":self.room_seconds,
                 "recovery_seconds":self.recovery_seconds}
+
+
+class ContinuousTrial:
+    """Independent stable-running window; never manufactures START/STOP edges."""
+    SETTLE=900
+    DURATION=10800
+    MAX_GAP=65
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.context=None
+        self.last=None
+        self.since=None
+        self.window=None
+        self.seconds=0
+
+    @staticmethod
+    def weather_band(outdoor):
+        return 2*math.floor(outdoor/2)
+
+    def observe(self,s,room,outdoor,reference,minimum_room,eligible,wall):
+        if not (eligible and s.fresh and not (s.error or s.override or s.defrost or s.dhw)
+                and s.heating and s.hz>0 and s.requested_hz>0
+                and ExperimentGuard.valid_room(room) and ExperimentGuard.valid_room(reference)
+                and room>=minimum_room and room>=reference-.2-1e-6
+                and type(outdoor) in (float,int) and math.isfinite(outdoor) and -60<=outdoor<=60):
+            self.reset()
+            return None
+        context=(s.mode,s.relay,self.weather_band(outdoor))
+        if (self.context!=context or self.last is None or
+                not 0<s.now-self.last[0]<=self.MAX_GAP or
+                abs((wall-self.last[1])-(s.now-self.last[0]))>5 or
+                abs(s.target-self.last[2])>.25):
+            self.reset()
+            self.context=context
+            self.since=s.now
+        self.last=(s.now,wall,s.target)
+        if s.now-self.since<self.SETTLE:
+            return None
+        if self.window is None:
+            self.window=[s.now,wall,room,room,s.target,s.target,outdoor,outdoor]
+        w=self.window
+        w[2]=min(w[2],room); w[3]=max(w[3],room)
+        w[4]=min(w[4],s.target); w[5]=max(w[5],s.target)
+        w[6]=min(w[6],outdoor); w[7]=max(w[7],outdoor)
+        if w[3]-w[2]>.3+1e-6 or w[5]-w[4]>.5+1e-6:
+            self.reset()
+            return None
+        self.seconds=s.now-w[0]
+        if self.seconds<self.DURATION:
+            return None
+        result={"start":w[1],"stop":wall,"seconds":self.seconds,
+                "outdoor_min":w[6],"outdoor_max":w[7],
+                "target_min":w[4],"target_max":w[5],
+                "room_min":w[2],"room_max":w[3]}
+        self.reset()
+        return result
