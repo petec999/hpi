@@ -571,6 +571,7 @@ class Runtime:
             except OSError:
                 data["learning"]["saved_at"]=None
             data["experiment_comparison"]=self.experiment_comparison()
+            data["diagnostics"]=self.diagnostic_summary()
             data["operation_24h"]=self.operation.summary(time.time())
             data["thresholds"]=self.thresholds.summary()
             data["register_watch"]=self.register_watch.summary(time.monotonic())
@@ -644,6 +645,10 @@ class Runtime:
                     self.report.interrupt()
                 return
             self.observer_frames=stamps
+            try:
+                self.observe_building(s,time.monotonic())
+            except Exception:
+                self.building_previous=None
             co_enabled=bool(power&1 and power&4 and not power&2) and self.flag(self.raw("pch"))
             demand=self.gpio("heatdemandpin")
             eligible=self.activation_reason(s,zone,curve) is None and co_enabled and demand
@@ -1053,6 +1058,57 @@ class Runtime:
             # Core scheduled calculation applies new settings with native guards.
             # Do not force a write during defrost/DHW or an unconfirmed transition.
             self.g["logging"].info("Heating curve settings saved from WWW v2")
+
+    def observe_building(self,s,now):
+        # RAM only; use fresh room sensor and ordinary CO samples.
+        if not hasattr(self,"building_rates"):
+            self.building_rates=[]
+            self.building_previous=None
+        if s.dhw or s.defrost or s.override or s.error or self.raw("intemp_status")!="ok":
+            self.building_previous=None
+            return
+        indoor=self.number(self.raw("intemp"))
+        outdoor=self.number(self.raw("outtemp"))
+        if self.raw("outtemp_status")!="ok" or not -10<indoor<45 or not -50<outdoor<50:
+            self.building_previous=None
+            return
+        previous=self.building_previous
+        self.building_previous=(now,indoor,outdoor)
+        if previous is None:
+            return
+        elapsed=now-previous[0]
+        if not 0<elapsed<=self.MAX_AGE or abs(indoor-previous[1])>1:
+            return
+        self.building_rates.append((elapsed,indoor-previous[1],indoor-outdoor))
+        self.building_rates=self.building_rates[-120:]
+
+    def building_summary(self):
+        rows=getattr(self,"building_rates",[])
+        seconds=sum(x[0] for x in rows)
+        return {"samples":len(rows),"coverage_seconds":seconds,
+                "room_trend_k_h":3600*sum(x[1] for x in rows)/seconds if seconds>=900 else None,
+                "indoor_outdoor_delta":sum(x[0]*x[2] for x in rows)/seconds if seconds else None}
+
+    def diagnostic_summary(self):
+        sd=self.storage_diagnostics()
+        warnings=[]
+        if sd.get("disk_error"):
+            warnings.append("Brak odczytu dysku")
+        if sd.get("disk_total_bytes") and sd.get("disk_free_bytes",0)/sd["disk_total_bytes"]<0.1:
+            warnings.append("Mniej niż 10% wolnego miejsca")
+        if self.experiment_error:
+            warnings.append(self.experiment_error)
+        if self.fault:
+            warnings.append(self.fault)
+        with self.frames_lock:
+            stamps={k:v[0] for k,v in self.frames.items()}
+        now=time.monotonic()
+        stale=[k for k in self.SIZES if k not in stamps or not 0<=now-stamps[k]<=self.MAX_AGE]
+        if stale:
+            warnings.append("Nieświeże ramki: "+", ".join(stale))
+        if self.pending and now>self.pending[2]:
+            warnings.append("Przekroczony czas potwierdzenia zapisu")
+        return {"warnings":warnings,"building":self.building_summary()}
 
     def storage_diagnostics(self):
         """Read-only process and filesystem diagnostics; no history writes."""
