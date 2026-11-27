@@ -943,7 +943,11 @@ class Runtime:
         actual=(s.mode,s.relay)
         wall=time.time()
         room=self.fresh_room_sensor("intemp",wall)
+        if not ExperimentGuard.valid_room(room):
+            room=None
         outdoor=self.fresh_room_sensor("outtemp",wall)
+        if outdoor is not None and not -60<=outdoor<=60:
+            outdoor=None
         eligible=self.activation_reason(s,zone,curve) is None and self.gpio("heatdemandpin") and self.flag(self.raw("pch"))
         before_ref=self.experiment_guard.reference
         decision=self.experiment_guard.observe(s,room,eligible,self.experiment_recovering)
