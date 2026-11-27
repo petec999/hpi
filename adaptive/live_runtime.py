@@ -222,8 +222,16 @@ class Runtime:
             if record is None:
                 continue
             keys={"start","stop","seconds","outdoor_min","outdoor_max","target_min","target_max","room_min","room_max"}
-            if not isinstance(record,dict) or set(record) not in (keys,keys|{"energy"}) or any(type(record[k]) not in (int,float) or not math.isfinite(record[k]) for k in keys):
+            stats={"run_seconds","idle_seconds","defrost_seconds","transition_seconds","starts","short_cycles","defrosts"}
+            if not isinstance(record,dict) or set(record) not in (keys,keys|{"energy"},keys|stats,keys|stats|{"energy"}) or any(type(record[k]) not in (int,float) or not math.isfinite(record[k]) for k in keys):
                 raise ValueError("Invalid continuous trial")
+            if stats<=set(record):
+                if any(type(record[k]) not in (int,float) or not math.isfinite(record[k]) or not 0<=record[k]<=record["seconds"] for k in stats):
+                    raise ValueError("Invalid trial statistics")
+                if any(type(record[k]) is not int for k in ("starts","short_cycles","defrosts")) or record["short_cycles"]>record["starts"]:
+                    raise ValueError("Invalid trial counts")
+                if abs(sum(record[k] for k in ("run_seconds","idle_seconds","defrost_seconds","transition_seconds"))-record["seconds"])>1:
+                    raise ValueError("Invalid trial phase coverage")
             energy=record.get("energy")
             if energy is not None:
                 ekeys={"seconds","kwh","paired_seconds","paired_kwh","net_heat_kwh","defrost_kwh","defrost_heat_kwh",
@@ -953,6 +961,29 @@ class Runtime:
             observations.append("Nie kontrolowano zysków cieplnych, energii ani nastawy w całej sesji; to nie ranking sprawności.")
         else:
             observations.append("Nie wyznaczono zwycięzcy: potrzeba pełnych czasów pracy i pomiarów pogody dla wszystkich cykli.")
+        # A single measured window is not a seasonal winner.
+        measured=[r for r in result if r["continuous"] and
+                  r["continuous"].get("energy") and r["continuous"]["energy"].get("cop_net") is not None
+                  and "run_seconds" in r["continuous"]]
+        for r in measured:
+            c=r["continuous"]; e=c["energy"]
+            label=r["mode"]+(" + FLimit" if r["flimit"] else " / FLimit OFF")
+            observations.append(label+": COP netto próbek "+str(round(e["cop_net"],2))+
+                ", prąd "+str(round(e["kwh"],2))+" kWh, starty zaobserwowane "+str(c["starts"])+
+                ", defrosty "+str(c["defrosts"])+".")
+        if len(measured)>=2:
+            windows=[r["continuous"] for r in measured]
+            if (max(c["outdoor_max"] for c in windows)-min(c["outdoor_min"] for c in windows)<=2
+                    and max(c["target_max"] for c in windows)-min(c["target_min"] for c in windows)<=1
+                    and max(c["room_max"] for c in windows)-min(c["room_min"] for c in windows)<=.5
+                    and len({(c["energy"]["flow_estimated"],c["energy"]["electricity_estimated"]) for c in windows})==1):
+                best=max(c["energy"]["cop_net"] for c in windows)
+                labels=[r["mode"]+(" + FLimit" if r["flimit"] else " / FLimit OFF") for r in measured
+                        if best-r["continuous"]["energy"]["cop_net"]<.05]
+                observations.append("Najwyższy zaobserwowany COP netto w porównywalnych oknach: "+", ".join(labels)+
+                    ". Wynik wstępny, nie wybór automatyczny.")
+            else:
+                observations.append("Okna energetyczne mają różne warunki – bez rankingu COP.")
         for r in result:
             if r["duration_samples"]>=3 and r["short_cycles"]>=2:
                 observations.append(r["mode"]+(" + FLimit" if r["flimit"] else " / FLimit OFF")+": co najmniej 2 z 3 cykli poniżej 10 min; sprawdź taktowanie i zapotrzebowanie.")
@@ -1002,7 +1033,7 @@ class Runtime:
                         and -10<=s.return_temp<=85 and self.gpio("heatdemandpin")
                         and self.flag(self.raw("pch")))
         if not eligible and not normal_defrost:
-            self.continuous_trial.reset()
+            self.continuous_trial.reset("priority_or_no_demand")
             self.experiment_idle=None
             self.status["reason_pl"]="Eksperyment wstrzymany – warunek priorytetowy lub brak zapotrzebowania"
             return
@@ -1530,4 +1561,6 @@ class Runtime:
                                     "per_level":self.EXPERIMENT_CYCLES,"since":self.experiment_since,
                                     "resume_available":self.experiment_saved and self.control!="experiment",
                                     "initial":self.experiment_initial,"storage_error":self.experiment_error,"guard":self.guard_view(),
-                                    "continuous":self.experiment_continuous,"continuous_seconds":self.continuous_trial.seconds})
+                                    "continuous":self.experiment_continuous,"continuous_seconds":self.continuous_trial.seconds,
+                                    "continuous_reason":self.continuous_trial.reason,
+                                    "continuous_stats":self.continuous_trial.stats})
