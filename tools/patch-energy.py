@@ -25,7 +25,7 @@ function fill(d){for(const k of keys){if(k==="enabled")$(k).checked=d[k];else $(
 function table(id,rows){const t=$(id);t.replaceChildren();let h=t.insertRow();for(const x of ["Stan / tryb","Czas h","Prąd kWh","Ciepło szac. kWh","COP szac. (praca CO)","Pokrycie COP h"]){let c=document.createElement("th");c.textContent=x;h.append(c)}for(const [k,v] of Object.entries(rows||{})){let r=t.insertRow();for(const x of [k,fmt(v.seconds/3600),fmt(v.kwh),v.paired_seconds?fmt(v.heat_kwh):"—",fmt(v.cop_estimate),fmt(v.paired_seconds/3600)])r.insertCell().textContent=x}}
 function cycleTable(rows){const t=$("cycles");t.replaceChildren();let h=t.insertRow();for(const x of ["Start","Konfiguracja","Cykl min","Pokrycie prądu %","Prąd kWh (zmierzone przedziały)","Ciepło szac. kWh","COP szac.","Pokrycie COP %"]){let c=document.createElement("th");c.textContent=x;h.append(c)}for(const v of rows||[]){let r=t.insertRow();for(const x of [new Date(v.start*1000).toLocaleString(),v.mode,fmt(v.duration_seconds/60),fmt(100*v.covered_seconds/v.duration_seconds),fmt(v.kwh),fmt(v.heat_kwh),fmt(v.cop_estimate),fmt(100*v.paired_seconds/v.duration_seconds)])r.insertCell().textContent=x}}
 async function json(url,opts={}){const c=new AbortController(),timer=setTimeout(()=>c.abort(),22000);try{const r=await fetch(url,{credentials:"same-origin",cache:"no-store",signal:c.signal,...opts});if(r.redirected)throw Error("Zaloguj się ponownie");const d=await r.json();if(!r.ok)throw Error(d.reason||"Błąd "+r.status);return d}finally{clearTimeout(timer)}}
-async function refresh(loadForm=false){try{const d=await json("/v2/api/energy");if(loadForm)fill(d.settings);const x=d.current||{};$("latest").textContent=(d.settings.enabled?"Monitoring włączony":"Monitoring wyłączony")+" · licznik "+fmt(x.energy)+" kWh · moc "+fmt(x.power)+" kW · przepływ "+fmt(x.flow)+" m³/h"+(d.error?" · "+d.error:"");$("coverage").textContent="Pokrycie: "+fmt(d.coverage_seconds/3600)+" h · "+(d.electricity_estimated?"prąd szacowany z mocy":"prąd z licznika")+" · "+(d.flow_estimated?"przepływ założony":"przepływ z czujnika lub brak");table("groups",d.groups_24h);table("modes",d.modes_24h);table("experiment",d.experiment);cycleTable(d.cycles);$("cycle-status").textContent=d.cycle_error||((d.cycles||[]).length+" zapisanych cykli"+(d.cycle_session?" · sesja "+new Date(d.cycle_session*1000).toLocaleString():""))}catch(e){$("latest").textContent=e.message}}
+async function refresh(loadForm=false){try{const d=await json("/v2/api/energy");if(loadForm)fill(d.settings);const x=d.current||{};$("latest").textContent=(d.settings.enabled?"Monitoring włączony":"Monitoring wyłączony")+" · licznik "+fmt(x.energy)+" kWh"+(x.power!=null?" · moc "+fmt(x.power)+" kW":d.meter_average_power?" · średnia moc z licznika "+fmt(d.meter_average_power.kw)+" kW ("+Math.round(d.meter_average_power.seconds)+" s)":" · średnia moc: oczekiwanie na dane")+" · przepływ "+fmt(x.flow)+" m³/h"+(d.error?" · "+d.error:"");$("coverage").textContent="Pokrycie: "+fmt(d.coverage_seconds/3600)+" h · "+(d.electricity_estimated?"prąd szacowany z mocy":"prąd z licznika")+" · "+(d.flow_estimated?"przepływ założony":"przepływ z czujnika lub brak");table("groups",d.groups_24h);table("modes",d.modes_24h);table("experiment",d.experiment);cycleTable(d.cycles);$("cycle-status").textContent=d.cycle_error||((d.cycles||[]).length+" zapisanych cykli"+(d.cycle_session?" · sesja "+new Date(d.cycle_session*1000).toLocaleString():""))}catch(e){$("latest").textContent=e.message}}
 async function action(op){$("test").disabled=$("save").disabled=true;$("action").textContent="Odczyt…";try{const d=await json("/v2/api/energy",{method:"POST",headers:{"Content-Type":"application/json","X-HaierPi-CSRF":"__WV_CSRF__"},body:JSON.stringify({action:op,settings:form()})});$("action").textContent=op==="save"?"Zapisano. Odczyt przy następnym cyklu.":"Odczyt: "+JSON.stringify(d.values)+"; brak: "+d.missing.join(", ")+(d.mqtt_requires_saved_settings?" · Zapisz nowe tematy MQTT przed testem.":"");if(op==="save")await refresh()}catch(e){$("action").textContent=e.message}finally{$("test").disabled=$("save").disabled=false}}
 $("test").onclick=()=>action("test");$("save").onclick=()=>action("save");$("refresh").onclick=()=>refresh();refresh(true);
 </script></main></body></html>'''
@@ -75,6 +75,18 @@ def patch(source):
     if MARK in source:
         if source.count(MARK)!=1 or "def _wv_energy_api():" not in source:
             raise ValueError("Incomplete energy patch")
+        # Upgrade the page on an existing installation too.
+        tree=ast.parse(source)
+        nodes=[n for n in tree.body if isinstance(n,ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Name) and n.targets[0].id=="_WV_ENERGY_HTML"]
+        if len(nodes)!=1:
+            raise ValueError("Missing energy page")
+        n=nodes[0]
+        if ast.literal_eval(n.value)==HTML:
+            return source
+        lines=source.splitlines(keepends=True)
+        lines[n.lineno-1:n.end_lineno]=["_WV_ENERGY_HTML = "+ascii(HTML)+"\n"]
+        source="".join(lines)
+        compile(source,"main.py","exec")
         return source
     lines=source.splitlines(keepends=True)
     tree=ast.parse(source)
