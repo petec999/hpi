@@ -98,6 +98,7 @@ def patch(source):
     once("# HOME-IOT WEB UI V2 END",MARK+"\n_WV_ENERGY_HTML = "+repr(HTML)+"\n"+ROUTES+"\n# HOME-IOT WEB UI V2 END")
     # Callbacks run after initialization; no separate MQTT client.
     once("def on_connect(client, userdata, flags, rc):\n","def on_connect(client, userdata, flags, rc):\n    if rc==0:\n        _am.energy.mqtt_connect(client)\n")
+    once("def on_disconnect(client, userdata, rc):  # The callback for when\n","def on_disconnect(client, userdata, rc):  # The callback for when\n    _am.energy.mqtt_disconnect(client)\n")
     # Use the exact existing watchdog statement as anchor, before command parsing.
     once('    if msg.topic == str(mqtt_topic) + "/haierpi/watchdog_heartbeat":\n','    if _am.energy.mqtt_message(client,msg):\n        return\n    if msg.topic == str(mqtt_topic) + "/haierpi/watchdog_heartbeat":\n')
     compile(source,"main.py","exec")
