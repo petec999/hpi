@@ -90,6 +90,8 @@ class EnergyTests(unittest.TestCase):
         self.assertEqual(m.read_values(m.cfg)[0]["energy"],12)
         msg.topic="haier/power/set"
         self.assertFalse(m.mqtt_message(c,msg))
+        m.mqtt_disconnect(c)
+        self.assertEqual(m.read_values(m.cfg)[1],["energy"])
 
     def test_config_persist_and_bounded_history(self):
         with tempfile.TemporaryDirectory() as d:
@@ -106,11 +108,36 @@ class EnergyTests(unittest.TestCase):
             self.assertLessEqual(len(m.rows),2881)
             self.assertLessEqual(m.summary(3999*30)["coverage_seconds"],86430)
 
+    def test_cycle_checkpoint_survives_restart(self):
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/"energy.json"
+            m=EnergyMonitor({},path)
+            m.save(dict(DEFAULT,enabled=True,energy="sensor.energy",flow_source="manual",manual_flow=1.15))
+            mode="eco / FLimit OFF"
+            state=("co_run",mode,5,1000)
+            for i in range(13):
+                m.accept(i*30,state,{"energy":10+i*.025,"flow":1.15},1000+i*30)
+            m.record_cycles(1000,[(1000,1360,mode),(1360,1370,mode)])
+            row=m.summary(360)["cycles"][0]
+            self.assertEqual(row["covered_seconds"],360)
+            self.assertAlmostEqual(row["kwh"],.3)
+            self.assertIsNotNone(row["cop_estimate"])
+            restarted=EnergyMonitor({},path)
+            self.assertEqual(restarted.summary()["cycles"],[row])
+            before=restarted.cycle_path.stat().st_ino
+            restarted.accept(390,None,{},1390)
+            restarted.record_cycles(1000,[(1000,1360,mode)])
+            self.assertEqual(before,restarted.cycle_path.stat().st_ino)
+            restarted.record_cycles(1000,[(1360,1390,mode)])
+            self.assertIsNone(restarted.summary()["cycles"][1]["kwh"])
+
     def test_ui_patch(self):
         fixture=("""
 _WV_HTML = '<nav></nav>'
 _WV_ADAPTIVE_REPORT_HTML = '<header></header>'
 def on_connect(client, userdata, flags, rc):
+    pass
+def on_disconnect(client, userdata, rc):  # The callback for when
     pass
 def on_message(client,userdata,msg):
     if msg.topic == str(mqtt_topic) + "/haierpi/watchdog_heartbeat":
