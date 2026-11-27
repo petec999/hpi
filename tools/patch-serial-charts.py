@@ -191,6 +191,32 @@ READER = '''def ReadPump():
         logging.exception("RS485 close failed")
 '''
 
+# Preserve the exact old reader to support upgrades of already patched systems.
+READER_V1 = READER
+READER = READER.replace(
+    "    event.wait(.2)\n    while",
+    "    # HPI RS485 SILENCE RECOVERY v2\n    last_valid=time.monotonic()\n    event.wait(.2)\n    while"
+).replace(
+    '                ser.open()\n                gpiocontrol("modbus","0")',
+    '                gpiocontrol("modbus","0")\n                ser.open()\n                last_valid=time.monotonic()'
+).replace(
+    "            if regs is None:\n                continue\n            delay=2",
+    "            if regs is None:\n                if time.monotonic()-last_valid>=90:\n                    raise TimeoutError('RS485: no valid frame for 90 s')\n                continue\n            last_valid=time.monotonic()\n            delay=2"
+)
+SER_OPEN = 'ser = serial.Serial(port=modbusdev, baudrate = 9600, parity=serial.PARITY_EVEN,stopbits=serial.STOPBITS_ONE,bytesize=serial.EIGHTBITS,timeout=1)'
+SER_DEFER = SER_OPEN.replace("port=modbusdev","port=None") + "\nser.port = modbusdev"
+
+def upgrade_reader(source):
+    if "# HPI RS485 SILENCE RECOVERY v2" not in source:
+        if READER_V1.rstrip() not in source:
+            raise ValueError("Unexpected installed serial reader")
+        source=replace_func(source,"ReadPump",READER)
+    if SER_DEFER not in source:
+        if source.count(SER_OPEN)!=1:
+            raise ValueError("Unexpected serial initialization")
+        source=source.replace(SER_OPEN,SER_DEFER,1)
+    return source
+
 def replace_func(source,name,replacement,parent=None):
     tree=ast.parse(source)
     if parent:
@@ -207,7 +233,7 @@ def patch(source):
     if MARK in source:
         if HELPER not in source:
             raise ValueError("Modified serial guard")
-        return source
+        return upgrade_reader(source)
     def once(old,new):
         nonlocal source
         if source.count(old)!=1:
@@ -234,6 +260,7 @@ def patch(source):
     once('        gpiocontrol("modbus", "1")\n        break;',
          '        if event.is_set() or time.monotonic() >= deadline:\n            return False\n        gpiocontrol("modbus", "1")\n        break;')
     source=replace_func(source,"ReadPump",READER)
+    source=upgrade_reader(source)
     source=replace_func(source,"set_newframe","def set_newframe(register, frame):\n    return _hpi_send(register,frame)")
     source=replace_func(source,"_send_and_wait","def _send_and_wait(frame, timeout_s=12.0):\n    return _hpi_send(R101,frame,timeout_s)",parent="statechange")
     # Do not let another caller interleave the wake-up and target mode writes.
