@@ -433,11 +433,19 @@ for(const [a,b] of [["Bieżąca ciągła praca Auto",st&&st.owner==="auto"?num(s
 const ts=(d.thresholds?d.thresholds.groups:[]).flatMap(g=>(g.samples||[]).map(x=>[x.at,g.edge,g.preset,g.flimit?"ON":"OFF",g.target_band,x.twi_offset,x.two_offset]));ts.sort((a,b)=>b[0]-a[0]);table("threshold-samples",["Czas","Przejście","Tryb","FLimit","Nastawa od °C","Twi K","Two K"],ts.map(x=>[dt(x[0]),...x.slice(1,5),num(x[5],3),num(x[6],3)]));''')
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
     if 'id="experiment-comparison"' not in html:
-        html=once(html,'<article><h2>Uczenie</h2>','<article><h2>Porównanie konfiguracji testu aktywnego</h2><p id="experiment-comparison-status"></p><div class="scroll"><table id="experiment-comparison"></table></div><small>Mediany z zachowanych zaakceptowanych cykli bieżącej sesji. Fact przy STOP, nie średnia częstotliwość pracy. Brak danych nie oznacza zera. Nie jest to ranking COP ani zużycia energii.</small></article><article><h2>Uczenie</h2>')
+        html=once(html,'<article><h2>Uczenie</h2>','<article><h2>Porównanie konfiguracji testu aktywnego</h2><p id="experiment-comparison-status"></p><div class="scroll"><table id="experiment-comparison"></table></div><small>Mediany z zapisanych zaakceptowanych cykli sesji. Fact przy STOP, nie średnia częstotliwość pracy. Brak danych nie oznacza zera. Nie jest to ranking COP ani zużycia energii.</small></article><article><h2>Uczenie</h2>')
         html=once(html,'const run=el("run-kpis");', '''const ec=d.experiment_comparison;
 el("experiment-comparison-status").textContent=ec&&ec.since?"Sesja od "+dt(ec.since):"Brak sesji";
 const ecNum=(x,k=1)=>x==null?"—":num(x*k,2);
 table("experiment-comparison",["Tryb","FLimit","Postęp","Zachowane cykle","Praca min","Fact STOP Hz","Delta T STOP K"],ec?ec.rows.map(x=>[x.mode,x.flimit?"ON":"OFF",x.completed+"/"+ec.per_level,x.retained,ecNum(x.run_seconds,1/60),ecNum(x.stop_fact),ecNum(x.stop_delta)]):[]);
+const run=el("run-kpis");''')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'id="passive-diagnostics"' not in html:
+        html=once(html,'<article><h2>Uczenie</h2>','<article><h2>Diagnostyka i obserwacja budynku</h2><p id="passive-diagnostics"></p><p id="building-trend"></p><small>Trend temperatury pomieszczenia z maksymalnie 120 świeżych przedziałów w RAM. Nie jest modelem strat ciepła ani podstawą automatycznego sterowania.</small></article><article><h2>Uczenie</h2>')
+        html=once(html,'const run=el("run-kpis");', '''const pd=d.diagnostics,bt=pd&&pd.building;
+el("passive-diagnostics").textContent=pd?(pd.warnings.join(" · ")||"Brak wykrytych ostrzeżeń"):"Brak danych";
+el("building-trend").textContent=bt?"Próbki: "+bt.samples+" · pokrycie "+num(bt.coverage_seconds/60,1)+" min · trend "+(bt.room_trend_k_h==null?"za mało danych":num(bt.room_trend_k_h,2)+" K/h")+" · różnica wewnątrz/zewnątrz "+(bt.indoor_outdoor_delta==null?"—":num(bt.indoor_outdoor_delta,1)+" K"):"Brak danych";
 const run=el("run-kpis");''')
         line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
