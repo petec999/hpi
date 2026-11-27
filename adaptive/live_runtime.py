@@ -977,6 +977,28 @@ class Runtime:
             # Do not force a write during defrost/DHW or an unconfirmed transition.
             self.g["logging"].info("Heating curve settings saved from WWW v2")
 
+    def storage_diagnostics(self):
+        """Read-only process and filesystem diagnostics; no history writes."""
+        result = {}
+        try:
+            import shutil
+            root = self.experiment_path.parent if self.experiment_path else Path(".")
+            usage = shutil.disk_usage(root)
+            result.update(disk_total_bytes=usage.total, disk_free_bytes=usage.free)
+            result["state_files"] = {p.name: p.stat().st_size for p in root.glob(".adaptive-*") if p.is_file() and not p.is_symlink()}
+        except OSError:
+            result["disk_error"] = True
+        for path, keys, multiplier in (("/proc/self/status", ("VmRSS", "VmHWM"), 1024),
+                                        ("/proc/self/io", ("write_bytes", "wchar"), 1)):
+            try:
+                for line in Path(path).read_text().splitlines():
+                    key, _, value = line.partition(":")
+                    if key in keys:
+                        result[key + "_bytes"] = int(value.split()[0]) * multiplier
+            except (OSError, ValueError, IndexError):
+                pass
+        return result
+
     def view(self):
         with self.lock:
             try:
@@ -992,7 +1014,7 @@ class Runtime:
                 blocker="Brak pełnego, świeżego odczytu pompy lub GPIO"
             if self.pending is not None:
                 blocker="Oczekiwanie na potwierdzenie poprzedniego polecenia"
-            return dict(self.status,control=self.control,mode=actual,relay=relay,
+            return dict(self.status,storage_diagnostics=self.storage_diagnostics(),control=self.control,mode=actual,relay=relay,
                         ready=blocker is None,activation_blocker=blocker,curve=curve,zone=zone,pending=self.pending is not None,fault=self.fault,
                         auto_resume_pending=self.resume_requested,owner_storage_error=self.resume_error,threshold_model=model,
                         heater=self.heater_view(),curve_settings=self.curve_settings(),learning=self.learning.summary(),hysteresis=self.observer.summary(),
