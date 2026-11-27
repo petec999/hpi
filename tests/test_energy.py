@@ -149,6 +149,35 @@ class EnergyTests(unittest.TestCase):
         m.accept(420,None,{})
         self.assertIsNone(m.meter_average_power(420))
 
+    def test_signed_defrost_and_climate_bins(self):
+        m=self.configured()
+        mode="eco / FLimit OFF"
+        m.accept(0,("co_run",mode,5,1000,1.0,35,True),{"energy":10,"flow":1.15},1000)
+        m.accept(30,("co_run",mode,5,1000,1.2,35,True),{"energy":10.01,"flow":1.15},1030)
+        m.accept(60,("defrost",mode,-5,1000,1.0,35,True),{"energy":10.02,"flow":1.15},1060)
+        m.accept(90,("defrost",mode,-5,1000,1.0,35,True),{"energy":10.03,"flow":1.15},1090)
+        d=m.summary(90)
+        self.assertAlmostEqual(d["net_groups_24h"]["defrost"]["net_heat_kwh"],-1.163*1.15*5/120)
+        self.assertAlmostEqual(d["climate_24h"][0]["net_heat_kwh"],0)
+        self.assertAlmostEqual(d["climate_24h"][0]["kwh"],.02)
+        self.assertEqual(d["climate_24h"][0]["outdoor_band"],0)
+        self.assertEqual(d["climate_24h"][0]["target_band"],34)
+        m.accept(120,("defrost",mode,-5,1000,1.0,35,None),{"energy":10.04,"flow":1.15},1120)
+        d=m.summary(120)
+        self.assertIsNone(d["climate_24h"][0]["cop_net"])
+        self.assertLess(d["climate_24h"][0]["paired_fraction"],1)
+
+    def test_window_summary_requires_matching_session_and_coverage(self):
+        m=self.configured()
+        mode="eco / FLimit OFF"
+        for t in range(0,601,30):
+            m.accept(t,("co_run",mode,5,1000,1,35,True),{"energy":10+t/3600,"flow":1.15},1000+t)
+        result=m.window_summary(1000,1600,mode,1000)
+        self.assertAlmostEqual(result["time_fraction"],1)
+        self.assertAlmostEqual(result["cop_net"],1.163*1.15*5)
+        self.assertIsNone(m.window_summary(1000,1600,mode,999))
+        self.assertIsNone(m.window_summary(1000,2200,mode,1000)["cop_net"])
+
     def test_ui_patch(self):
         fixture=("""
 _WV_HTML = '<nav></nav>'
