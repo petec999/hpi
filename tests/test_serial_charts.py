@@ -115,6 +115,59 @@ class SerialCharts(unittest.TestCase):
         self.assertEqual(env["_hpi_serial_stats"]["reconnects"],1)
         self.assertFalse(env["ser"].isOpen())
 
+    def test_reader_recovers_from_initial_silence(self):
+        env=self.env()
+        clock=[0.0]
+        class FastEvent:
+            stopped=False
+            def is_set(self): return self.stopped
+            def set(self): self.stopped=True
+            def wait(self,delay):
+                clock[0]+=delay
+                return self.stopped
+        buf=io.BytesIO(self.packet(env,[0]*6))
+        class Port:
+            opened=False
+            opens=0
+            def isOpen(self): return self.opened
+            def close(self): self.opened=False
+            def open(self):
+                self.opens+=1
+                self.opened=True
+            def read(self,n):
+                if self.opens==1:
+                    clock[0]+=30
+                    return b""
+                return buf.read(n)
+        env["time"]=SimpleNamespace(monotonic=lambda:clock[0],time=lambda:1000+clock[0])
+        env["event"]=FastEvent()
+        frames={"old":1}
+        seen=[]
+        env["_am"]=SimpleNamespace(frames_lock=threading.Lock(),frames=frames,
+                                   note=lambda key,regs:seen.append((key,regs)))
+        env.update(ser=Port(),_pump_frame_last_at={"R141":1.0,"R241":1.0},
+                   _last_block_ts={6:0},UPDATE_INTERVAL_SEC=1,
+                   gpiocontrol=lambda *a:None,GetParametersNEW=lambda *a:None)
+        def start(*args):
+            env["event"].set()
+            return True
+        env["_hpi_start_once"]=start
+        exec(PATCH["READER"],env)
+        with self.assertLogs(level="ERROR"):
+            env["ReadPump"]()
+        self.assertEqual(env["ser"].opens,2)
+        self.assertEqual(seen,[("R101",[0]*6)])
+        self.assertFalse(frames)
+        self.assertFalse(env["ser"].isOpen())
+
+    def test_installed_reader_upgrades_idempotently(self):
+        source=PATCH["HELPER"]+PATCH["SER_OPEN"]+"\n"+PATCH["READER_V1"]
+        updated=PATCH["patch"](source)
+        self.assertIn("HPI RS485 SILENCE RECOVERY v2",updated)
+        self.assertIn(PATCH["SER_DEFER"],updated)
+        self.assertEqual(PATCH["patch"](updated),updated)
+        ast.parse(updated)
+
     def test_chart_atomic_save_and_failed_write(self):
         with tempfile.TemporaryDirectory() as d:
             env=self.env()
