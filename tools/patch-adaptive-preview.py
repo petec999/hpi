@@ -432,6 +432,15 @@ const run=el("run-kpis");run.replaceChildren();const st=d.current_streak;
 for(const [a,b] of [["Bieżąca ciągła praca Auto",st&&st.owner==="auto"?num(st.seconds/3600,2)+" h":"—"],["Rekord Auto",auto.max_continuous_s?num(auto.max_continuous_s/3600,2)+" h":"—"],["Rekord Legacy",owners.legacy&&owners.legacy.max_continuous_s?num(owners.legacy.max_continuous_s/3600,2)+" h":"—"],["Auto – godziny ponad 1 h ciągłości",num(auto.beyond_hour_s/3600,2)+" h"],["Auto – czas pracy Fact",num(auto.running_s/3600,2)+" h"]]){const k=node("div");k.className="kpi";k.append(node("small",a),node("b",b));run.append(k)}
 const ts=(d.thresholds?d.thresholds.groups:[]).flatMap(g=>(g.samples||[]).map(x=>[x.at,g.edge,g.preset,g.flimit?"ON":"OFF",g.target_band,x.twi_offset,x.two_offset]));ts.sort((a,b)=>b[0]-a[0]);table("threshold-samples",["Czas","Przejście","Tryb","FLimit","Nastawa od °C","Twi K","Two K"],ts.map(x=>[dt(x[0]),...x.slice(1,5),num(x[5],3),num(x[6],3)]));''')
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'id="experiment-comparison"' not in html:
+        html=once(html,'<article><h2>Uczenie</h2>','<article><h2>Porównanie konfiguracji testu aktywnego</h2><p id="experiment-comparison-status"></p><div class="scroll"><table id="experiment-comparison"></table></div><small>Mediany z zachowanych zaakceptowanych cykli bieżącej sesji. Fact przy STOP, nie średnia częstotliwość pracy. Brak danych nie oznacza zera. Nie jest to ranking COP ani zużycia energii.</small></article><article><h2>Uczenie</h2>')
+        html=once(html,'const run=el("run-kpis");', '''const ec=d.experiment_comparison;
+el("experiment-comparison-status").textContent=ec&&ec.since?"Sesja od "+dt(ec.since):"Brak sesji";
+const ecNum=(x,k=1)=>x==null?"—":num(x*k,2);
+table("experiment-comparison",["Tryb","FLimit","Postęp","Zachowane cykle","Praca min","Fact STOP Hz","Delta T STOP K"],ec?ec.rows.map(x=>[x.mode,x.flimit?"ON":"OFF",x.completed+"/"+ec.per_level,x.retained,ecNum(x.run_seconds,1/60),ecNum(x.stop_fact),ecNum(x.stop_delta)]):[]);
+const run=el("run-kpis");''')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
     if 'id="operation-24h"' not in html:
         html=once(html,'<article><h2>Uczenie</h2>','<article><h2>Ostatnie 24 godziny — wszystkie tryby</h2><p id="operation-window"></p><div class="grid" id="operation-24h"></div><small>96 zakończonych kwadransów UTC, do 15 min opóźnienia. Szacunki z kolejnych świeżych próbek; nieznany czas nie oznacza postoju. Starty według Fact. Odszranianie i CWU wg wskazań sterownika, nie pomiar energii.</small></article><article><h2>Uczenie</h2>')
         html=once(html,'const run=el("run-kpis");', '''const op=d.operation_24h,opGrid=el("operation-24h");opGrid.replaceChildren();
