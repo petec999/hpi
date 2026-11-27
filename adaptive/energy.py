@@ -500,7 +500,7 @@ class EnergyMonitor:
                 return None
             result={}
             for row in self.rows:
-                if (row[6] is not None and row[1]=="co_run" and row[2]==mode and row[9]==session
+                if (row[6] is not None and row[1] in ("co_run","co_idle","defrost") and row[2]==mode and row[9]==session
                         and start<=row[6]-row[3] and row[6]<=stop):
                     self.net_add(result,mode,row)
             if mode not in result:
