@@ -325,6 +325,19 @@ $("am-g-save").addEventListener("click",async()=>{
     html=once(html,' const ex=v.experiment;',' const ex=v.experiment;guardPaint(v);')
     return html
 
+def continuous_ui(html):
+    if 'id="am-continuous-status"' in html:
+        return html
+    html=once(html,'<p id="am-test-count"></p>','<p id="am-test-count"></p><p id="am-continuous-status"></p><small>Konfiguracja ukończona: trzy zaakceptowane cykle albo osobna próba ciągła 3 h po stabilizacji. Bez wymuszania STOP; zwykła zmiana dopiero na naturalnym postoju.</small>')
+    html=once(html,' $("am-test-count").textContent=total?done+" / "+total+" ukończonych cykli":"Brak danych";',''' const continuous=ex&&Array.isArray(ex.continuous)?ex.continuous:[];
+ const completed=ex?ex.counts.filter((n,i)=>n>=ex.per_level||continuous[i]).length:0;
+ const units=ex?ex.counts.reduce((a,n,i)=>a+(continuous[i]?ex.per_level:n),0):0;
+ $("am-test-progress").max=ex?ex.levels.length:6;
+ $("am-test-progress").value=completed;
+ $("am-test-count").textContent=ex?completed+" / "+ex.levels.length+" konfiguracji ukończonych · "+done+" pełnych cykli":"Brak danych";
+ $("am-continuous-status").textContent=ex&&ex.since?"Próba ciągła: "+Math.round((ex.continuous_seconds||0)/60)+" / 180 min"+(continuous.some(Boolean)?" · zaliczone: "+continuous.map((x,i)=>x?ex.levels[i]:"").filter(Boolean).join(", "):""):"";''')
+    return html
+
 def guard_api(source):
     if '    out["experiment_guard"]' in source:
         return source
@@ -477,7 +490,7 @@ $("am-decisions-refresh").addEventListener("click",amRefreshDecisions);
 $("am-recent-decisions").addEventListener("toggle",()=>{if($("am-recent-decisions").open)amRefreshDecisions();});
 function amPaint(a){''')
     html=html.replace("Legacy pozostaje domyślne po restarcie.","Zapisany Auto wraca po restarcie po weryfikacji danych.")
-    return guard_ui(html)
+    return continuous_ui(guard_ui(html))
 
 def report_api(source):
     if 'def _wv_adaptive_report_page():' in source:
@@ -528,6 +541,12 @@ const run=el("run-kpis");''')
         html=once(html,'<p id="experiment-comparison-status">','<p id="experiment-guard-report"></p><p id="experiment-comparison-status">')
         html=once(html,'const run=el("run-kpis");','''const eg=ec&&ec.guard;
 el("experiment-guard-report").textContent=eg?(eg.recovering?"Ochrona komfortu aktywna. ":"")+ec.rows.map(x=>x.deferred?x.mode+(x.flimit?" + FLimit":" / OFF")+": "+(x.deferred.reason==="room_shortfall"?"spadek komfortu":"niedobór Two")+" przy "+ecNum(x.deferred.outdoor)+" °C":"").filter(Boolean).join(" · "):"";
+const run=el("run-kpis");''')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'id="experiment-continuous-report"' not in html:
+        html=once(html,'<p id="experiment-comparison-status">','<h3>Próby ciągłe (oddzielnie od cykli)</h3><div class="scroll"><table id="experiment-continuous-report"></table></div><small>Stabilne 3 h pracy bez STOP i defrostu, po 15 min stabilizacji; COP dotyczy tylko zmierzonych przedziałów. Nie zastępuje bilansu z defrostem.</small><p id="experiment-comparison-status">')
+        html=once(html,'const run=el("run-kpis");','''table("experiment-continuous-report",["Tryb","Czas min","Pogoda °C","Nastawa °C","Dom °C","Prąd kWh","Ciepło netto kWh","Pokrycie czasu %","COP próbek"],ec?ec.rows.filter(x=>x.continuous).map(x=>{const c=x.continuous,e=c.energy;return [x.mode+(x.flimit?" + FLimit":" / OFF"),ecNum(c.seconds,1/60),ecNum(c.outdoor_min)+" – "+ecNum(c.outdoor_max),ecNum(c.target_min)+" – "+ecNum(c.target_max),ecNum(c.room_min)+" – "+ecNum(c.room_max),ecNum(e&&e.kwh),ecNum(e&&e.net_heat_kwh),ecNum(e&&e.time_fraction,100),ecNum(e&&e.cop_net)]}):[]);
 const run=el("run-kpis");''')
         line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
