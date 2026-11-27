@@ -1715,6 +1715,7 @@ class ExperimentGuard:
         self.water_since=None
         self.room_since=None
         self.recovery_since=None
+        self.room_missing_since=None
         self.water_seconds=0
         self.room_seconds=0
         self.recovery_seconds=0
@@ -1742,6 +1743,7 @@ class ExperimentGuard:
             self.recovery_since=None
             self.recovery_seconds=0
         self.previous=(now,s.mode,s.relay,s.target,recovering)
+        self.room_missing_since=(self.room_missing_since if self.room_missing_since is not None else now) if room is None else None
         low_room=room is not None and (room<self.cfg["minimum_room"] or
                     self.reference is not None and self.reference-room>=self.cfg["room_drop"]-1e-6)
         water_low=s.heating and s.hz>0 and s.requested_hz>0 and s.target-s.supply_temp>=self.cfg["water_gap"]
@@ -1766,7 +1768,10 @@ class ExperimentGuard:
         self.room_seconds=now-self.room_since if self.room_since is not None else 0
         if self.room_seconds>=60*self.cfg["room_minutes"]:
             return "room_shortfall"
-        if self.water_seconds>=60*self.cfg["water_minutes"]:
+        # A water deficit alone is not a comfort failure when a valid room
+        # sensor confirms acceptable temperature. Use water-only fallback
+        # only when room data are unavailable throughout the confirmation.
+        if self.water_seconds>=60*self.cfg["water_minutes"] and self.room_missing_since is not None and now-self.room_missing_since>=60*self.cfg["water_minutes"]:
             return "water_shortfall"
         return None
 
