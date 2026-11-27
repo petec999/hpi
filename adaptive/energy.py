@@ -443,6 +443,27 @@ class EnergyMonitor:
         if changed:
             self.save_cycles()
 
+    def meter_average_power(self,now):
+        # Average over contiguous, measured counter increments only.
+        # Do not bridge gaps, resets or stale readings.
+        if not self.cfg["enabled"] or not self.cfg["energy"] or not self.rows or self.last is None:
+            return None
+        end=self.rows[-1][0]
+        if self.last[0]!=end or not 0<=now-end<=self.cfg["interval"]+35:
+            return None
+        seconds=0.0
+        kwh=0.0
+        cursor=end
+        for row in reversed(self.rows):
+            if abs(row[0]-cursor)>0.001 or seconds+row[3]>300:
+                break
+            seconds+=row[3]
+            kwh+=row[4]
+            cursor=row[0]-row[3]
+        if seconds<60:
+            return None
+        return {"kw":kwh*3600/seconds,"seconds":seconds}
+
     def summary(self,now=None):
         now=time.monotonic() if now is None else now
         with self.lock:
@@ -458,6 +479,7 @@ class EnergyMonitor:
                      if v["paired_seconds"]>=300 and v["paired_kwh"]>=.05 else None)) for k,v in rows.items()}
             return {"settings":dict(self.cfg),"error":self.error,
                     "current":dict(self.current) if self.current_at is not None and 0<=now-self.current_at<=MAX_READ_AGE else {},
+                    "meter_average_power":self.meter_average_power(now),
                     "busy":self.busy,"groups_24h":expose(totals),"modes_24h":expose(modes),
                     "experiment":expose(self.experiment),"session":self.session,
                     "cycles":list(self.cycles.values()),"cycle_session":self.cycle_session,"cycle_error":self.cycle_error,
