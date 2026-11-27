@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch, HeaterCounter, OperationMonitor
+from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch, HeaterCounter, OperationMonitor, PassiveInsights
 
 class SelectionBlocked(ValueError):
     """Safe, fixed activation reason exposed to authenticated UI."""
@@ -41,6 +41,7 @@ class Runtime:
         self.heater_counter=HeaterCounter(Path(learning_path).with_name(".adaptive-heater-counter-v1.json") if learning_path else None)
         # Prior experimental ON marker is diagnostic only after retirement.
         self.heater_marker=Path(learning_path).with_name(".adaptive-heater-owned-v1") if learning_path else None
+        self.insights=PassiveInsights()
         self.observer_frames=None
         self.experiment_counts_saved=[0]*len(self.EXPERIMENT_LEVELS)
         self.experiment_metrics=[[] for _ in self.EXPERIMENT_LEVELS]
@@ -639,6 +640,7 @@ class Runtime:
             power=int(frames["R101"][1][0])&255
             if self.observer_frames is not None and not all(a>b for a,b in zip(stamps,self.observer_frames)):
                 if max(stamps)-min(stamps)>self.MAX_AGE:
+                    self.insights.interrupt()
                     self.operation.interrupt()
                     self.observer.interrupt("frame_gap",time.time())
                     self.thresholds.interrupt()
@@ -662,6 +664,10 @@ class Runtime:
                 outdoor=None
             wall=time.time()
             try:
+                self.insights.observe(s,co_enabled,self.fresh_room_sensor("intemp",wall),self.fresh_room_sensor("outtemp",wall))
+            except Exception:
+                self.insights.interrupt()
+            try:
                 self.operation.observe(s,wall,co_enabled)
             except Exception:
                 self.operation.interrupt()
@@ -678,6 +684,7 @@ class Runtime:
                 self.thresholds.interrupt()
         except Exception:
             self.building_previous=None
+            self.insights.interrupt()
             self.operation.interrupt()
             self.observer.interrupt("telemetry_unavailable",time.time())
             self.report.interrupt()
@@ -749,12 +756,25 @@ class Runtime:
                 "short_cycles":sum(1 for r in rows if r[1] is not None and 0<r[1]<600),
                 "duration_samples":sum(1 for r in rows if r[1] is not None),
                 "quality":"complete" if len(rows)>=self.EXPERIMENT_CYCLES else "partial"})
-        outdoor=[r["outdoor"] for r in result if r["outdoor"] is not None]
+        groups=self.experiment_samples()
+        outdoor=[sample[4] for rows in groups for sample in rows if sample[4] is not None]
         spread=max(outdoor)-min(outdoor) if len(outdoor)>=2 else None
-        complete=all(r["quality"]=="complete" for r in result)
-        comparable=complete and len(outdoor)==len(result) and spread<=2
+        complete=all(r["quality"]=="complete" and r["completed"]>=self.EXPERIMENT_CYCLES and r["duration_samples"]==self.EXPERIMENT_CYCLES for r in result)
+        comparable=complete and len(outdoor)==len(result)*self.EXPERIMENT_CYCLES and spread is not None and spread<=2
+        observations=[]
+        if comparable:
+            longest=max(r["run_seconds"] for r in result)
+            # Describe a measured property, never infer efficiency or change control.
+            labels=[r["mode"]+(" + FLimit" if r["flimit"] else " / FLimit OFF") for r in result if r["run_seconds"]==longest]
+            observations.append("Najdłuższa mediana cyklu: "+", ".join(labels)+" ("+str(round(longest/60,1))+" min).")
+            observations.append("Nie kontrolowano zysków cieplnych, energii ani nastawy w całej sesji; to nie ranking sprawności.")
+        else:
+            observations.append("Nie wyznaczono zwycięzcy: potrzeba pełnych czasów pracy i pomiarów pogody dla wszystkich cykli.")
+        for r in result:
+            if r["duration_samples"]>=3 and r["short_cycles"]>=2:
+                observations.append(r["mode"]+(" + FLimit" if r["flimit"] else " / FLimit OFF")+": co najmniej 2 z 3 cykli poniżej 10 min; sprawdź taktowanie i zapotrzebowanie.")
         return {"since":self.experiment_since,"per_level":self.EXPERIMENT_CYCLES,"rows":result,
-                "outdoor_spread":spread,"comparable":comparable,
+                "outdoor_spread":spread,"comparable":comparable,"observations":observations,
                 "assessment":"Porównanie opisowe: podobna pogoda, brak pomiaru energii" if comparable else
                     "Za mało cykli lub zbyt różne / nieznane warunki pogodowe"}
 
@@ -857,6 +877,11 @@ class Runtime:
             return
         try:
             self.last_tick=now
+            try:
+                if self.insights.resource_due(now):
+                    self.insights.resource(now,self.storage_diagnostics())
+            except Exception:
+                pass
             self.learning.save_if_due(now)
             if self.control not in ("auto","shadow"):
                 self.idle_frame=None
@@ -1077,6 +1102,17 @@ class Runtime:
             # Do not force a write during defrost/DHW or an unconfirmed transition.
             self.g["logging"].info("Heating curve settings saved from WWW v2")
 
+    def fresh_room_sensor(self,key,wall):
+        # Primary timestamp comes from the actual successful sensor read, not UI status age.
+        try:
+            row=self.g.get("_temp_primary",{}).get(key,{})
+            if self.raw(key+"_status")!="ok" or not 0<=wall-self.number(row.get("ts"))<=180:
+                return None
+            value=self.number(row.get("value"))
+            return value if abs(value-self.number(self.raw(key)))<=0.11 else None
+        except (ValueError,TypeError,AttributeError):
+            return None
+
     def observe_building(self,s,now):
         # RAM only; use fresh room sensor and ordinary CO samples.
         if not hasattr(self,"building_rates"):
@@ -1126,7 +1162,7 @@ class Runtime:
             warnings.append("Nieświeże ramki: "+", ".join(stale))
         if self.pending and now>self.pending[2]:
             warnings.append("Przekroczony czas potwierdzenia zapisu")
-        return {"warnings":warnings,"building":self.building_summary()}
+        return {"warnings":warnings,"building":self.building_summary(),"insights":self.insights.summary(now)}
 
     def storage_diagnostics(self):
         """Read-only process and filesystem diagnostics; no history writes."""
