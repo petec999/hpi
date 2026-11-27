@@ -545,7 +545,7 @@ const run=el("run-kpis");''')
         line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
     if 'id="experiment-continuous-report"' not in html:
-        html=once(html,'<p id="experiment-comparison-status">','<h3>Próby ciągłe (oddzielnie od cykli)</h3><div class="scroll"><table id="experiment-continuous-report"></table></div><small>Stabilne 3 h pracy bez STOP i defrostu, po 15 min stabilizacji; COP dotyczy tylko zmierzonych przedziałów. Nie zastępuje bilansu z defrostem.</small><p id="experiment-comparison-status">')
+        html=once(html,'<p id="experiment-comparison-status">','<h3>Próby ciągłe (oddzielnie od cykli)</h3><div class="scroll"><table id="experiment-continuous-report"></table></div><small>3 h normalnej eksploatacji po 15 min stabilizacji, z postojami i odszranianiem. COP netto dotyczy tylko zmierzonych przedziałów.</small><p id="experiment-comparison-status">')
         html=once(html,'const run=el("run-kpis");','''table("experiment-continuous-report",["Tryb","Czas min","Pogoda °C","Nastawa °C","Dom °C","Prąd kWh","Ciepło netto kWh","Pokrycie czasu %","COP próbek"],ec?ec.rows.filter(x=>x.continuous).map(x=>{const c=x.continuous,e=c.energy;return [x.mode+(x.flimit?" + FLimit":" / OFF"),ecNum(c.seconds,1/60),ecNum(c.outdoor_min)+" – "+ecNum(c.outdoor_max),ecNum(c.target_min)+" – "+ecNum(c.target_max),ecNum(c.room_min)+" – "+ecNum(c.room_max),ecNum(e&&e.kwh),ecNum(e&&e.net_heat_kwh),ecNum(e&&e.time_fraction,100),ecNum(e&&e.cop_net)]}):[]);
 const run=el("run-kpis");''')
         line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
