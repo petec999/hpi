@@ -903,15 +903,20 @@ class Runtime:
             self.observe_heater(now)
             self.observe_registers(now)
             self.observe_hysteresis()
+            state=None
             try:
-                sample,zone,curve,_=self.snapshot()
-                co=self.flag(self.raw('pch'))
-                group=('fault' if sample.error else 'defrost' if sample.defrost else 'protection' if sample.override else 'dhw' if sample.dhw else 'co_run' if co and sample.hz>0 else 'co_idle' if co else 'other')
-                mode=sample.mode+(' + FLimit' if sample.relay else ' / FLimit OFF')
-                session=self.experiment_since if self.control=='experiment' and self.experiment_saved else None
-                state=(group,mode,sample.supply_temp-sample.return_temp,session)
+                if self.energy.settings()["enabled"]:
+                    with self.frames_lock:
+                        frames=dict(self.frames)
+                    sample,zone,curve,_=self.snapshot(frames)
+                    power=int(frames["R101"][1][0])&255
+                    co=bool(power&1 and power&4 and not power&2) and self.flag(self.raw("pch"))
+                    group=('fault' if sample.error else 'defrost' if sample.defrost else 'protection' if sample.override else 'dhw' if sample.dhw else 'co_run' if co and sample.hz>0 else 'co_idle' if co else 'other')
+                    mode=sample.mode+(' + FLimit' if sample.relay else ' / FLimit OFF')
+                    session=self.experiment_since if self.control=='experiment' and self.experiment_saved else None
+                    state=(group,mode,sample.supply_temp-sample.return_temp,session)
             except Exception:
-                state=None
+                pass
             try:
                 self.energy.poll(now,state)
             except Exception:
