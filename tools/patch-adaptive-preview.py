@@ -353,6 +353,13 @@ def status_ui(html):
  $("am-observer-diagnostics").textContent=diag?"Obserwator: "+(phases[diag.phase]||diag.phase)+(diag.blocker?" · "+reasonLabel(diag.blocker):"")+" · odrzucone próby: "+diag.rejected:"";
  $("am-observer-rejections").textContent=diag?Object.entries(diag.reasons||{}).sort((a,b)=>b[1]-a[1]).map(([k,n])=>reasonLabel(k)+": "+n).join(" · ")+(diag.last_rejection?" | ostatnia: "+reasonLabel(diag.last_rejection.reason)+(diag.last_rejection.detail?" ("+diag.last_rejection.detail+")":""):""):"";
  const hs=(x)=>''')
+    if 'id="am-storage-diagnostics"' not in html:
+        html=once(html,'<p id="am-experiment"></p>','<p id="am-experiment"></p><details><summary>Diagnostyka systemowa RAM / SD</summary><p id="am-storage-diagnostics"></p><p id="am-storage-files"></p><small>Zapisy procesu od uruchomienia, nie fizyczne zużycie karty SD. Bez zapisywania historii diagnostyki.</small></details>')
+        html=once(html,' const ex=v.experiment;', ''' const sd=v.storage_diagnostics||{};
+ const mib=x=>Number.isFinite(x)?(x/1048576).toFixed(2)+" MiB":"—";
+ $("am-storage-diagnostics").textContent="RAM: "+mib(sd.VmRSS_bytes)+" · maksimum: "+mib(sd.VmHWM_bytes)+" · wolne: "+mib(sd.disk_free_bytes)+" / "+mib(sd.disk_total_bytes)+" · zapisy procesu: "+mib(sd.write_bytes_bytes);
+ $("am-storage-files").textContent=Object.entries(sd.state_files||{}).map(([k,n])=>k+": "+mib(n)).join(" · ");
+ const ex=v.experiment;''')
     html=html.replace("Legacy pozostaje domyślne po restarcie.","Zapisany Auto wraca po restarcie po weryfikacji danych.")
     return html
 
