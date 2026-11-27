@@ -42,6 +42,8 @@ class Runtime:
         # Prior experimental ON marker is diagnostic only after retirement.
         self.heater_marker=Path(learning_path).with_name(".adaptive-heater-owned-v1") if learning_path else None
         self.observer_frames=None
+        self.experiment_counts_saved=[0]*len(self.EXPERIMENT_LEVELS)
+        self.experiment_watermark=0
         self.experiment_since=None
         self.experiment_idle=None
         self.experiment_initial=None
@@ -76,6 +78,14 @@ class Runtime:
                     or not isinstance(initial,list) or len(initial)!=2 or initial[0] not in ("eco","quiet","turbo")
                     or type(initial[1]) is not bool):
                 raise ValueError("invalid experiment session")
+            counts=session.get("counts",[0]*len(self.EXPERIMENT_LEVELS))
+            watermark=session.get("watermark",0)
+            if (not isinstance(counts,list) or len(counts)!=len(self.EXPERIMENT_LEVELS)
+                    or any(type(n) is not int or not 0<=n<=self.EXPERIMENT_CYCLES for n in counts)
+                    or type(watermark) not in (int,float) or not math.isfinite(watermark) or watermark<0):
+                raise ValueError("invalid experiment progress")
+            self.experiment_counts_saved=counts
+            self.experiment_watermark=watermark
             self.experiment_since=since
             self.experiment_initial=tuple(initial)
             self.experiment_saved=True
@@ -384,6 +394,8 @@ class Runtime:
                 initial=(s.mode,s.relay)
                 # Persist before allowing any experiment writes.
                 self.persist_experiment({"since":since,"initial":list(initial)})
+                self.experiment_counts_saved=[0]*len(self.EXPERIMENT_LEVELS)
+                self.experiment_watermark=0
                 self.experiment_since=since
                 self.experiment_initial=initial
             self.control=mode
@@ -658,6 +670,10 @@ class Runtime:
             self.report.interrupt()
             self.thresholds.interrupt()
         finally:
+            try:
+                self.checkpoint_experiment_progress()
+            except SelectionBlocked:
+                pass
             self.observer.save_if_due(time.monotonic())
             try:
                 self.report.save_if_due(time.monotonic())
@@ -666,16 +682,34 @@ class Runtime:
             except Exception:
                 pass
 
-    def experiment_counts(self):
-        counts=[0]*len(self.EXPERIMENT_LEVELS)
+    def experiment_progress(self):
+        counts=list(self.experiment_counts_saved)
+        watermark=self.experiment_watermark
         if self.experiment_since is not None:
             for row in self.observer.rows:
                 c=row["context"]
-                if c[0]=="experiment" and row["start"]["at"]>=self.experiment_since:
+                at=row["start"]["at"]
+                if c[0]=="experiment" and at>=self.experiment_since and at>self.experiment_watermark:
                     pair=tuple(c[1:3])
                     if pair in self.EXPERIMENT_LEVELS:
-                        counts[self.EXPERIMENT_LEVELS.index(pair)]+=1
-        return counts
+                        i=self.EXPERIMENT_LEVELS.index(pair)
+                        counts[i]=min(self.EXPERIMENT_CYCLES,counts[i]+1)
+                        watermark=max(watermark,at)
+        return counts,watermark
+
+    def experiment_counts(self):
+        return self.experiment_progress()[0]
+
+    def checkpoint_experiment_progress(self):
+        if not self.experiment_saved or self.experiment_since is None:
+            return
+        counts,watermark=self.experiment_progress()
+        if watermark==self.experiment_watermark:
+            return
+        self.persist_experiment({"since":self.experiment_since,"initial":list(self.experiment_initial),
+                                 "counts":counts,"watermark":watermark})
+        self.experiment_counts_saved=counts
+        self.experiment_watermark=watermark
 
     def experiment_tick(self,s,zone,curve):
         # Opt-in, native idle only. Never change demand, water target or Fset.
