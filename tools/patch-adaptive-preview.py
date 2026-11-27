@@ -461,6 +461,19 @@ el("building-trend").textContent=bt?"Próbki: "+bt.samples+" · pokrycie "+num(b
 const run=el("run-kpis");''')
         line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'id="passive-insights"' not in html:
+        html=once(html,'<article><h2>Uczenie</h2>','<article id="passive-insights"><h2>Wnioski i stabilność</h2><p id="experiment-insights"></p><h3>Ogrzewanie i stygnięcie (do 7 dni)</h3><div id="thermal-insights"></div><h3>Odszranianie (24 h)</h3><p id="defrost-insights"></p><h3>Zasoby procesu</h3><div class="scroll"><table id="stability-insights"></table></div><small>Historia tylko w RAM, od restartu. Okna 30 min po 10 min ustalenia stanu. Wychładzanie uwzględnia bezwładność instalacji i zyski ciepła. Brak danych nie jest zerem. Nie jest to pomiar COP, mocy ani zużycia fizycznego SD.</small></article><article><h2>Uczenie</h2>')
+        html=once(html,'const run=el("run-kpis");', '''const pi=d.diagnostics&&d.diagnostics.insights;
+el("experiment-insights").textContent=ec&&ec.observations?ec.observations.join(" · "):"Brak wniosków";
+const thermal=pi&&pi.thermal,fmtInsight=(x,k=1)=>x==null?"—":num(x*k,2);
+el("thermal-insights").textContent=thermal?["Praca: "+thermal.run.windows+" okien, "+fmtInsight(thermal.run.median_k_h)+" K/h","Postój: "+thermal.idle.windows+" okien, "+fmtInsight(thermal.idle.median_k_h)+" K/h","Orientacyjna skala stygnięcia: "+fmtInsight(thermal.cooling_proxy_h)+" h ("+thermal.cooling_windows+" okien)"].join(" · "):"Brak danych";
+const df=pi&&pi.defrost_24h;
+el("defrost-insights").textContent=df?df.completed+" pełnych obserwowanych odszronień · mediana "+fmtInsight(df.median_seconds,1/60)+" min · do ponownej pracy CO "+fmtInsight(df.recovery_median_seconds,1/60)+" min ("+df.recovery_samples+" pomiarów)":"Brak danych";
+const deltaInsight=(o,k=1)=>o?fmtInsight(o.delta,k)+" / max "+fmtInsight(o.peak,k):"—";
+table("stability-insights",["Okno","Próbki","Pokrycie h","Status","RAM Δ / max MiB","Wątki Δ / max","FD Δ / max","Zapisy MiB/d"],pi?[["24 h",pi.stability_24h],["7 dni",pi.stability_7d]].map(([label,x])=>[label,x.samples,fmtInsight(x.span_seconds,1/3600),x.complete?"pełne":"niepełne",deltaInsight(x.VmRSS_bytes,1/1048576),deltaInsight(x.threads),deltaInsight(x.open_fds),fmtInsight(x.write_bytes_per_day,1/1048576)]):[]);
+const run=el("run-kpis");''')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
     if 'id="operation-24h"' not in html:
         html=once(html,'<article><h2>Uczenie</h2>','<article><h2>Ostatnie 24 godziny — wszystkie tryby</h2><p id="operation-window"></p><div class="grid" id="operation-24h"></div><small>96 zakończonych kwadransów UTC, do 15 min opóźnienia. Szacunki z kolejnych świeżych próbek; nieznany czas nie oznacza postoju. Starty według Fact. Odszranianie i CWU wg wskazań sterownika, nie pomiar energii.</small></article><article><h2>Uczenie</h2>')
         html=once(html,'const run=el("run-kpis");', '''const op=d.operation_24h,opGrid=el("operation-24h");opGrid.replaceChildren();
