@@ -245,5 +245,54 @@ class PassiveInsightTests(unittest.TestCase):
         self.assertFalse(r.experiment_comparison()["comparable"])
 
 
+class BackupTests(unittest.TestCase):
+    def test_backup_manifest_rotation_and_path_validation(self):
+        import runpy
+        import tarfile
+        import io
+        from unittest.mock import patch
+        b=runpy.run_path(str(Path(__file__).resolve().parents[1]/"tools/haierpi-backup.py"))
+        g=b["create"].__globals__
+        payload={"opt/config.ini":b"[HA]\nkey=value\n","opt/haier/main.py":b"pass\n",
+                 "opt/haier/HPi/GPIO.py":b"pass\n","opt/haier/.adaptive-experiment-v1.json":b"{}"}
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)/"backups"
+            with patch.dict(g,{"STORE":root,"sources":lambda:payload}):
+                for _ in range(8):
+                    name=b["create"]()
+                    self.assertEqual(b["validate"](root/name),payload)
+                self.assertEqual(len(b["archives"]()),7)
+                self.assertEqual(root.stat().st_mode&0o777,0o700)
+                with self.assertRaises(ValueError):
+                    b["archive_path"]("../outside")
+                bad=root/"bad.tar.gz"
+                with tarfile.open(bad,"w:gz") as t:
+                    m=tarfile.TarInfo("../outside");m.size=1
+                    t.addfile(m,io.BytesIO(b"x"))
+                with self.assertRaises(ValueError):
+                    b["validate"](bad)
+                with tarfile.open(bad,"w:gz") as t:
+                    m=tarfile.TarInfo("opt/config.ini");m.type=tarfile.SYMTYPE;m.linkname="/etc/passwd"
+                    t.addfile(m)
+                with self.assertRaises(ValueError):
+                    b["validate"](bad)
+                with tarfile.open(bad,"w:gz") as t:
+                    m=tarfile.TarInfo("manifest.json");m.size=2
+                    t.addfile(m,io.BytesIO(b"{}"))
+                with self.assertRaises(ValueError):
+                    b["validate"](bad)
+
+    def test_backup_web_patch_and_access_controls(self):
+        import runpy
+        b=runpy.run_path(str(Path(__file__).resolve().parents[1]/"tools/patch-backup.py"))
+        source='_WV_HTML = "<nav></nav>"\n# HOME-IOT WEB UI V2 END\n'
+        result=b["patch"](source)
+        self.assertEqual(b["patch"](result),result)
+        self.assertIn('href="/v2/backup"',result)
+        self.assertEqual(result.count("@login_required"),3)
+        self.assertIn("X-HaierPi-CSRF",result)
+        self.assertIn("systemd-run",result)
+        compile(result,"main.py","exec")
+
 if __name__ == "__main__":
     unittest.main()
