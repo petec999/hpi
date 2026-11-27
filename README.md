@@ -31,7 +31,9 @@ The experiment has no calendar deadline; completion restores the original combin
 
 ## Diagnostics and data
 
+- **Hysteresis rejection diagnostics:** current phase, blocker and rejected attempts by reason since service startup, without additional RS485 traffic. Strict cycles still require stable target and configuration. Frame timestamps and decoded values come from the same captured frame set.
 - **Native threshold estimation:** empirical START near target −2 K (Twi/Two idle proxy); STOP near target +5 K (Two). Estimates require repeated stable observations; defaults remain when evidence is insufficient. Neither is a manufacturer-confirmed threshold.
+- **Last 24 hours:** read-only sampled compressor runtime, starts, CO, DHW, defrost, protection and missing-data coverage over 96 finished UTC quarters. No inference of power or energy. Storage is bounded, separate from the historical CO performance report.
 - **Adaptive report:** `/v2/adaptive-report`, authenticated JSON and CSV, weather/target-matched Auto and Legacy groups, frequency-confirmed running time, continuous-operation KPIs, threshold samples and decision history.
 - **Heater A4A:** read-only status, observed starts/runtime and last 128 transitions. The experimental A04 writer and MQTT controls were retired after unsuccessful field switching. No replacement writer is enabled. Existing core service/protection logic remains intact.
 - **Register Watch:** passive raw frame comparisons, known signals and candidate changes; last 256 events. No additional RS485 traffic or writes. R101 bit 7 selects TANK, not tank heater output. Independent tank-heater command and native DHW hysteresis parameter remain unresolved.
@@ -45,6 +47,7 @@ The experiment has no calendar deadline; completion restores the original combin
 | .adaptive-learning-two-v3.json | 1024 contexts, 512 KiB load cap; 30 min |
 | .adaptive-hysteresis-v1.json | 128 cycles; 5 min |
 | .adaptive-thresholds-v1.json | 24 samples per context, 1 MiB cap; 5 min |
+| .adaptive-operation-v1.json | 100 quarter-hour buckets, 128 KiB cap; 30 min |
 | .adaptive-report-v1.json | 90 UTC days / 2048 groups, 512 events, 2 MiB cap; 30 min |
 | .adaptive-register-watch-v1.json | 256 events, 512 KiB cap; 30 min |
 | .adaptive-heater-counter-v1.json | 128 transitions, 32 KiB cap; 30 min |

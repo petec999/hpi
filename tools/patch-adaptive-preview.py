@@ -335,6 +335,15 @@ def status_ui(html):
         html=once(html,' $("am-stop-margin").textContent=fmt(v.stop_margin)+" K";',' $("am-stop-margin").textContent=tm&&v.supply_temp!=null?fmt(tm.stop_target-v.supply_temp)+" K":"—";')
     if 'href="/v2/adaptive-report"' not in html:
         html=once(html,'<h3>AntiON-OFF v2</h3>','<h3>AntiON-OFF v2</h3><p><a href="/v2/adaptive-report">Raport Adaptive →</a></p>')
+    if 'id="am-observer-diagnostics"' not in html:
+        html=once(html,'<p id="am-hysteresis-time"></p>','<p id="am-hysteresis-time"></p><p id="am-observer-diagnostics"></p><p id="am-observer-rejections"></p><small>Odrzucone próby od uruchomienia usługi, nie wszystkie cykle pompy. Odczyt diagnostyczny, bez zmiany warunków akceptacji.</small>')
+        html=once(html,' const hs=(x)=>', ''' const diag=h&&h.diagnostics;
+ const reasons={target_changed:"zmiana nastawy",context_changed:"zmiana konfiguracji / sterowania",short_idle:"za krótki postój",short_run:"za krótka praca",no_actual_run:"brak pracy Fact",restart_before_stop_confirmed:"ponowny START przed potwierdzeniem STOP",defrost:"odszranianie",dhw:"CWU",fault:"błąd pompy",protection:"ochrona / serwis",priority_zone:"strefa priorytetowa",target_mismatch:"różnica nastawy i krzywej",co_disabled:"CO wyłączone",no_demand:"brak zapotrzebowania",pending_write:"oczekiwanie na odczyt zwrotny",sample_gap:"luka pomiarowa",frame_gap:"niespójne ramki",telemetry_unavailable:"brak świeżej telemetrii",ineligible:"warunki niekwalifikujące",invalid_sample:"nieprawidłowa próbka"};
+ const phases={blocked:"wstrzymany",waiting:"oczekiwanie",confirming_stop:"potwierdzanie postoju",running_candidate:"obserwacja pełnego cyklu",running_untracked:"praca bez zarejestrowanego START",idle:"postój"};
+ const reasonLabel=x=>reasons[x]||x||"—";
+ $("am-observer-diagnostics").textContent=diag?"Obserwator: "+(phases[diag.phase]||diag.phase)+(diag.blocker?" · "+reasonLabel(diag.blocker):"")+" · odrzucone próby: "+diag.rejected:"";
+ $("am-observer-rejections").textContent=diag?Object.entries(diag.reasons||{}).sort((a,b)=>b[1]-a[1]).map(([k,n])=>reasonLabel(k)+": "+n).join(" · ")+(diag.last_rejection?" | ostatnia: "+reasonLabel(diag.last_rejection.reason)+(diag.last_rejection.detail?" ("+diag.last_rejection.detail+")":""):""):"";
+ const hs=(x)=>''')
     html=html.replace("Legacy pozostaje domyślne po restarcie.","Zapisany Auto wraca po restarcie po weryfikacji danych.")
     return html
 
@@ -368,6 +377,15 @@ table("level-details",["Tryb / FLimit","Godziny","Udział"],d.levels.map((x,i)=>
 const run=el("run-kpis");run.replaceChildren();const st=d.current_streak;
 for(const [a,b] of [["Bieżąca ciągła praca Auto",st&&st.owner==="auto"?num(st.seconds/3600,2)+" h":"—"],["Rekord Auto",auto.max_continuous_s?num(auto.max_continuous_s/3600,2)+" h":"—"],["Rekord Legacy",owners.legacy&&owners.legacy.max_continuous_s?num(owners.legacy.max_continuous_s/3600,2)+" h":"—"],["Auto – godziny ponad 1 h ciągłości",num(auto.beyond_hour_s/3600,2)+" h"],["Auto – czas pracy Fact",num(auto.running_s/3600,2)+" h"]]){const k=node("div");k.className="kpi";k.append(node("small",a),node("b",b));run.append(k)}
 const ts=(d.thresholds?d.thresholds.groups:[]).flatMap(g=>(g.samples||[]).map(x=>[x.at,g.edge,g.preset,g.flimit?"ON":"OFF",g.target_band,x.twi_offset,x.two_offset]));ts.sort((a,b)=>b[0]-a[0]);table("threshold-samples",["Czas","Przejście","Tryb","FLimit","Nastawa od °C","Twi K","Two K"],ts.map(x=>[dt(x[0]),...x.slice(1,5),num(x[5],3),num(x[6],3)]));''')
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'id="operation-24h"' not in html:
+        html=once(html,'<article><h2>Uczenie</h2>','<article><h2>Ostatnie 24 godziny — wszystkie tryby</h2><p id="operation-window"></p><div class="grid" id="operation-24h"></div><small>96 zakończonych kwadransów UTC, do 15 min opóźnienia. Szacunki z kolejnych świeżych próbek; nieznany czas nie oznacza postoju. Starty według Fact. Odszranianie i CWU wg wskazań sterownika, nie pomiar energii.</small></article><article><h2>Uczenie</h2>')
+        html=once(html,'const run=el("run-kpis");', '''const op=d.operation_24h,opGrid=el("operation-24h");opGrid.replaceChildren();
+el("operation-window").textContent=op?dt(op.window_start)+" → "+dt(op.window_end)+(op.storage_error?" · "+op.storage_error:"")+(op.unsaved?" · RAM":""):"Brak danych";
+if(op){const hours=x=>num(x/3600,2)+" h", st=op.states||{};for(const [a,b] of [["Pokrycie danych",hours(op.coverage_s)],["Brak danych",hours(op.missing_s)],["Praca sprężarki Fact",hours(op.compressor_s)],["Starty sprężarki",op.starts],["Starty CO",op.co_starts],["CO – praca",hours(st.co_run)],["CO – postój",hours(st.co_idle)],["Odszranianie",hours(st.defrost)],["Starty odszraniania",op.defrost_starts],["CWU",hours(st.dhw)],["Ochrona / serwis",hours(st.protection)],["Błąd / inne",hours((st.fault||0)+(st.other||0))]]){const k=node("div");k.className="kpi";k.append(node("small",a),node("b",String(b)));opGrid.append(k)}}
+const run=el("run-kpis");''')
+        # Re-read the current line after the preceding performance upgrade.
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
     if 'elif kind=="threshold_samples":' not in source:
         source=once(source,'    elif kind=="events":','''    elif kind=="thresholds":

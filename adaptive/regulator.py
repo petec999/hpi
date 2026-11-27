@@ -471,6 +471,9 @@ class HysteresisObserver:
         self.ran = False
         self.outdoor = None
         self.above = self.empty_above()
+        self.rejections = {}
+        self.last_rejection = None
+        self.blocker = None
         self.dirty = False
         self.last_save = None
         self.storage_error = None
@@ -525,7 +528,16 @@ class HysteresisObserver:
             self.storage_error = type(e).__name__
             self.last_save = time.monotonic()
 
-    def interrupt(self):
+    def reject(self, reason, wall=None, detail=None):
+        self.rejections[reason] = self.rejections.get(reason, 0) + 1
+        self.last_rejection = {"reason":reason,"at":wall,"detail":detail}
+
+    def interrupt(self, reason=None, wall=None, detail=None):
+        # Count a discarded candidate once, never once per invalid poll.
+        if reason is not None:
+            self.blocker = reason
+            if self.start is not None or self.stop is not None:
+                self.reject(reason,wall,detail)
         self.last = None
         self.phase_since = None
         self.start = self.stop = None
@@ -550,7 +562,7 @@ class HysteresisObserver:
                 "outdoor":[previous_outdoor,outdoor],
                 "fact":[before.hz,after.hz],"fset":[before.requested_hz,after.requested_hz]}
 
-    def observe(self, s, control, eligible, wall, outdoor=None):
+    def observe(self, s, control, eligible, wall, outdoor=None, reason=None):
         if type(outdoor) not in (int,float) or not math.isfinite(outdoor) or not -60<=outdoor<=60:
             outdoor=None
         if self.since is None:
@@ -561,17 +573,25 @@ class HysteresisObserver:
                         (s.now,s.target,s.return_temp,s.supply_temp,s.hz,s.requested_hz,wall))
                 and 10 <= s.target <= 65 and -10 <= s.return_temp <= 85
                 and -10 <= s.supply_temp <= 85 and min(s.hz,s.requested_hz) >= 0):
-            self.interrupt()
+            why = reason or ("defrost" if s.defrost else "dhw" if s.dhw else
+                             "fault" if s.error else "protection" if s.override else
+                             "ineligible" if not eligible else "invalid_sample")
+            self.interrupt(why,wall)
             return
         context = (control, s.mode, s.relay, s.target)
+        self.blocker = None
         if context != self.context:
-            self.interrupt()
+            old=self.context
+            why = ("target_changed" if old and old[:3]==context[:3] else "context_changed")
+            detail = (str(old[3])+" → "+str(context[3])+" °C") if why=="target_changed" else None
+            self.interrupt(why if old is not None else None,wall,detail)
             self.context = context
             self.change = wall
         before = self.last
         if before is not None and not 0 < s.now-before.now <= self.MAX_GAP:
-            self.interrupt()
+            self.interrupt("sample_gap",wall)
             before = None
+        self.blocker = None
         previous_outdoor=self.outdoor
         self.outdoor=outdoor
         self.last = s
@@ -580,7 +600,11 @@ class HysteresisObserver:
             self.phase_since = s.now if not active and s.hz == 0 else None
             return
         if active and not before.requested_hz:
-            if self.stop is not None or self.phase_since is None or s.now-self.phase_since < self.MIN_PHASE or before.hz != 0:
+            if self.stop is not None:
+                self.reject("restart_before_stop_confirmed",wall)
+                self.start = None
+            elif self.phase_since is None or s.now-self.phase_since < self.MIN_PHASE or before.hz != 0:
+                self.reject("short_idle",wall)
                 self.start = None
             else:
                 self.start = self.edge(before,s,wall,previous_outdoor,outdoor)
@@ -599,10 +623,16 @@ class HysteresisObserver:
                          round(s.now-self.phase_since,2),self.above) if (
                 self.start is not None and self.ran and self.phase_since is not None
                 and s.now-self.phase_since >= self.MIN_PHASE) else None
+            if self.start is not None and self.stop is None:
+                self.reject("short_run" if self.ran else "no_actual_run",wall)
+                self.start = None
             self.phase_since = None
         if active:
             self.ran = self.ran or s.hz > 0
-        elif s.hz == 0:
+        elif s.hz != 0:
+            # Fset=0 is not a continuous actual compressor stop.
+            self.phase_since = None
+        else:
             if self.phase_since is None:
                 self.phase_since = s.now
             if self.stop is not None and s.now-self.phase_since >= self.POST_STOP:
@@ -643,7 +673,14 @@ class HysteresisObserver:
     def summary(self):
         # Never combine unlike setpoints, presets, relay states or owners.
         group = [r for r in self.rows if tuple(r["context"]) == self.context]
-        result = {"total":len(self.rows),"cycles":len(group),"since":self.since,
+        phase=("blocked" if self.blocker else "waiting" if self.last is None else
+               "confirming_stop" if self.stop is not None else
+               "running_candidate" if self.start is not None else
+               "running_untracked" if self.last.requested_hz>0 else "idle")
+        result = {"diagnostics":{"phase":phase,"blocker":self.blocker,
+                  "rejected":sum(self.rejections.values()),"reasons":dict(self.rejections),
+                  "last_rejection":self.last_rejection,"scope":"since_service_start"},
+                  "total":len(self.rows),"cycles":len(group),"since":self.since,
                   "changed":self.change,"context":self.context,"storage_error":self.storage_error,
                   "unsaved":self.dirty,"enough_samples":len(group)>=20,"last_cycle":group[-1] if group else None}
         for sensor in self.SENSORS:
@@ -1338,6 +1375,149 @@ class HeaterCounter:
             self.error=None
         except (OSError,ValueError,TypeError):
             self.error="heater counter save failed"
+        finally:
+            if temp is not None:
+                try:
+                    os.unlink(temp)
+                except OSError:
+                    pass
+
+
+
+class OperationMonitor:
+    """Read-only sampled operation summary for the last 96 completed UTC quarters.
+    Intervals are attributed to the previous sample and never span missing data.
+    Separate from eligible-CO AdaptiveReport; not a power/energy meter.
+    """
+    QUARTER=900
+    RETAIN=100
+    SAVE_INTERVAL=1800
+    MAX_BYTES=131072
+    STATES=("co_run","co_idle","dhw","defrost","protection","fault","other")
+
+    def __init__(self,path=None):
+        self.path=Path(path) if path else None
+        self.rows={}
+        self.last=None
+        self.dirty=False
+        self.last_save=None
+        self.error=None
+        self.load()
+
+    @classmethod
+    def empty(cls):
+        return dict(coverage_s=0.0,compressor_s=0.0,starts=0,co_starts=0,defrost_starts=0,
+                    states={k:0.0 for k in cls.STATES})
+
+    def load(self):
+        if self.path is None:
+            return
+        try:
+            if self.path.is_symlink() or self.path.stat().st_size>self.MAX_BYTES:
+                raise ValueError("invalid operation file")
+            data=json.loads(self.path.read_text(encoding="utf-8"))
+            if data["schema"]!=1 or not isinstance(data["rows"],dict) or len(data["rows"])>self.RETAIN:
+                raise ValueError("invalid operation schema")
+            for key,row in data["rows"].items():
+                n=int(key)
+                if str(n)!=key or not 0<=n<=100000000 or set(row)!=set(self.empty()) or set(row["states"])!=set(self.STATES):
+                    raise ValueError("invalid operation bucket")
+                coverage=row["coverage_s"]
+                if not AdaptiveReport.number(coverage,0,self.QUARTER) or not AdaptiveReport.number(row["compressor_s"],0,coverage) or not all(AdaptiveReport.number(v,0,coverage) for v in row["states"].values()) or abs(sum(row["states"].values())-coverage)>0.01:
+                    raise ValueError("invalid operation seconds")
+                if not all(type(row[k]) is int and 0<=row[k]<=10000 for k in ("starts","co_starts","defrost_starts")) or row["co_starts"]>row["starts"]:
+                    raise ValueError("invalid operation counts")
+            self.rows=data["rows"]
+            self.last_save=time.monotonic()
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError):
+            self.error="operation load failed"
+            self.last_save=time.monotonic()
+
+    def interrupt(self):
+        self.last=None
+
+    def prune(self,quarter):
+        self.rows={k:v for k,v in self.rows.items() if quarter-self.RETAIN+1<=int(k)<=quarter}
+    
+    def observe(self,s,wall,co_enabled):
+        if not (s.fresh and AdaptiveReport.number(s.now) and AdaptiveReport.number(wall,0,9e10)
+                and AdaptiveReport.number(s.hz,0,500)):
+            self.interrupt()
+            return
+        state=("fault" if s.error else "defrost" if s.defrost else "protection" if s.override else
+               "dhw" if s.dhw else "co_run" if co_enabled and s.hz>0 else
+               "co_idle" if co_enabled else "other")
+        actual=s.hz>0
+        prev=self.last
+        self.last=(s.now,wall,state,actual)
+        quarter=int(wall//self.QUARTER)
+        self.prune(quarter)
+        if prev is None:
+            return
+        pn,pw,ps,pa=prev
+        delta=wall-pw
+        if not (0<s.now-pn<=65 and 0<delta<=65 and abs(delta-(s.now-pn))<=5):
+            return
+        # Split an interval crossing a quarter boundary. Cap coverage to
+        # protect against overlapping observations after wall-clock changes.
+        cursor=pw
+        while cursor<wall:
+            q=int(cursor//self.QUARTER)
+            end=min(wall,(q+1)*self.QUARTER)
+            row=self.rows.setdefault(str(q),self.empty())
+            seconds=min(end-cursor,max(0,self.QUARTER-row["coverage_s"]))
+            row["coverage_s"]+=seconds
+            row["states"][ps]+=seconds
+            if pa:
+                row["compressor_s"]+=seconds
+            cursor=end
+        row=self.rows.setdefault(str(quarter),self.empty())
+        if actual and not pa:
+            row["starts"]+=1
+            if state=="co_run":
+                row["co_starts"]+=1
+        if state=="defrost" and ps!="defrost":
+            row["defrost_starts"]+=1
+        self.prune(quarter)
+        self.dirty=True
+
+    def summary(self,wall):
+        end=int(wall//self.QUARTER)
+        start=end-96
+        totals=self.empty()
+        for key,row in self.rows.items():
+            if start<=int(key)<end:
+                for k in ("coverage_s","compressor_s","starts","co_starts","defrost_starts"):
+                    totals[k]+=row[k]
+                for k,v in row["states"].items():
+                    totals["states"][k]+=v
+        return dict(totals,window_start=start*self.QUARTER,window_end=end*self.QUARTER,
+                    missing_s=max(0,86400-totals["coverage_s"]),storage_error=self.error,unsaved=self.dirty)
+
+    def save_if_due(self,now):
+        if not self.dirty or self.path is None or (self.last_save is not None and now-self.last_save<self.SAVE_INTERVAL):
+            return
+        self.last_save=now
+        temp=None
+        try:
+            if self.path.is_symlink():
+                raise ValueError("symlink operation path")
+            raw=json.dumps({"schema":1,"rows":self.rows},separators=(",",":"),allow_nan=False).encode("utf-8")
+            if len(raw)>self.MAX_BYTES:
+                raise ValueError("operation file too large")
+            fd,temp=tempfile.mkstemp(prefix=".operation-",dir=str(self.path.parent))
+            with os.fdopen(fd,"wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp,self.path)
+            temp=None
+            self.dirty=False
+            self.error=None
+        except (OSError,ValueError,TypeError):
+            self.error="operation save failed"
         finally:
             if temp is not None:
                 try:

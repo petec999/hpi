@@ -53,7 +53,7 @@ def recent_health():
             if "status_snapshot: " in l:
                 try:
                     d=json.loads(l.split("status_snapshot: ",1)[1])
-                    if (isinstance(d.get("twitwo"),list) and len(d["twitwo"])==2
+                    if (isinstance(d,dict) and isinstance(d.get("twitwo"),list) and len(d["twitwo"])==2
                         and isinstance(d.get("compinfo"),list) and len(d["compinfo"])>=2):
                         snapshots.append(d)
                 except (ValueError,TypeError):
@@ -108,7 +108,7 @@ def main():
             if written:
                 systemctl("restart","haier")
             raise
-        print("Preview installed. Fresh pump telemetry confirmed. Legacy selected on startup.")
+        print("Preview installed. Fresh pump telemetry confirmed. Check current owner in /v2/; saved Auto may resume.")
         print("Open /v2/ using the existing login. Check MQTT heartbeat separately.")
         print("Backup:",backup)
 

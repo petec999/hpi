@@ -58,6 +58,18 @@ class RuntimeTest(unittest.TestCase):
             self.r.snapshot()
         with self.assertRaises(ValueError):
             self.r.choose("auto","legacy")
+    def test_observer_uses_same_frames_for_decoding_and_stamps(self):
+        captured=tuple(self.r.frames[k][0] for k in ("R101","R141","R201","R241"))
+        original=Decoder.GetCHTemp
+        def interleaved(regs):
+            self.now.return_value=1030
+            self.refresh()
+            return original(regs)
+        with patch.object(Decoder,"GetCHTemp",side_effect=interleaved):
+            self.r.observe_hysteresis()
+        self.assertEqual(self.r.observer_frames,captured)
+        self.assertTrue(all(stamp==1030 for stamp,_ in self.r.frames.values()))
+
     def test_gpio_failure_not_a_valid_off_state(self):
         with patch.object(FakeGPIO,"input",return_value=False):
             with self.assertRaises(ValueError):
@@ -427,6 +439,8 @@ class SourceIntegration(unittest.TestCase):
             self.assertIn('id="compare"',report_html)
             self.assertIn('/v2/api/adaptive-report.csv?kind=learning',report_html)
             self.assertIn('id="events"',report_html)
+            self.assertIn('id="operation-24h"',report_html)
+            self.assertIn('id="am-observer-diagnostics"',html)
             self.assertIn('activation_blocker',html)
             self.assertIn('id="am-curve-recalc"',html)
             self.assertIn('href="#am-curve-editor"',html)

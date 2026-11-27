@@ -5,7 +5,7 @@ import math
 import os
 import tempfile
 from pathlib import Path
-from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch, HeaterCounter
+from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch, HeaterCounter, OperationMonitor
 
 class SelectionBlocked(ValueError):
     """Safe, fixed activation reason exposed to authenticated UI."""
@@ -33,6 +33,7 @@ class Runtime:
         observer_path=Path(learning_path).with_name(".adaptive-hysteresis-v1.json") if learning_path else None
         self.observer=HysteresisObserver(observer_path,g.get("logging"))
         self.report=AdaptiveReport(Path(learning_path).with_name(".adaptive-report-v1.json") if learning_path else None)
+        self.operation=OperationMonitor(Path(learning_path).with_name(".adaptive-operation-v1.json") if learning_path else None)
         self.learning.on_record=self.report.learned
         self.thresholds=NativeThresholds(Path(learning_path).with_name(".adaptive-thresholds-v1.json") if learning_path else None)
         self.register_watch=RegisterWatch(Path(learning_path).with_name(".adaptive-register-watch-v1.json") if learning_path else None)
@@ -157,10 +158,13 @@ class Runtime:
             raise ValueError("GPIO readback unavailable: "+pin)
         return value=="1"
 
-    def snapshot(self):
+    def snapshot(self,frames=None):
+        if frames is None:
+            with self.frames_lock:
+                f=dict(self.frames)
+        else:
+            f=frames
         now=time.monotonic()
-        with self.frames_lock:
-            f=dict(self.frames)
         if set(f)!=set(self.SIZES) or any(not 0<=now-t<=self.MAX_AGE for t,_ in f.values()):
             raise ValueError("waiting for four recent complete frames")
         a,b,c,d=(list(f[k][1]) for k in ("R101","R141","R201","R241"))
@@ -315,7 +319,7 @@ class Runtime:
             self.report_event("owner","selected "+mode)
             self.report.interrupt()
             self.thresholds.interrupt()
-            self.observer.interrupt()
+            self.observer.interrupt("context_changed",time.time())
             self.experiment_idle=None
             if mode=="experiment":
                 self.experiment_since=time.time()
@@ -480,6 +484,7 @@ class Runtime:
                 data["learning"]["saved_at"]=self.learning.path.stat().st_mtime if self.learning.path and self.learning.path.exists() else None
             except OSError:
                 data["learning"]["saved_at"]=None
+            data["operation_24h"]=self.operation.summary(time.time())
             data["thresholds"]=self.thresholds.summary()
             data["register_watch"]=self.register_watch.summary(time.monotonic())
             data["heater_counter"]=self.heater_counter.summary(time.monotonic())
@@ -539,38 +544,49 @@ class Runtime:
     def observe_hysteresis(self):
         # Separate from regulation; failures must never influence commands.
         try:
-            s,zone,curve,_=self.snapshot()
             with self.frames_lock:
-                stamps=tuple(self.frames[k][0] for k in ("R101","R141","R201","R241"))
-                power=int(self.frames["R101"][1][0])&255
+                frames=dict(self.frames)
+            s,zone,curve,_=self.snapshot(frames)
+            stamps=tuple(frames[k][0] for k in ("R101","R141","R201","R241"))
+            power=int(frames["R101"][1][0])&255
             if self.observer_frames is not None and not all(a>b for a,b in zip(stamps,self.observer_frames)):
                 if max(stamps)-min(stamps)>self.MAX_AGE:
-                    self.observer.interrupt()
+                    self.operation.interrupt()
+                    self.observer.interrupt("frame_gap",time.time())
                     self.thresholds.interrupt()
                     self.report.interrupt()
                 return
             self.observer_frames=stamps
-            eligible=(self.activation_reason(s,zone,curve) is None
-                      and bool(power&1 and power&4 and not power&2)
-                      and self.flag(self.raw("pch")) and self.gpio("heatdemandpin"))
+            co_enabled=bool(power&1 and power&4 and not power&2) and self.flag(self.raw("pch"))
+            demand=self.gpio("heatdemandpin")
+            eligible=self.activation_reason(s,zone,curve) is None and co_enabled and demand
+            reason=("fault" if s.error else "dhw" if s.dhw else "defrost" if s.defrost else
+                    "protection" if s.override else "priority_zone" if zone!="normal" else
+                    "target_mismatch" if abs(curve-s.target)>1 else "co_disabled" if not co_enabled else
+                    "no_demand" if not demand else "pending_write" if self.pending is not None else "invalid_sample")
             try:
                 outdoor=self.number(self.raw("outtemp"))
             except (TypeError,ValueError):
                 outdoor=None
             wall=time.time()
+            try:
+                self.operation.observe(s,wall,co_enabled)
+            except Exception:
+                self.operation.interrupt()
             # Do not discard ordinary Auto modulation or pending writes from
             # performance cycles. Strict hysteresis keeps its old rules.
             try:
                 self.report.observe(s,self.control,eligible,wall,outdoor)
             except Exception:
                 self.report.interrupt()
-            self.observer.observe(s,self.control,eligible and self.pending is None,wall,outdoor=outdoor)
+            self.observer.observe(s,self.control,eligible and self.pending is None,wall,outdoor=outdoor,reason=reason)
             try:
                 self.thresholds.observe(s,eligible and self.pending is None,wall,self.control)
             except Exception:
                 self.thresholds.interrupt()
         except Exception:
-            self.observer.interrupt()
+            self.operation.interrupt()
+            self.observer.interrupt("telemetry_unavailable",time.time())
             self.report.interrupt()
             self.thresholds.interrupt()
         finally:
@@ -578,6 +594,7 @@ class Runtime:
             try:
                 self.report.save_if_due(time.monotonic())
                 self.thresholds.save_if_due(time.monotonic())
+                self.operation.save_if_due(time.monotonic())
             except Exception:
                 pass
 

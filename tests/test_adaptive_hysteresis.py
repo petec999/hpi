@@ -93,3 +93,25 @@ class ObserverTests(unittest.TestCase):
             self.assertEqual(n.summary()["mean"]["stop"]["offset"],.25)
             self.assertEqual(n.summary()["extended"]["cycles"],0)
             self.assertIsNone(n.summary()["extended"]["stop_fact"])
+
+    def test_rejection_reason_once_and_context_change(self):
+        o=HysteresisObserver()
+        self.feed(o,lambda t,s: replace(s,target=33) if t>=450 else s)
+        diag=o.summary()["diagnostics"]
+        self.assertEqual(diag["reasons"],{"target_changed":1})
+        self.assertEqual(diag["last_rejection"]["detail"],"32 → 33 °C")
+        self.assertEqual(diag["rejected"],1)
+
+    def test_repeated_invalid_polls_reject_once(self):
+        o=HysteresisObserver()
+        for t in range(0,901,30):
+            o.observe(sample(t,300<=t<750),"legacy",t<600,1700000000+t,reason="no_demand")
+        self.assertEqual(o.summary()["diagnostics"]["reasons"],{"no_demand":1})
+        self.assertEqual(o.summary()["diagnostics"]["blocker"],"no_demand")
+
+    def test_short_idle_and_run_are_diagnosed(self):
+        o=HysteresisObserver()
+        for t in range(0,901,30):
+            o.observe(sample(t,60<=t<180 or 510<=t<600),"legacy",True,1700000000+t)
+        self.assertEqual(o.summary()["diagnostics"]["reasons"],{"short_idle":1,"short_run":1})
+        self.assertEqual(len(o.rows),0)

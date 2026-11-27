@@ -8,7 +8,7 @@ Use the [branch README](../README.md) as the current installation reference. Las
 - Keep existing GPIO/RS485, MQTT reconnect/PUBACK and HA watchdog patches. Do not reinstall core or overwrite existing settings.
 - Auto learns bounded responses to confirmed reductions; uses Twi and Two, empirical Two STOP, stable-edge native threshold estimation and startup preparation. Never commands heat demand, setpoint or compressor speed.
 - Saved Auto resumes after fresh eligible data; experiment sessions and pending commands do not resume.
-- Passive reports and register watch operate independently of active ownership. See README for retention and storage paths.
+- Passive reports and register watch operate independently of active ownership. Hysteresis observer diagnostics distinguish discarded attempts from repeated invalid polls; reason counts are RAM-only. Decoded values and frame timestamps share one captured set. See README for retention and storage paths.
 - A04 experimental writer removed after unsuccessful field switching. A4A status/counters retained. Do not reintroduce raw write commands without validated protocol and owner/protection semantics.
 - Separate tank heater status exists in alternate official first-generation Modbus documentation; that map is not the YR-E27 register map. No verified independent CWU heater command or native hysteresis setting. Software TANK hysteresis has not been implemented.
 - HA panel command is maintained in [home-iot-telemetry](https://github.com/petec999/home-iot-telemetry/tree/main/home_assistant); no new dashboard.
