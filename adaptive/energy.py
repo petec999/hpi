@@ -336,7 +336,27 @@ class EnergyMonitor:
             if 0<=prev[2]<=30 and 0<=state[2]<=30:
                 heat=1.163*(a["flow"]*prev[2]+values["flow"]*state[2])*dt/7200
         end_wall=wall if wall is not None and old_wall is not None and abs((wall-old_wall)-dt)<=5 else None
-        row=(now,group,mode,dt,e,heat,end_wall)
+        # Separate signed hydronic balance: a confirmed circulating pump
+        # can transfer heat in either direction, including defrost.
+        # Keep legacy running-only COP and completed cycle schema unchanged.
+        net_heat=None
+        band=None
+        if stable and len(state)>=7 and len(prev)>=7 and group in ("co_run","co_idle","defrost"):
+            def climate(v):
+                outdoor,target=v[4:6]
+                if (type(outdoor) in (float,int) and math.isfinite(outdoor) and -60<=outdoor<=60 and
+                    type(target) in (float,int) and math.isfinite(target) and 10<=target<=65):
+                    return (2*math.floor(outdoor/2),2*math.floor(target/2))
+                return None
+            b=climate(state)
+            if b is not None and b==climate(prev):
+                band=b
+            if prev[6] is False and state[6] is False and group=="co_idle":
+                net_heat=0.0
+            elif prev[6] is True and state[6] is True and "flow" in a and "flow" in values:
+                if -30<=prev[2]<=30 and -30<=state[2]<=30:
+                    net_heat=1.163*(a["flow"]*prev[2]+values["flow"]*state[2])*dt/7200
+        row=(now,group,mode,dt,e,heat,end_wall,band,net_heat,session if stable else None)
         self.rows.append(row)
         if stable and session is not None and group in ("co_run","co_idle"):
             self.add(self.experiment,mode,row)
@@ -443,6 +463,51 @@ class EnergyMonitor:
         if changed:
             self.save_cycles()
 
+    @staticmethod
+    def net_add(target,key,row):
+        b=target.setdefault(key,{"seconds":0,"kwh":0.0,"paired_seconds":0,"paired_kwh":0.0,
+                                "net_heat_kwh":0.0,"defrost_kwh":0.0,"defrost_heat_kwh":0.0,
+                                "defrost_seconds":0,"defrost_paired_seconds":0})
+        dt,e,q=row[3],row[4],row[8]
+        b["seconds"]+=dt
+        b["kwh"]+=e
+        if row[1]=="defrost":
+            b["defrost_kwh"]+=e
+            b["defrost_seconds"]+=dt
+        if q is not None:
+            b["paired_seconds"]+=dt
+            b["paired_kwh"]+=e
+            b["net_heat_kwh"]+=q
+            if row[1]=="defrost":
+                b["defrost_paired_seconds"]+=dt
+                b["defrost_heat_kwh"]+=q
+
+    @staticmethod
+    def net_result(b,expected_seconds=None):
+        coverage=b["paired_seconds"]/b["seconds"] if b["seconds"] else 0
+        time_coverage=b["seconds"]/expected_seconds if expected_seconds else None
+        adequate=coverage>=.9 and (time_coverage is None or time_coverage>=.9)
+        defrost_ok=b["defrost_seconds"]==b["defrost_paired_seconds"]
+        return dict(b,paired_fraction=coverage,time_fraction=time_coverage,
+                    cop_net=(b["net_heat_kwh"]/b["paired_kwh"] if adequate and defrost_ok and
+                             b["paired_seconds"]>=300 and b["paired_kwh"]>=.05 else None))
+
+    def window_summary(self,start,stop,mode,session):
+        # Called at the end of a stable trial. Last asynchronous read may
+        # not have arrived yet; missing coverage is never extrapolated.
+        with self.lock:
+            if not self.cfg["enabled"]:
+                return None
+            result={}
+            for row in self.rows:
+                if (row[6] is not None and row[1]=="co_run" and row[2]==mode and row[9]==session
+                        and start<=row[6]-row[3] and row[6]<=stop):
+                    self.net_add(result,mode,row)
+            if mode not in result:
+                return None
+            return dict(self.net_result(result[mode],stop-start),flow_estimated=self.cfg["flow_source"]=="manual",
+                        electricity_estimated=not bool(self.cfg["energy"]))
+
     def meter_average_power(self,now):
         # Average over contiguous, measured counter increments only.
         # Do not bridge gaps, resets or stale readings.
@@ -469,11 +534,22 @@ class EnergyMonitor:
         with self.lock:
             totals={}
             modes={}
+            climate={}
+            net_groups={}
             for row in self.rows:
                 if now-86400<=row[0]<=now:
                     self.add(totals,row[1],row)
                     if row[1] in ("co_run","co_idle"):
                         self.add(modes,row[2],row)
+                    if row[1] in ("co_run","co_idle","defrost"):
+                        self.net_add(net_groups,row[1],row)
+                        if row[7] is not None:
+                            key=(row[2],row[7][0],row[7][1])
+                            self.net_add(climate,key,row)
+            # Do not present a cross-weather ranking; these are sampled
+            # same-band aggregates, not controlled equal-load tests.
+            climate_rows=[dict(self.net_result(v),mode=k[0],outdoor_band=k[1],target_band=k[2])
+                          for k,v in sorted(climate.items())]
             def expose(rows):
                 return {k:dict(v,cop_estimate=(v["heat_kwh"]/v["paired_kwh"]
                      if v["paired_seconds"]>=300 and v["paired_kwh"]>=.05 else None)) for k,v in rows.items()}
@@ -482,6 +558,7 @@ class EnergyMonitor:
                     "meter_average_power":self.meter_average_power(now),
                     "busy":self.busy,"groups_24h":expose(totals),"modes_24h":expose(modes),
                     "experiment":expose(self.experiment),"session":self.session,
+                    "climate_24h":climate_rows,"net_groups_24h":{k:self.net_result(v) for k,v in net_groups.items()},
                     "cycles":list(self.cycles.values()),"cycle_session":self.cycle_session,"cycle_error":self.cycle_error,
                     "electricity_estimated":not bool(self.cfg["energy"]),"flow_estimated":self.cfg["flow_source"]=="manual",
                     "coverage_seconds":sum(v["seconds"] for v in totals.values()),
