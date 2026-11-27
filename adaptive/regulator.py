@@ -1790,7 +1790,7 @@ class ExperimentGuard:
 
 
 class ContinuousTrial:
-    """Independent stable-running window; never manufactures START/STOP edges."""
+    """Independent normal-operation window including native stops and defrost."""
     SETTLE=900
     DURATION=10800
     MAX_GAP=65
@@ -1810,18 +1810,18 @@ class ContinuousTrial:
         return 2*math.floor(outdoor/2)
 
     def observe(self,s,room,outdoor,reference,minimum_room,eligible,wall):
-        if not (eligible and s.fresh and not (s.error or s.override or s.defrost or s.dhw)
-                and s.heating and s.hz>0 and s.requested_hz>0
+        if not (eligible and s.fresh and not (s.error or s.override or s.dhw)
+                and (s.heating or s.defrost or s.hz==0)
                 and ExperimentGuard.valid_room(room) and ExperimentGuard.valid_room(reference)
                 and room>=minimum_room and room>=reference-.2-1e-6
                 and type(outdoor) in (float,int) and math.isfinite(outdoor) and -60<=outdoor<=60):
             self.reset()
             return None
-        context=(s.mode,s.relay,self.weather_band(outdoor))
+        context=(s.mode,s.relay)
         if (self.context!=context or self.last is None or
                 not 0<s.now-self.last[0]<=self.MAX_GAP or
                 abs((wall-self.last[1])-(s.now-self.last[0]))>5 or
-                abs(s.target-self.last[2])>.25):
+                abs(s.target-self.last[2])>1.0):
             self.reset()
             self.context=context
             self.since=s.now
@@ -1834,7 +1834,7 @@ class ContinuousTrial:
         w[2]=min(w[2],room); w[3]=max(w[3],room)
         w[4]=min(w[4],s.target); w[5]=max(w[5],s.target)
         w[6]=min(w[6],outdoor); w[7]=max(w[7],outdoor)
-        if w[3]-w[2]>.3+1e-6 or w[5]-w[4]>.5+1e-6:
+        if w[3]-w[2]>.5+1e-6 or w[5]-w[4]>1.0+1e-6 or w[7]-w[6]>2.0+1e-6:
             self.reset()
             return None
         self.seconds=s.now-w[0]
