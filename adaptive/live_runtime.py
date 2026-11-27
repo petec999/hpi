@@ -241,11 +241,11 @@ class Runtime:
             if not (session["since"]<=record["start"]<record["stop"]<=time.time()+60 and
                     10800<=record["seconds"]<=10865 and abs(record["stop"]-record["start"]-record["seconds"])<=20 and
                     -60<=record["outdoor_min"]<=record["outdoor_max"]<=60 and
-                    record["outdoor_max"]-record["outdoor_min"]<=2 and
+                    record["outdoor_max"]-record["outdoor_min"]<=2+1e-6 and
                     10<=record["target_min"]<=record["target_max"]<=65 and
-                    record["target_max"]-record["target_min"]<=.5+1e-6 and
+                    record["target_max"]-record["target_min"]<=1.0+1e-6 and
                     5<=record["room_min"]<=record["room_max"]<=40 and
-                    record["room_max"]-record["room_min"]<=.3+1e-6):
+                    record["room_max"]-record["room_min"]<=.5+1e-6):
                 raise ValueError("Invalid continuous trial range")
         self.experiment_continuous=continuous
         if not hasattr(self,"continuous_trial"):
@@ -995,7 +995,13 @@ class Runtime:
         self.status={"reason":"experiment observation","reason_pl":"Eksperyment – obserwacja cyklu, bez zmian podczas pracy",
                      "risk":"paused","actual":s.mode+(" + FLimit" if s.relay else " / FLimit OFF"),
                      "target":s.target,"return_temp":s.return_temp,"supply_temp":s.supply_temp}
-        if not eligible:
+        # Defrost is observational only: never issue a command during it.
+        normal_defrost=(s.defrost and s.fresh and not (s.error or s.dhw or s.override)
+                        and zone=="normal" and abs(curve-s.target)<=1
+                        and 10<=s.target<=65 and -10<=s.supply_temp<=85
+                        and -10<=s.return_temp<=85 and self.gpio("heatdemandpin")
+                        and self.flag(self.raw("pch")))
+        if not eligible and not normal_defrost:
             self.continuous_trial.reset()
             self.experiment_idle=None
             self.status["reason_pl"]="Eksperyment wstrzymany – warunek priorytetowy lub brak zapotrzebowania"
@@ -1034,6 +1040,10 @@ class Runtime:
                 self.report_event("confirmed","Próba ciągła 3 h: "+self.status["actual"])
             except SelectionBlocked:
                 self.experiment_continuous[current_index]=None
+        if normal_defrost:
+            self.experiment_idle=None
+            self.status["reason_pl"]="Odszranianie – wliczane do próby, bez zmian sterowania"
+            return
         remaining=[i for i,n in enumerate(counts) if n<self.EXPERIMENT_CYCLES and self.experiment_continuous[i] is None]
         candidates=[i for i in remaining if self.experiment_guard.can_retry(self.experiment_deferred[i],outdoor)]
         done=not remaining
