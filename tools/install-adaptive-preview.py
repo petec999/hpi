@@ -18,6 +18,7 @@ AM=runpy.run_path(str(ROOT/"tools/patch-adaptive-preview.py"))
 RES=runpy.run_path(str(ROOT/"tools/patch-core-resources.py"))
 SERIAL=runpy.run_path(str(ROOT/"tools/patch-serial-charts.py"))
 AUTH=runpy.run_path(str(ROOT/"tools/patch-local-auth.py"))
+ENERGY=runpy.run_path(str(ROOT/"tools/patch-energy.py"))
 
 def plan(root):
     result=[]
@@ -29,7 +30,7 @@ def plan(root):
         old=raw.decode("utf-8")
         if rel=="main.py":
             base=CORE["MQTT"]["patch"](GPIO["patch_main"](CORE["WD"]["patch"](old)))
-            new=AUTH["patch"](SERIAL["patch"](RES["patch"](AM["patch"](base))))
+            new=ENERGY["patch"](AUTH["patch"](SERIAL["patch"](RES["patch"](AM["patch"](base)))))
         else:
             new=GPIO["patch_gpio"](old)
         compile(new,str(p),"exec")
