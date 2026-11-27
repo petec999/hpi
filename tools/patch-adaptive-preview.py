@@ -274,6 +274,77 @@ def curve_editor_api(source):
                 with _am.lock:''')
     return source
 
+
+def guard_ui(html):
+    if 'id="am-guard-settings"' in html:
+        return html
+    fields=(("water_gap","Niedobór Two [K]",1,5,.1),
+            ("water_minutes","Potwierdzenie niedoboru wody [min]",15,90,1),
+            ("room_drop","Spadek temperatury domu [K]",.3,1.5,.1),
+            ("room_minutes","Potwierdzenie chłodzenia domu [min]",5,30,1),
+            ("minimum_room","Minimalna temperatura domu [°C]",10,25,.1),
+            ("retry_warmer","Ponów po ociepleniu o [K]",1,5,.1),
+            ("recovery_minutes","Stabilizacja przed wznowieniem [min]",10,60,1))
+    inputs="".join('<label>'+label+'<input id="am-g-'+key+'" type="number" min="'+str(lo)+'" max="'+str(hi)+'" step="'+str(step)+'" disabled></label>' for key,label,lo,hi,step in fields)
+    html=once(html,'<p id="am-experiment"></p>','<p id="am-experiment"></p><details id="am-guard-settings"><summary>Ochrona komfortu podczas testu</summary><p id="am-g-status"></p><p id="am-g-deferred"></p><div style="display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(170px,1fr))">'+inputs+'</div><button id="am-g-save" disabled>Zapisz progi</button><button id="am-g-cancel" disabled>Anuluj</button><p id="am-g-msg" role="status"></p><small>Progi można zmieniać poza aktywnym testem. Gdy zabraknie mocy, ochrona może odłączyć FLimit i wybrać Turbo podczas pracy. Zwykłe zmiany testowe nadal tylko przy postoju. Odłożone próby wrócą przy cieplejszej pogodzie po odzyskaniu komfortu. Bez wymuszania START/STOP.</small></details>')
+    html=html.replace('Eksperyment zmienia tryb i FLimit tylko przy potwierdzonym postoju; 3 cykle na konfigurację, bez limitu czasu;', 'Zwykły eksperyment zmienia tryb przy potwierdzonym postoju; ochrona komfortu może zwiększyć moc podczas pracy; 3 cykle na konfigurację;')
+    html=html.replace('Test aktywny – automatyczna zmiana konfiguracji przy postoju','Test aktywny – automatyczna zmiana konfiguracji przy postoju; ochrona komfortu włączona')
+    js="""
+let guardBase=null,guardDirty=false,guardBusy=false,guardMsg="";
+const guardKeys=["water_gap","water_minutes","room_drop","room_minutes","minimum_room","retry_warmer","recovery_minutes"];
+function guardPaint(v){
+ const ex=v&&v.experiment,g=ex&&ex.guard,c=g&&g.settings;
+ if(c&&!guardDirty&&!guardBusy){guardBase=c;for(const k of guardKeys)$("am-g-"+k).value=c[k];}
+ const locked=!c||guardBusy||v.control==="experiment"||v.pending;
+ for(const k of guardKeys)$("am-g-"+k).disabled=locked;
+ const conflict=guardDirty&&c&&guardBase&&JSON.stringify(c)!==JSON.stringify(guardBase);
+ $("am-g-save").disabled=locked||!guardDirty||!!conflict;
+ $("am-g-cancel").disabled=guardBusy||!guardDirty;
+ $("am-g-msg").textContent=guardMsg||(g&&g.settings_error)|| (conflict?"Ustawienia zmienione; anuluj i odśwież.":v&&v.control==="experiment"?"Zatrzymaj test, aby zmienić progi.":"");
+ $("am-g-status").textContent=g?(g.recovering?"ODZYSKIWANIE KOMFORTU / oczekiwanie":"Ochrona gotowa")+" · punkt odniesienia "+fmt(g.reference)+" °C · niedobór wody "+Math.round(g.water_seconds/60)+" min · chłodzenie domu "+Math.round(g.room_seconds/60)+" min · stabilizacja "+Math.round(g.recovery_seconds/60)+" min":"Brak odczytu";
+ $("am-g-deferred").textContent=g&&ex&&Array.isArray(g.deferred)?g.deferred.map((r,i)=>r?ex.levels[i]+": "+(r.reason==="room_shortfall"?"spadek komfortu":"nie osiąga nastawy")+" przy "+fmt(r.outdoor)+" °C"+(r.outdoor==null?" (brak świeżej temperatury; wymaga nowej próby ręcznej)":"; ponów od "+fmt(r.outdoor+c.retry_warmer)+" °C"):"").filter(Boolean).join(" · "):"";
+}
+for(const k of guardKeys)$("am-g-"+k).addEventListener("input",()=>{guardDirty=true;guardMsg="";guardPaint(amState||{});});
+$("am-g-cancel").addEventListener("click",()=>{guardDirty=false;guardMsg="";guardPaint(amState||{});});
+$("am-g-save").addEventListener("click",async()=>{
+ if(!guardBase||!amState||$("am-g-save").disabled)return;
+ const value={};
+ for(const k of guardKeys){const el=$("am-g-"+k);if(!el.checkValidity()||el.value.trim()===""){guardMsg="Nieprawidłowy próg";guardPaint(amState);return;}value[k]=Number(el.value);}
+ guardBusy=true;guardMsg="Zapisywanie…";guardPaint(amState);
+ const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),15000);
+ try{
+  const res=await fetch("./api/control",{method:"POST",credentials:"same-origin",cache:"no-store",headers:{"Content-Type":"application/json","X-HaierPi-CSRF":document.querySelector('meta[name="wv-csrf"]').content},body:JSON.stringify({key:"experiment_guard",value,expected:guardBase}),signal:ctrl.signal});
+  const body=res.redirected?{}:await res.json();
+  if(!res.ok||!body.accepted)throw Error(body.reason||"Zapis odrzucony (HTTP "+res.status+")");
+  guardDirty=false;guardMsg="Zapisano. Oczekiwanie na kolejny odczyt.";
+ }catch(e){guardMsg=e.message||"Niepotwierdzony zapis";}
+ finally{clearTimeout(timer);guardBusy=false;guardPaint(amState||{});}
+});
+"""
+    html=once(html,'function amPaint(a){',js+'\nfunction amPaint(a){')
+    html=once(html,' const ex=v.experiment;',' const ex=v.experiment;guardPaint(v);')
+    return html
+
+def guard_api(source):
+    if '    out["experiment_guard"]' in source:
+        return source
+    source=once(source,'    out["curve_settings"]=_am.curve_settings()','    out["curve_settings"]=_am.curve_settings()\n    out["experiment_guard"]=_am.guard_settings()')
+    source=once(source,'    if key=="curve_settings":\n        value=_am.validate_curve(value)', '''    if key=="experiment_guard":
+        validator=_am_sys.modules["_hpi_adaptive_policy"].ExperimentGuard.validate
+        value=validator(value)
+        expected=validator(expected)
+    elif key=="curve_settings":
+        value=_am.validate_curve(value)''')
+    source=once(source,'key not in ("adaptive_control","curve_settings")','key not in ("adaptive_control","curve_settings","experiment_guard")')
+    source=once(source,'            if key=="curve_settings":\n                try:', '''            if key=="experiment_guard":
+                try:
+                    _am.save_experiment_guard(value,expected)
+                except _am_sys.modules["_hpi_adaptive_runtime"].SelectionBlocked as exc:
+                    return reply({"accepted":False,"reason":str(exc)},409)
+            elif key=="curve_settings":
+                try:''')
+    return source
+
 def status_ui(html):
     old=' $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";'
     new=' $("am-reason").textContent=v.fault||v.reason_pl||v.reason||"Brak odczytu.";'
@@ -406,7 +477,7 @@ $("am-decisions-refresh").addEventListener("click",amRefreshDecisions);
 $("am-recent-decisions").addEventListener("toggle",()=>{if($("am-recent-decisions").open)amRefreshDecisions();});
 function amPaint(a){''')
     html=html.replace("Legacy pozostaje domyślne po restarcie.","Zapisany Auto wraca po restarcie po weryfikacji danych.")
-    return html
+    return guard_ui(html)
 
 def report_api(source):
     if 'def _wv_adaptive_report_page():' in source:
@@ -451,6 +522,13 @@ const run=el("run-kpis");''')
     if "ec.assessment" not in html:
         html=once(html,'ec&&ec.since?"Sesja od "+dt(ec.since):"Brak sesji"','ec&&ec.since?"Sesja od "+dt(ec.since)+(ec.assessment?" · "+ec.assessment:"")+(ec.outdoor_spread!=null?" · rozpiętość temperatur "+num(ec.outdoor_spread,1)+" K":""):"Brak sesji"')
         html=once(html,'["Tryb","FLimit","Postęp","Zachowane cykle","Praca min","Fact STOP Hz","Delta T STOP K"],ec?ec.rows.map(x=>[x.mode,x.flimit?"ON":"OFF",x.completed+"/"+ec.per_level,x.retained,ecNum(x.run_seconds,1/60),ecNum(x.stop_fact),ecNum(x.stop_delta)]):[]','["Tryb","FLimit","Postęp","Zachowane cykle","Praca min","Fact STOP Hz","Delta T STOP K","Na zewnątrz °C","Cykle <10 min"],ec?ec.rows.map(x=>[x.mode,x.flimit?"ON":"OFF",x.completed+"/"+ec.per_level,x.retained,ecNum(x.run_seconds,1/60),ecNum(x.stop_fact),ecNum(x.stop_delta),ecNum(x.outdoor),x.duration_samples?x.short_cycles+"/"+x.duration_samples:"—"]):[]')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'id="experiment-guard-report"' not in html:
+        html=once(html,'<p id="experiment-comparison-status">','<p id="experiment-guard-report"></p><p id="experiment-comparison-status">')
+        html=once(html,'const run=el("run-kpis");','''const eg=ec&&ec.guard;
+el("experiment-guard-report").textContent=eg?(eg.recovering?"Ochrona komfortu aktywna. ":"")+ec.rows.map(x=>x.deferred?x.mode+(x.flimit?" + FLimit":" / OFF")+": "+(x.deferred.reason==="room_shortfall"?"spadek komfortu":"niedobór Two")+" przy "+ecNum(x.deferred.outdoor)+" °C":"").filter(Boolean).join(" · "):"";
+const run=el("run-kpis");''')
         line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
     if 'id="passive-diagnostics"' not in html:
@@ -609,7 +687,7 @@ def experiment_api(source):
         source=once(source,new if new in source else old,latest)
     old='if current==value:'
     new='if current==value and not (key=="adaptive_control" and value=="manual" and _am.view()["auto_resume_pending"]):'
-    return heater_status_api(source if new in source else once(source,old,new))
+    return guard_api(heater_status_api(source if new in source else once(source,old,new)))
 
 def learning_block():
     policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")
