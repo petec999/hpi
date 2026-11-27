@@ -333,8 +333,13 @@ def winter_status_ui(html):
     if 'amWinterProgress' not in html:
         line=next(l for l in html.splitlines() if '$("am-continuous-status").textContent=' in l)
         html=once(html,line,''' const amWinterProgress=ex&&Array.isArray(ex.windows)?ex.windows:[];
- const reasons={comfort_or_telemetry:"komfort lub dane",new_context_or_gap:"nowy kontekst / przerwa",weather_target_or_room_range:"zmiana warunków",priority_or_no_demand:"priorytet lub brak zapotrzebowania",insufficient_heating:"brak dostatecznej pracy CO"};
- $("am-continuous-status").textContent=ex&&ex.since?"Bieżące okno: "+Math.round((ex.continuous_seconds||0)/60)+" / 30 min"+(ex.continuous_reason?" · "+(reasons[ex.continuous_reason]||ex.continuous_reason):"")+" · zapisane: "+ex.levels.map((label,i)=>label+" "+(continuous[i]?6:((amWinterProgress[i]||[]).length))+"/6").join(" | "):"";''')
+ const amWinterReasons={comfort_or_telemetry:"komfort lub dane",new_context_or_gap:"nowy kontekst / przerwa",weather_target_or_room_range:"zmiana warunków",priority_or_no_demand:"priorytet lub brak zapotrzebowania",insufficient_heating:"brak dostatecznej pracy CO"};
+ $("am-continuous-status").textContent=ex&&ex.since?"Bieżące okno: "+Math.round((ex.continuous_seconds||0)/60)+" / 30 min"+(ex.continuous_reason?" · "+(amWinterReasons[ex.continuous_reason]||ex.continuous_reason):"")+" · zapisane: "+ex.levels.map((label,i)=>label+" "+(continuous[i]?6:((amWinterProgress[i]||[]).length))+"/6").join(" | "):"";''')
+    # Upgrade the already installed winter UI as well as fresh installs.
+    old=' const reasons={comfort_or_telemetry:'
+    if old in html:
+        html=once(html,old,' const amWinterReasons={comfort_or_telemetry:')
+        html=once(html,'(reasons[ex.continuous_reason]||ex.continuous_reason)','(amWinterReasons[ex.continuous_reason]||ex.continuous_reason)')
     return html
 
 def continuous_ui(html):
