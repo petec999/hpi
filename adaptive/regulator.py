@@ -1790,20 +1790,24 @@ class ExperimentGuard:
 
 
 class ContinuousTrial:
-    """Independent normal-operation window including native stops and defrost."""
+    """Normal-operation observation; no actuator I/O or invented cycle edges."""
     SETTLE=900
     DURATION=10800
     MAX_GAP=65
 
-    def __init__(self):
+    def __init__(self,duration=None):
+        self.duration=self.DURATION if duration is None else duration
         self.reset()
 
-    def reset(self):
+    def reset(self,reason=None):
+        self.reason=reason
         self.context=None
         self.last=None
         self.since=None
         self.window=None
         self.seconds=0
+        self.stats=None
+        self.run_start=None
 
     @staticmethod
     def weather_band(outdoor):
@@ -1813,36 +1817,64 @@ class ContinuousTrial:
         if not (eligible and s.fresh and not (s.error or s.override or s.dhw)
                 and (s.heating or s.defrost or s.hz==0)
                 and ExperimentGuard.valid_room(room) and ExperimentGuard.valid_room(reference)
-                and room>=minimum_room and room>=reference-.2-1e-6
+                and room>=minimum_room and room>=reference-.5-1e-6
                 and type(outdoor) in (float,int) and math.isfinite(outdoor) and -60<=outdoor<=60):
-            self.reset()
+            self.reset("comfort_or_telemetry")
             return None
         context=(s.mode,s.relay)
         if (self.context!=context or self.last is None or
                 not 0<s.now-self.last[0]<=self.MAX_GAP or
                 abs((wall-self.last[1])-(s.now-self.last[0]))>5 or
                 abs(s.target-self.last[2])>1.0):
-            self.reset()
+            self.reset("new_context_or_gap")
             self.context=context
             self.since=s.now
-        self.last=(s.now,wall,s.target)
+        previous=self.last
+        phase="defrost" if s.defrost else "run" if s.heating and s.hz>0 else "idle" if s.hz==0 and s.requested_hz==0 else "transition"
+        self.last=(s.now,wall,s.target,phase)
         if s.now-self.since<self.SETTLE:
             return None
         if self.window is None:
             self.window=[s.now,wall,room,room,s.target,s.target,outdoor,outdoor]
+            self.stats={"run_seconds":0.0,"idle_seconds":0.0,"defrost_seconds":0.0,
+                        "transition_seconds":0.0,"starts":0,"short_cycles":0,"defrosts":0}
+            self.run_start=None
+        elif previous is not None:
+            dt=s.now-previous[0]
+            key=phase if phase==previous[3] else "transition"
+            self.stats[key+"_seconds"]+=dt
+            if phase=="defrost" and previous[3]!="defrost":
+                self.stats["defrosts"]+=1
+                self.run_start=None
+            if phase=="run" and previous[3]=="idle":
+                self.stats["starts"]+=1
+                self.run_start=s.now
+            if phase=="idle" and self.run_start is not None:
+                if s.now-self.run_start<600:
+                    self.stats["short_cycles"]+=1
+                self.run_start=None
         w=self.window
         w[2]=min(w[2],room); w[3]=max(w[3],room)
         w[4]=min(w[4],s.target); w[5]=max(w[5],s.target)
         w[6]=min(w[6],outdoor); w[7]=max(w[7],outdoor)
         if w[3]-w[2]>.5+1e-6 or w[5]-w[4]>1.0+1e-6 or w[7]-w[6]>2.0+1e-6:
-            self.reset()
+            self.reset("weather_target_or_room_range")
             return None
+        self.reason=None
         self.seconds=s.now-w[0]
-        if self.seconds<self.DURATION:
+        if self.seconds<self.duration:
             return None
         result={"start":w[1],"stop":wall,"seconds":self.seconds,
                 "outdoor_min":w[6],"outdoor_max":w[7],
                 "target_min":w[4],"target_max":w[5],
                 "room_min":w[2],"room_max":w[3]}
-        self.reset()
+        result.update(self.stats)
+        # A window of pure idle is not evidence that a preset can heat.
+        if self.stats["run_seconds"]<300:
+            result=None
+        self.window=None
+        self.stats=None
+        self.run_start=None
+        self.seconds=0
+        self.reason=None if result is not None else "insufficient_heating"
         return result
