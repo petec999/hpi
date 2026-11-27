@@ -33,11 +33,71 @@ def _hpi_start_once(key, target, args=()):
 
 '''
 
+CONFIG_HELPER = '''# HPI ATOMIC CONFIG WRITE v1
+_hpi_config_write_lock = threading.Lock()
+
+def _hpi_save_config():
+    # Only serialize writes, not hardware calls. Keep the existing symlink target.
+    with _hpi_config_write_lock:
+        path = os.path.realpath('/opt/config.ini')
+        buf = io.StringIO()
+        config.write(buf)
+        data = buf.getvalue().encode('utf-8')
+        try:
+            with open(path, 'rb') as old:
+                if old.read() == data:
+                    return
+            st = os.stat(path)
+        except FileNotFoundError:
+            st = None
+        fd, tmp = tempfile.mkstemp(prefix='.config-', dir=os.path.dirname(path))
+        try:
+            with os.fdopen(fd, 'wb') as stream:
+                if st is not None:
+                    os.fchmod(stream.fileno(), st.st_mode & 0o777)
+                    if os.geteuid() == 0:
+                        os.fchown(stream.fileno(), st.st_uid, st.st_gid)
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, path)
+            dirfd = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(dirfd)
+            finally:
+                os.close(dirfd)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+
+'''
+
+def config_patch(source):
+    if CONFIG_HELPER in source:
+        return source
+    if source.count('def loadconfig():') != 1:
+        raise ValueError('Unexpected config loader')
+    source=source.replace('def loadconfig():',CONFIG_HELPER+'def loadconfig():',1)
+    pattern = r"(?m)^( +)with open\('/opt/config\.ini', 'w'\) as configfile:\n\1    config\.write\(configfile\)\n"
+    def replacement(match):
+        indent=match.group(1)
+        # The local and remote bulk-settings loops save once, after all fields.
+        tail=source[match.end():]
+        if indent == ' '*16 and tail.startswith(("            emit('return',", "            sio_remote.emit('return_from_device',")):
+            indent=' '*12
+        return indent+'_hpi_save_config()\n'
+    source,n=re.subn(pattern,replacement,source)
+    if n!=8:
+        raise ValueError('Unexpected config writer count')
+    compile(source,'main.py','exec')
+    return source
+
+
 def patch(source):
     if MARK in source:
         if HELPER not in source:
             raise ValueError('Modified resource guard')
-        return source
+        return config_patch(source)
     def once(old, new):
         nonlocal source
         if source.count(old) != 1:
@@ -81,4 +141,4 @@ def patch(source):
                 logging.exception("Crash diagnostic failed")
 ''')
     compile(source,'main.py','exec')
-    return source
+    return config_patch(source)
