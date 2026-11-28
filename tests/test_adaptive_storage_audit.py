@@ -414,6 +414,30 @@ class PassiveInsightTests(unittest.TestCase):
         p.observe(self.sample(500,hz=25),True)
         self.assertEqual(p.summary(500)["defrost_24h"]["completed"],1)
 
+    def test_defrost_groups_use_observed_heater_and_exclude_gaps(self):
+        from adaptive.regulator import PassiveInsights
+        p=PassiveInsights()
+        for start,flags in ((0,[False,True,True]),(150,[False,False,False]),
+                            (300,[False,None,False])):
+            p.observe(self.sample(start,hz=40),True,heater=False)
+            for i,flag in enumerate(flags,1):
+                p.observe(self.sample(start+30*i,hz=80,defrost=True),True,heater=flag)
+            p.observe(self.sample(start+120,hz=40),True,heater=False)
+        groups=p.summary(420)["defrost_24h"]["by_heater"]
+        self.assertEqual(groups["heater_seen"]["completed"],1)
+        self.assertEqual(groups["heater_seen"]["heater_on_observed_seconds"],30)
+        self.assertEqual(groups["heater_not_seen"]["completed"],1)
+        self.assertEqual(groups["unknown"]["completed"],1)
+        self.assertEqual(groups["unknown"]["median_seconds"],90)
+        p.observe(self.sample(450,hz=80,defrost=True),True,heater=True)
+        p.observe(self.sample(600,hz=40),True,heater=False)
+        self.assertEqual(p.summary(600)["defrost_24h"]["completed"],3)
+        p.observe(self.sample(630,hz=80,defrost=True),True,heater=None)
+        p.observe(self.sample(660,hz=80,defrost=True),True,heater=True)
+        p.observe(self.sample(690,hz=40),True,heater=False)
+        groups=p.summary(690)["defrost_24h"]["by_heater"]
+        self.assertEqual(groups["heater_seen"]["completed"],2)
+
     def test_stability_is_bounded_and_reports_coverage(self):
         from adaptive.regulator import PassiveInsights
         p=PassiveInsights()
