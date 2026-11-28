@@ -2254,7 +2254,11 @@ class CapacityLearning:
                 except OSError:
                     pass
 
-    def summary(self):
+    def summary(self,include_rows=True):
+        if not include_rows:
+            positive=[r["seconds"] for r in self.rows.values() if r["seconds"]>0]
+            return {"contexts":len(positive),"hours":sum(positive)/3600,
+                    "unsaved":self.dirty,"storage_error":self.error}
         rows=[]
         for key,row in sorted(self.rows.items()):
             a,b,c=map(int,key.split(":"))
