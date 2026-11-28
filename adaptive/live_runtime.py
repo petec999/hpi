@@ -911,7 +911,10 @@ class Runtime:
             except Exception:
                 self.capacity_learning.interrupt()
             try:
-                self.insights.observe(s,co_enabled,self.fresh_room_sensor("intemp",wall),self.fresh_room_sensor("outtemp",wall))
+                # A4A is an observed controller flag, not a current measurement.
+                hstamp,hframe=frames["R141"]
+                heater=bool(hframe[3]&0x0100) if 0<=time.monotonic()-hstamp<=self.MAX_AGE else None
+                self.insights.observe(s,co_enabled,self.fresh_room_sensor("intemp",wall),self.fresh_room_sensor("outtemp",wall),heater=heater)
             except Exception:
                 self.insights.interrupt()
             try:
