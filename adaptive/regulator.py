@@ -2144,6 +2144,12 @@ class CapacityLearning:
         if key not in self.rows and len(self.rows)>=self.MAX_ROWS:
             del self.rows[min(self.rows,key=lambda k:self.rows[k]["last"])]
         row=self.rows.setdefault(key,dict.fromkeys(self.FIELDS,0.0))
+        # Exponential decay of effective evidence, half-life 30 days.
+        # Apply lazily before adding new observations; never revive old weight.
+        age=max(0,wall-row.get("last",wall))
+        weight=2**(-age/(30*86400))
+        for k in self.FIELDS:
+            row[k]*=weight
         for i,k in enumerate(self.FIELDS):
             row[k]+=dt*(previous[4][i]+values[i])/2
         row["last"]=wall
@@ -2157,12 +2163,13 @@ class CapacityLearning:
         wall=time.time() if wall is None else wall
         def recent(pair):
             row=self.rows.get(self.key(s,outdoor,pair),{})
-            n=row.get("seconds",0)
-            if n<10800 or not 0<=wall-row.get("last",0)<=30*86400:
+            age=wall-row.get("last",0)
+            n=row.get("seconds",0)*2**(-max(0,age)/(30*86400))
+            if n<10800 or not 0<=age<=30*86400:
                 return None
             return row
         baseline=recent(default)
-        if baseline is None or baseline["limited_shortfall_seconds"]<1800 or baseline["limited_shortfall_seconds"]/baseline["seconds"]<.20:
+        if baseline is None or baseline["limited_shortfall_seconds"]*2**(-max(0,wall-baseline["last"])/(30*86400))<1800 or baseline["limited_shortfall_seconds"]/baseline["seconds"]<.20:
             return default,"default"
         candidates=[]
         for pair in LEVELS:
@@ -2187,8 +2194,10 @@ class CapacityLearning:
         row=self.rows.get(key,{})
         seconds=row.get("seconds",0)
         # Evidence only; no positive recommendation or bypass of protections.
-        return (seconds>=10800 and time.time()-row.get("last",0)<=30*86400
-                and row.get("limited_shortfall_seconds",0)>=1800
+        age=time.time()-row.get("last",0)
+        weight=2**(-max(0,age)/(30*86400))
+        return (seconds*weight>=10800 and 0<=age<=30*86400
+                and row.get("limited_shortfall_seconds",0)*weight>=1800
                 and row["limited_shortfall_seconds"]/seconds>=.20)
 
     def load(self):
