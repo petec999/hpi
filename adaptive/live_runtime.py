@@ -27,6 +27,7 @@ class Runtime:
         self.control="legacy"
         self.resume_path=Path(learning_path).with_name(".adaptive-owner-v1") if learning_path else None
         self.resume_requested=False
+        self.resume_mode=None
         self.resume_error=None
         self.load_owner()
         self.reg=Regulator()
@@ -66,6 +67,11 @@ class Runtime:
         self.experiment_windows=[[] for _ in self.EXPERIMENT_LEVELS]
         self.load_experiment_guard()
         self.load_experiment()
+        if self.resume_mode=="experiment" and (not self.experiment_saved or self.experiment_error):
+            self.resume_requested=False
+            self.resume_mode=None
+        self.partial_saved=self.continuous_trial.checkpoint()
+        self.partial_saved_at=None
         self.last_tick=0
         self.pending=None
         self.status={"reason":"Waiting for valid boot telemetry" if self.resume_requested else "Legacy/Manual; no adaptive writes","risk":"paused"}
@@ -109,6 +115,8 @@ class Runtime:
             self.experiment_since=since
             self.experiment_initial=tuple(initial)
             self.experiment_saved=not session.get("finished",False)
+            if self.experiment_saved and self.resume_mode=="experiment":
+                self.continuous_trial.restore(session.get("partial_window"))
         except FileNotFoundError:
             pass
         except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError):
@@ -120,7 +128,8 @@ class Runtime:
                          deferred=getattr(self,'experiment_deferred',[None]*len(self.EXPERIMENT_LEVELS)),
                          recovering=bool(getattr(self,'experiment_recovering',False)),
                          continuous=getattr(self,"experiment_continuous",[None]*len(self.EXPERIMENT_LEVELS)),
-                         windows=getattr(self,"experiment_windows",[[] for _ in self.EXPERIMENT_LEVELS]))
+                         windows=getattr(self,"experiment_windows",[[] for _ in self.EXPERIMENT_LEVELS]),
+                         partial_window=self.continuous_trial.checkpoint() if getattr(self,"control",None)=="experiment" or getattr(self,"resume_requested",False) and getattr(self,"resume_mode",None)=="experiment" else None)
         temp=None
         try:
             if self.experiment_path is not None:
@@ -140,6 +149,8 @@ class Runtime:
                     os.close(fd)
             self.experiment_saved=session is not None
             self.experiment_error=None
+            self.partial_saved=session.get("partial_window") if session else None
+            self.partial_saved_at=time.monotonic()
         except (OSError,ValueError,TypeError):
             self.experiment_error="Nie można zapisać stanu eksperymentu"
             raise SelectionBlocked(self.experiment_error) from None
@@ -231,8 +242,11 @@ class Runtime:
         for record,partial in records:
             keys={"start","stop","seconds","outdoor_min","outdoor_max","target_min","target_max","room_min","room_max"}
             stats={"run_seconds","idle_seconds","defrost_seconds","transition_seconds","starts","short_cycles","defrosts"}
-            if not isinstance(record,dict) or (set(record)-{"capacity"}) not in (keys,keys|{"energy"},keys|stats,keys|stats|{"energy"},keys|stats|{"energy","blocks"}) or any(type(record[k]) not in (int,float) or not math.isfinite(record[k]) for k in keys):
+            if not isinstance(record,dict) or (set(record)-{"capacity","interrupted"}) not in (keys,keys|{"energy"},keys|stats,keys|stats|{"energy"},keys|stats|{"energy","blocks"}) or any(type(record[k]) not in (int,float) or not math.isfinite(record[k]) for k in keys):
                 raise ValueError("Invalid continuous trial")
+            interrupted=record.get("interrupted",False)
+            if type(interrupted) is not bool or interrupted and record.get("energy") is not None:
+                raise ValueError("Invalid interrupted window")
             blocks=record.get("blocks",1)
             if type(blocks) is not int or blocks not in (1,6) or partial and blocks!=1:
                 raise ValueError("Invalid trial block count")
@@ -268,7 +282,8 @@ class Runtime:
                     raise ValueError("Invalid continuous energy coverage")
             if not (session["since"]<=record["start"]<record["stop"]<=time.time()+60 and
                     (1800<=record["seconds"]<=1865 if partial else 10800<=record["seconds"]<=10800+65*blocks) and
-                    (abs(record["stop"]-record["start"]-record["seconds"])<=20 if blocks==1 else
+                    (record["seconds"]-20<=record["stop"]-record["start"]<=ContinuousTrial.MAX_WALL_SPAN if interrupted else
+                     abs(record["stop"]-record["start"]-record["seconds"])<=20 if blocks==1 else
                      record["stop"]-record["start"]>=record["seconds"]-120) and
                     -60<=record["outdoor_min"]<=record["outdoor_max"]<=60 and
                     (blocks==6 or record["outdoor_max"]-record["outdoor_min"]<=2+1e-6) and
@@ -344,10 +359,11 @@ class Runtime:
             if self.resume_path.is_symlink() or self.resume_path.stat().st_size>16:
                 raise ValueError("invalid owner file")
             saved=self.resume_path.read_text(encoding="ascii").strip()
-            if saved not in ("auto","manual","legacy"):
+            if saved not in ("auto","experiment","manual","legacy"):
                 raise ValueError("invalid owner")
-            self.resume_requested=saved=="auto"
-            self.control="manual" if saved in ("auto","manual") else "legacy"
+            self.resume_requested=saved in ("auto","experiment")
+            self.resume_mode=saved if self.resume_requested else None
+            self.control="manual" if saved in ("auto","experiment","manual") else "legacy"
         except FileNotFoundError:
             pass
         except (OSError,ValueError):
@@ -358,7 +374,7 @@ class Runtime:
         if self.resume_path is None:
             self.resume_requested=False
             return
-        value="auto" if mode=="auto" else "manual" if mode in ("manual","experiment") else "legacy"
+        value=mode if mode in ("auto","experiment","manual") else "legacy"
         temp=None
         try:
             if self.resume_path.is_symlink():
@@ -392,7 +408,8 @@ class Runtime:
     def resume_auto(self):
         if not self.resume_requested:
             return
-        self.status={"reason":"Auto resume pending","reason_pl":"Auto po restarcie – oczekiwanie na świeże pomiary i normalne CO","risk":"paused"}
+        mode=getattr(self,"resume_mode",None) or "auto"
+        self.status={"reason":mode+" resume pending","reason_pl":("Eksperyment" if mode=="experiment" else "Auto")+" po restarcie – oczekiwanie na świeże pomiary i normalne CO","risk":"paused"}
         if self.ready_log_count<2:
             return
         try:
@@ -405,8 +422,22 @@ class Runtime:
                 return
         except Exception:
             return
-        self.choose("auto","manual")
-        self.g["logging"].info("Adaptive Auto restored after restart; fresh telemetry verified")
+        if mode=="experiment":
+            if not self.experiment_saved or self.experiment_error:
+                self.persist_owner("manual")
+                return
+            wall=time.time()
+            room=self.fresh_room_sensor("intemp",wall)
+            outdoor=self.fresh_room_sensor("outtemp",wall)
+            if not ExperimentGuard.valid_room(room) or outdoor is None or not -60<=outdoor<=60:
+                return
+            # Existing comfort recovery remains in charge if reference is breached.
+            saved=self.continuous_trial.checkpoint()
+            self.choose("experiment","manual")
+            self.continuous_trial.restore(saved)
+        else:
+            self.choose("auto","manual")
+        self.g["logging"].info("Adaptive %s restored after restart; fresh telemetry verified",mode)
 
     def note(self,key,regs):
         # Separate lock: never hold controller lock in the serial reader.
@@ -608,7 +639,7 @@ class Runtime:
                 self.learning.cancel()
                 self.learning_before=None
                 self.reg.reset()
-            self.persist_owner(mode)
+            self.persist_owner("manual" if mode=="experiment" else mode)
             if mode=="experiment" and (restart_experiment or not self.experiment_saved):
                 since=time.time()
                 initial=(s.mode,s.relay)
@@ -627,6 +658,8 @@ class Runtime:
                 self.save_guard_checkpoint()
             self.experiment_guard.reset()
             self.continuous_trial.reset()
+            if mode=="experiment":
+                self.persist_owner("experiment")
             self.control=mode
             self.report_event("owner","selected "+mode)
             self.report.interrupt()
@@ -1187,7 +1220,7 @@ class Runtime:
                     self.experiment_guard.cfg["minimum_room"],can_observe,wall)
         if trial is not None:
             mode=actual[0]+(" + FLimit" if actual[1] else " / FLimit OFF")
-            trial["energy"]=self.energy.window_summary(trial["start"],trial["stop"],mode,self.experiment_since)
+            trial["energy"]=None if trial.get("interrupted") else self.energy.window_summary(trial["start"],trial["stop"],mode,self.experiment_since)
             group=self.experiment_windows[current_index]
             old=list(group)
             if not group or group[-1]["stop"]<=trial["start"]:
@@ -1270,6 +1303,7 @@ class Runtime:
             if done:
                 self.control="manual"
                 try:
+                    self.persist_owner("manual")
                     self.persist_experiment({"since":self.experiment_since,"initial":list(self.experiment_initial),
                         "counts":self.experiment_counts(),"watermark":self.experiment_watermark,
                         "metrics":self.experiment_samples(),"finished":True})
@@ -1529,7 +1563,26 @@ class Runtime:
             self.g["logging"].exception("Adaptive modulation tick failed")
             self.fail("controller exception")
         finally:
-            self.lock.release()
+            try:
+                self.checkpoint_partial_window(now)
+            except SelectionBlocked:
+                pass
+            finally:
+                self.lock.release()
+
+    def checkpoint_partial_window(self,now):
+        if not self.experiment_saved or self.experiment_since is None or self.experiment_path is None:
+            return
+        if self.resume_requested and getattr(self,"resume_mode",None)=="experiment":
+            return
+        record=self.continuous_trial.checkpoint() if self.control=="experiment" and self.pending is None else None
+        old=getattr(self,"partial_saved",None)
+        if record==old:
+            return
+        # Clear an invalidated window immediately; otherwise checkpoint every 2 min.
+        last=getattr(self,"partial_saved_at",None)
+        if record is None or old is None or last is None or now-last>=120:
+            self.save_guard_checkpoint()
 
     @staticmethod
     def validate_curve(value):
@@ -1768,7 +1821,8 @@ class Runtime:
                 blocker="Oczekiwanie na potwierdzenie poprzedniego polecenia"
             return dict(self.status,capacity_live=capacity_live,capacity_learning=self.capacity_learning.summary(include_rows=False),storage_diagnostics=self.storage_diagnostics(),control=self.control,mode=actual,relay=relay,
                         ready=blocker is None,activation_blocker=blocker,curve=curve,zone=zone,pending=self.pending is not None,fault=self.fault,
-                        auto_resume_pending=self.resume_requested,owner_storage_error=self.resume_error,threshold_model=model,
+                        auto_resume_pending=self.resume_requested and getattr(self,"resume_mode",None)!="experiment",
+                        experiment_resume_pending=self.resume_requested and getattr(self,"resume_mode",None)=="experiment",owner_storage_error=self.resume_error,threshold_model=model,
                         heater=self.heater_view(),curve_settings=self.curve_settings(),learning=self.learning.summary(),hysteresis=self.observer.summary(),
                         experiment={"counts":self.experiment_counts(),"levels":[m+("+FLimit" if l else " / OFF") for m,l in self.EXPERIMENT_LEVELS],
                                     "per_level":self.EXPERIMENT_CYCLES,"since":self.experiment_since,
