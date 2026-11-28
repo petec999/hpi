@@ -643,6 +643,13 @@ table("defrost-heater-groups",["Sygnał grzałki A4A","Pełne cykle","Mediana mi
 const deltaInsight=(o,k=1)=>''')
         line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'id="defrost-trace-status"' not in html:
+        html=once(html,'<table id="defrost-heater-groups"></table></div>','<table id="defrost-heater-groups"></table></div><p id="defrost-trace-status"></p><small>Rejestrator pasywny: próbki co najmniej 5 s od siebie, tylko gdy wszystkie potrzebne banki są nowe; do 60 s przed i po cyklu. 16 ostatnich zapisów, również niepełnych. Szczegóły w pliku .adaptive-defrost-trace-v1.json. Bez dodatkowych zapytań do pompy.</small>')
+        html=once(html,'const deltaInsight=(o,k=1)=>', '''const tr=d.defrost_trace;
+el("defrost-trace-status").textContent=tr?"Ślady defrostu: "+tr.saved_traces+(tr.active?" · rejestracja trwa":"")+(tr.unsaved?" · oczekuje na zapis":"")+(tr.storage_error?" · "+tr.storage_error:""):"Brak rejestratora";
+const deltaInsight=(o,k=1)=>''')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
     if 'elif kind=="threshold_samples":' not in source:
         source=once(source,'    elif kind=="events":','''    elif kind=="thresholds":
         rows=data["thresholds"]["groups"]
