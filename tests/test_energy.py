@@ -187,7 +187,7 @@ class EnergyTests(unittest.TestCase):
             for t in range(0,601,30):
                 m.accept(t,state,{"energy":10+t/3600,"flow":1.15},1000+t)
             m.accept(900,state,{"energy":10.25,"flow":1.15},1900)
-            m.save_climate(900)
+            m.save_climate(m.climate_saved+900)
             h=m.climate_history()
             self.assertTrue(h["flow_estimated"])
             self.assertEqual(h["rows"][0]["seconds"],600)
