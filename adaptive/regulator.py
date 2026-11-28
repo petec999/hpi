@@ -1766,6 +1766,12 @@ class ExperimentGuard:
     MAX_GAP=65
     CAPACITY_TREND_WINDOW=300
     FREQUENCY_TOLERANCE=3
+    # Empirical reference ceilings from the installation's Fact/Fset history.
+    # These are diagnostic references, not commands or firmware limits.
+    FREQUENCY_LIMITS={('eco',False):65,('eco',True):40,
+                      ('quiet',False):65,('quiet',True):40,
+                      ('turbo',False):65,('turbo',True):45}
+    LIMIT_TOLERANCE=1
     DEFAULT={"water_gap":2.0,"water_minutes":30,"room_drop":0.5,
              "room_minutes":10,"minimum_room":19.0,"retry_warmer":2.0,
              "recovery_minutes":15}
@@ -1803,6 +1809,10 @@ class ExperimentGuard:
         self.running_seconds=0
         self.running_target=None
         self.heating_state="unavailable"
+        self.capacity_state="unavailable"
+        self.capacity_limit=None
+        self.capacity_since=None
+        self.capacity_seconds=0
         self.running_samples=deque(maxlen=64)
 
     @staticmethod
@@ -1842,6 +1852,24 @@ class ExperimentGuard:
         self.heating_state="running"
         return True
 
+    def observe_capacity(self,s,stamp,running):
+        limit=self.FREQUENCY_LIMITS.get((s.mode,s.relay))
+        self.capacity_limit=limit
+        if not running:
+            state="idle" if s.hz==s.requested_hz==0 else "transition"
+        elif limit is None:
+            state="unknown_limit"
+        elif abs(s.hz-s.requested_hz)>self.FREQUENCY_TOLERANCE:
+            state="transition"
+        else:
+            saturated=min(s.hz,s.requested_hz)>=limit-self.LIMIT_TOLERANCE
+            deficit=s.target-s.supply_temp>=self.cfg["water_gap"]
+            state=("limited" if saturated else "modulating")+("_shortfall" if deficit else "_sufficient")
+        if state!=self.capacity_state or self.capacity_since is None:
+            self.capacity_since=stamp
+        self.capacity_state=state
+        self.capacity_seconds=max(0,stamp-self.capacity_since)
+
     def capacity_shortfall(self):
         rows=list(self.running_samples)
         if len(rows)<5 or rows[-1][0]-rows[0][0]<self.CAPACITY_TREND_WINDOW-self.MAX_GAP:
@@ -1849,9 +1877,13 @@ class ExperimentGuard:
         requested=[r[4] for r in rows]
         actual=[r[3] for r in rows]
         plateau=all(max(freq)-min(freq)<=self.FREQUENCY_TOLERANCE for freq in (requested,actual))
-        # Use the observed plateau, without assuming any model-specific maximum Hz.
-        return (plateau and self.running_target-median(r[1] for r in rows)>=self.cfg["water_gap"]
-                and trend(rows,1)<=.03 and trend(rows,2)<=.03)
+        # A low-frequency plateau is not evidence that available power is exhausted.
+        # Require sustained saturation and a supply-water deficit, not cold return alone.
+        return (self.capacity_state=="limited_shortfall"
+                and self.capacity_seconds>=self.CAPACITY_TREND_WINDOW-self.MAX_GAP
+                and self.running_seconds>=self.SETTLE
+                and plateau and self.running_target-median(r[2] for r in rows)>=self.cfg["water_gap"]
+                and trend(rows,2)<=.03)
 
     def observe(self,s,room,eligible,recovering=False,frame_at=None):
         now=s.now
@@ -1878,6 +1910,7 @@ class ExperimentGuard:
         self.room_missing_since=(self.room_missing_since if self.room_missing_since is not None else now) if room is None else None
         low_room=self.room_low(room)
         running=self.observe_running(s,stamp)
+        self.observe_capacity(s,stamp,running)
         water_low=running and s.target-s.supply_temp>=self.cfg["water_gap"]
         idle=s.hz==0 and s.requested_hz==0
         if recovering:
@@ -1925,6 +1958,8 @@ class ExperimentGuard:
         return {"settings":dict(self.cfg),"reference":self.reference,
                 "water_seconds":self.water_seconds,"room_seconds":self.room_seconds,
                 "running_seconds":self.running_seconds,"heating_state":self.heating_state,
+                "capacity_state":self.capacity_state,"capacity_limit_hz":self.capacity_limit,
+                "capacity_seconds":self.capacity_seconds,
                 "recovery_seconds":self.recovery_seconds}
 
 
