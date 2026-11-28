@@ -2005,7 +2005,12 @@ class ContinuousTrial:
             self.since=s.now
         previous=self.last
         phase="defrost" if s.defrost else "run" if s.heating and s.hz>0 else "idle" if s.hz==0 and s.requested_hz==0 else "transition"
-        self.last=(s.now,wall,s.target,phase)
+        limit=ExperimentGuard.FREQUENCY_LIMITS.get(context)
+        capacity=None
+        if phase=="run" and limit and s.requested_hz>0 and abs(s.hz-s.requested_hz)<=ExperimentGuard.FREQUENCY_TOLERANCE:
+            capacity=(min(s.hz,s.requested_hz)>=limit-ExperimentGuard.LIMIT_TOLERANCE,
+                      max(0,s.target-s.supply_temp),s.hz,s.requested_hz)
+        self.last=(s.now,wall,s.target,phase,capacity)
         if s.now-self.since<self.SETTLE:
             self.reason="settling"
             return None
@@ -2013,11 +2018,22 @@ class ContinuousTrial:
             self.window=[s.now,wall,room,room,s.target,s.target,outdoor,outdoor]
             self.stats={"run_seconds":0.0,"idle_seconds":0.0,"defrost_seconds":0.0,
                         "transition_seconds":0.0,"starts":0,"short_cycles":0,"defrosts":0}
+            self.stats["capacity"]={"observed_seconds":0.0,"limited_seconds":0.0,
+                                    "limited_deficit_seconds":0.0,"deficit_k_seconds":0.0,
+                                    "fact_hz_seconds":0.0,"fset_hz_seconds":0.0}
             self.run_start=None
         elif previous is not None:
             dt=s.now-previous[0]
             key=phase if phase==previous[3] else "transition"
             self.stats[key+"_seconds"]+=dt
+            before=previous[4]
+            if key=="run" and capacity is not None and before is not None:
+                c=self.stats["capacity"]
+                c["observed_seconds"]+=dt
+                c["limited_seconds"]+=dt if before[0] and capacity[0] else 0
+                c["limited_deficit_seconds"]+=dt if before[0] and capacity[0] and min(before[1],capacity[1])>=2 else 0
+                for field,index in (("deficit_k_seconds",1),("fact_hz_seconds",2),("fset_hz_seconds",3)):
+                    c[field]+=dt*(before[index]+capacity[index])/2
             if phase=="defrost" and previous[3]!="defrost":
                 self.stats["defrosts"]+=1
                 self.run_start=None
