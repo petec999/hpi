@@ -1663,12 +1663,40 @@ class Runtime:
 
     def view(self):
         with self.lock:
+            capacity_live=None
             try:
                 s,zone,curve,_=self.snapshot()
                 actual=s.mode
                 relay="1" if s.relay else "0"
                 blocker=self.activation_reason(s,zone,curve)
                 model=self.thresholds.model(s)
+                limit=ExperimentGuard.FREQUENCY_LIMITS.get((s.mode,s.relay))
+                guard=self.experiment_guard
+                valid=(blocker is None and self.pending is None and self.flag(self.raw("pch"))
+                       and self.gpio("heatdemandpin") and s.fresh and not (s.error or s.override or s.defrost or s.dhw))
+                state="unavailable"
+                seconds=None
+                if valid:
+                    if s.hz==s.requested_hz==0:
+                        state="idle"
+                    elif not s.heating or min(s.hz,s.requested_hz)<=0 or abs(s.hz-s.requested_hz)>guard.FREQUENCY_TOLERANCE:
+                        state="transition"
+                    elif limit is None:
+                        state="unknown_limit"
+                    else:
+                        saturated=min(s.hz,s.requested_hz)>=limit-guard.LIMIT_TOLERANCE
+                        deficit=s.target-s.supply_temp>=guard.cfg["water_gap"]
+                        state=("limited" if saturated else "modulating")+("_shortfall" if deficit else "_sufficient")
+                    if (self.control=="experiment" and guard.previous is not None
+                            and guard.previous[1:3]==(s.mode,s.relay)
+                            and abs(guard.previous[3]-s.target)<=.25
+                            and guard.capacity_state==state
+                            and 0<=s.now-guard.previous[0]<=guard.MAX_GAP):
+                        seconds=guard.capacity_seconds
+                capacity_live={"fact":s.hz,"fset":s.requested_hz,"limit_hz":limit,
+                               "utilization_pct":100*s.hz/limit if limit and valid else None,
+                               "deficit_k":s.target-s.supply_temp if valid else None,
+                               "state":state,"state_seconds":seconds}
                 if blocker is not None or self.pending is not None or not self.flag(self.raw("pch")) or not self.gpio("heatdemandpin"):
                     model["start_eta_min"]=model["stop_eta_min"]=None
             except Exception:
@@ -1676,7 +1704,7 @@ class Runtime:
                 blocker="Brak pełnego, świeżego odczytu pompy lub GPIO"
             if self.pending is not None:
                 blocker="Oczekiwanie na potwierdzenie poprzedniego polecenia"
-            return dict(self.status,storage_diagnostics=self.storage_diagnostics(),control=self.control,mode=actual,relay=relay,
+            return dict(self.status,capacity_live=capacity_live,storage_diagnostics=self.storage_diagnostics(),control=self.control,mode=actual,relay=relay,
                         ready=blocker is None,activation_blocker=blocker,curve=curve,zone=zone,pending=self.pending is not None,fault=self.fault,
                         auto_resume_pending=self.resume_requested,owner_storage_error=self.resume_error,threshold_model=model,
                         heater=self.heater_view(),curve_settings=self.curve_settings(),learning=self.learning.summary(),hysteresis=self.observer.summary(),
