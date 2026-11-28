@@ -1,4 +1,4 @@
-"""Optional read-only energy accounting. No actuator calls, no periodic disk writes."""
+"""Optional energy accounting, with bounded persistent climate aggregates. No actuator calls."""
 import json
 import math
 import os
@@ -83,6 +83,11 @@ class EnergyMonitor:
         self.cycle_session=None
         self.cycles={}
         self.cycle_error=None
+        self.climate_path=self.path.with_name(".adaptive-energy-climate-v1.json") if self.path else None
+        self.climate_rows={}
+        self.climate_dirty=False
+        self.climate_saved=None
+        self.climate_error=None
         try:
             if self.path and self.path.exists():
                 if self.path.is_symlink() or self.path.stat().st_size>4096:
@@ -91,6 +96,7 @@ class EnergyMonitor:
         except (OSError,ValueError,TypeError):
             self.error="Nie można odczytać ustawień energii"
         self.load_cycles()
+        self.load_climate()
 
     def mqtt_topics(self,cfg):
         return {cfg[k] for k in FIELDS if cfg["enabled"] and cfg[k] and
@@ -140,6 +146,10 @@ class EnergyMonitor:
             self.cycle_session=None
             self.cycles={}
             self.cycle_error=None
+            self.climate_rows={}
+            self.climate_dirty=True
+            self.climate_saved=None
+            self.save_climate(time.monotonic())
 
     def mqtt_connect(self,client):
         with self.lock:
@@ -296,6 +306,7 @@ class EnergyMonitor:
                         self.error=("Brak świeżych danych: "+", ".join(failures)) if failures else None
                         self.accept(now,state,values,wall) if ended-now<=20 else self.accept(now,None,{},wall)
                         self.record_cycles(session,cycles)
+                        self.save_climate(now)
             finally:
                 with self.lock:
                     self.busy=False
@@ -358,6 +369,7 @@ class EnergyMonitor:
                     net_heat=1.163*(a["flow"]*prev[2]+values["flow"]*state[2])*dt/7200
         row=(now,group,mode,dt,e,heat,end_wall,band,net_heat,session if stable else None)
         self.rows.append(row)
+        self.record_climate(row)
         if stable and session is not None and group in ("co_run","co_idle"):
             self.add(self.experiment,mode,row)
         while self.rows and self.rows[0][0]<now-86400:
@@ -482,6 +494,103 @@ class EnergyMonitor:
                 b["defrost_paired_seconds"]+=dt
                 b["defrost_heat_kwh"]+=q
 
+    CLIMATE_FIELDS={"seconds","kwh","paired_seconds","paired_kwh","net_heat_kwh","defrost_kwh",
+                    "defrost_heat_kwh","defrost_seconds","defrost_paired_seconds"}
+    CLIMATE_MODES=tuple(m+f for m in ("eco","quiet","turbo") for f in (" + FLimit"," / FLimit OFF"))
+    CLIMATE_MAX=2048
+    CLIMATE_MAX_BYTES=1024*1024
+
+    def record_climate(self,row):
+        # Only paired, time-stamped intervals in an unchanged configuration
+        # and temperature band. Keep unpaired electricity for coverage.
+        if (row[6] is None or row[7] is None or row[2] not in self.CLIMATE_MODES
+                or row[1] not in ("co_run","co_idle","defrost")):
+            return
+        key="%s|%d|%d"%(row[2],*row[7])
+        if key not in self.climate_rows and len(self.climate_rows)>=self.CLIMATE_MAX:
+            del self.climate_rows[min(self.climate_rows,key=lambda k:self.climate_rows[k]["last"])]
+        record=self.climate_rows.get(key)
+        if record is None:
+            record={"totals":{},"last":row[6]}
+            self.climate_rows[key]=record
+        # Retain exact observed sums; do not extrapolate across gaps.
+        self.net_add(record["totals"],"net",row)
+        record["last"]=max(record["last"],row[6])
+        self.climate_dirty=True
+
+    def load_climate(self):
+        if self.climate_path is None:
+            return
+        try:
+            if self.climate_path.is_symlink() or self.climate_path.stat().st_size>self.CLIMATE_MAX_BYTES:
+                raise ValueError("invalid climate file")
+            data=json.loads(self.climate_path.read_text(encoding="utf-8"))
+            if data["schema"]!=1 or data["settings"]!=self.cfg:
+                return
+            rows=data["rows"]
+            if not isinstance(rows,dict) or len(rows)>self.CLIMATE_MAX:
+                raise ValueError("invalid climate rows")
+            for key,record in rows.items():
+                mode,a,b=key.split("|")
+                if mode not in self.CLIMATE_MODES or not -60<=int(a)<=60 or not 10<=int(b)<=64 or int(a)%2 or int(b)%2:
+                    raise ValueError("invalid climate context")
+                if set(record)!={"last","totals"} or set(record["totals"])!={"net"}:
+                    raise ValueError("invalid climate record")
+                v=record["totals"]["net"]
+                if set(v)!=self.CLIMATE_FIELDS or any(type(x) not in (int,float) or not math.isfinite(x) for x in list(v.values())+[record["last"]]):
+                    raise ValueError("invalid climate values")
+                if record["last"]<0 or any(x<0 for k,x in v.items() if k not in ("net_heat_kwh","defrost_heat_kwh")):
+                    raise ValueError("negative climate value")
+                if not (0<=v["defrost_paired_seconds"]<=min(v["paired_seconds"],v["defrost_seconds"])<=v["seconds"]
+                        and max(v["paired_seconds"],v["defrost_seconds"])<=v["seconds"]
+                        and max(v["paired_kwh"],v["defrost_kwh"])<=v["kwh"]+1e-8):
+                    raise ValueError("invalid climate coverage")
+            self.climate_rows=rows
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError) as exc:
+            self.climate_error=type(exc).__name__
+
+    def save_climate(self,now):
+        if not self.climate_dirty or self.climate_path is None or (self.climate_saved is not None and now-self.climate_saved<900):
+            return
+        self.climate_saved=now
+        temp=None
+        try:
+            if self.climate_path.is_symlink():
+                raise ValueError("symlink climate path")
+            raw=json.dumps({"schema":1,"settings":self.cfg,"rows":self.climate_rows},allow_nan=False,separators=(",",":")).encode()
+            if len(raw)>self.CLIMATE_MAX_BYTES:
+                raise ValueError("climate storage bound")
+            fd,temp=tempfile.mkstemp(prefix=".energy-climate-",dir=str(self.climate_path.parent))
+            with os.fdopen(fd,"wb") as f:
+                f.write(raw)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp,self.climate_path)
+            temp=None
+            self.climate_dirty=False
+            self.climate_error=None
+        except (OSError,ValueError,TypeError) as exc:
+            self.climate_error=type(exc).__name__
+        finally:
+            if temp is not None:
+                try:
+                    os.unlink(temp)
+                except OSError:
+                    pass
+
+    def climate_history(self):
+        with self.lock:
+            rows=[]
+            for key,record in sorted(self.climate_rows.items()):
+                mode,a,b=key.split("|")
+                rows.append(dict(self.net_result(record["totals"]["net"]),mode=mode,
+                                 outdoor_band=int(a),target_band=int(b),last=record["last"]))
+            return {"rows":rows,"contexts":len(rows),"unsaved":self.climate_dirty,
+                    "storage_error":self.climate_error,"flow_estimated":self.cfg["flow_source"]=="manual",
+                    "electricity_estimated":not bool(self.cfg["energy"])}
+
     @staticmethod
     def net_result(b,expected_seconds=None):
         coverage=b["paired_seconds"]/b["seconds"] if b["seconds"] else 0
@@ -558,8 +667,8 @@ class EnergyMonitor:
                     "meter_average_power":self.meter_average_power(now),
                     "busy":self.busy,"groups_24h":expose(totals),"modes_24h":expose(modes),
                     "experiment":expose(self.experiment),"session":self.session,
-                    "climate_24h":climate_rows,"net_groups_24h":{k:self.net_result(v) for k,v in net_groups.items()},
+                    "climate_history":self.climate_history(),"climate_24h":climate_rows,"net_groups_24h":{k:self.net_result(v) for k,v in net_groups.items()},
                     "cycles":list(self.cycles.values()),"cycle_session":self.cycle_session,"cycle_error":self.cycle_error,
                     "electricity_estimated":not bool(self.cfg["energy"]),"flow_estimated":self.cfg["flow_source"]=="manual",
                     "coverage_seconds":sum(v["seconds"] for v in totals.values()),
-                    "scope":"RAM only; sampling estimates, not calibrated heat measurement"}
+                    "scope":"24h RAM and persistent climate aggregates; sampling estimates, not calibrated heat measurement"}
