@@ -1,4 +1,5 @@
 import ast
+import json
 import configparser
 import io
 import os
@@ -97,6 +98,25 @@ class HostAuditTests(unittest.TestCase):
         self.assertEqual(out["rss_bytes_delta"],1024)
         with self.assertRaises(ValueError):
             self.audit["difference"](a,dict(b,start_ticks=101),100)
+
+    def test_register_evidence_counts_association_not_decoding(self):
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/"watch.json"
+            old=[0]*16
+            new=old.copy()
+            new[3]=0x0200
+            new[14]=0x0010
+            events=[{"before":{"R141":old},"after":{"R141":new},"flags":["heater_readback"]},
+                    {"before":{"R141":new},"after":{"R141":old},"flags":[]}]
+            path.write_text(json.dumps({"schema":1,"events":events}))
+            result=self.audit["register_evidence"](path)
+            self.assertEqual(result["valid_pairs"],2)
+            self.assertEqual(len(result["candidates"]),2)
+            for row in result["candidates"]:
+                self.assertEqual((row["rising"],row["falling"],row["with_known_edge"]),(1,1,1))
+                self.assertEqual(row["known_edges"],{"heater_readback":1})
+            path.write_text("invalid")
+            self.assertFalse(self.audit["register_evidence"](path)["available"])
 
     def test_current_process_readonly(self):
         result=self.audit["snapshot"](os.getpid())
