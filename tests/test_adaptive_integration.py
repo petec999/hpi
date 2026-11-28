@@ -397,6 +397,31 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(self.r.status["proposed"],"eco / FLimit OFF")
         self.assertFalse(self.writes)
 
+    def test_experiment_auto_resume_after_fresh_telemetry_and_cancel(self):
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/"learning.json"
+            self.r=Runtime(self.g,path)
+            self.refresh()
+            self.r.choose("experiment","legacy")
+            since=self.r.experiment_since
+            self.r=Runtime(self.g,path)
+            self.assertEqual(self.r.control,"manual")
+            self.assertTrue(self.r.resume_requested)
+            self.assertEqual(self.r.resume_mode,"experiment")
+            self.r.fresh_room_sensor=lambda key,wall: 21 if key=="intemp" else 1
+            self.refresh()
+            self.r.tick()
+            self.assertEqual(self.r.control,"manual")
+            self.now.return_value+=30
+            self.refresh()
+            self.r.tick()
+            self.assertEqual(self.r.control,"experiment")
+            self.assertEqual(self.r.experiment_since,since)
+            self.assertFalse(self.writes)
+            self.r=Runtime(self.g,path)
+            self.r.choose("manual","manual")
+            self.assertFalse(Runtime(self.g,path).resume_requested)
+
     def test_experiment_checkpoint_manual_resume_and_new_session(self):
         with tempfile.TemporaryDirectory() as td:
             path=Path(td)/"learning.json"
@@ -413,7 +438,7 @@ class RuntimeTest(unittest.TestCase):
             self.r.observer.save_if_due(1000)
             self.r=Runtime(self.g,path)
             self.assertEqual(self.r.control,"manual")
-            self.assertFalse(self.r.resume_requested)
+            self.assertTrue(self.r.resume_requested)
             self.assertTrue(self.r.view()["experiment"]["resume_available"])
             self.assertEqual(self.r.experiment_counts()[0],1)
             self.refresh()
