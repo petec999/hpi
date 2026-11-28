@@ -7,7 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 from adaptive.energy import EnergyMonitor
-from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch, HeaterCounter, OperationMonitor, PassiveInsights, ExperimentGuard, ContinuousTrial, CapacityLearning
+from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch, DefrostTrace, HeaterCounter, OperationMonitor, PassiveInsights, ExperimentGuard, ContinuousTrial, CapacityLearning
 
 class SelectionBlocked(ValueError):
     """Safe, fixed activation reason exposed to authenticated UI."""
@@ -40,6 +40,7 @@ class Runtime:
         self.learning.on_record=self.report.learned
         self.thresholds=NativeThresholds(Path(learning_path).with_name(".adaptive-thresholds-v1.json") if learning_path else None)
         self.register_watch=RegisterWatch(Path(learning_path).with_name(".adaptive-register-watch-v1.json") if learning_path else None)
+        self.defrost_trace=DefrostTrace(Path(learning_path).with_name(".adaptive-defrost-trace-v1.json") if learning_path else None)
         self.heater_counter=HeaterCounter(Path(learning_path).with_name(".adaptive-heater-counter-v1.json") if learning_path else None)
         # Prior experimental ON marker is diagnostic only after retirement.
         self.heater_marker=Path(learning_path).with_name(".adaptive-heater-owned-v1") if learning_path else None
@@ -411,7 +412,14 @@ class Runtime:
         # Separate lock: never hold controller lock in the serial reader.
         with self.frames_lock:
             if len(regs)==self.SIZES[key]:
-                self.frames[key]=(time.monotonic(),tuple(regs))
+                now=time.monotonic()
+                self.frames[key]=(now,tuple(regs))
+                if key in DefrostTrace.BANKS:
+                    try:
+                        self.defrost_trace.observe(self.frames,now,time.time())
+                    except Exception:
+                        # Diagnostics must not disrupt ingestion or control.
+                        pass
             else:
                 self.frames.pop(key,None)
 
@@ -806,6 +814,7 @@ class Runtime:
             data["operation_24h"]=self.operation.summary(time.time())
             data["thresholds"]=self.thresholds.summary()
             data["register_watch"]=self.register_watch.summary(time.monotonic())
+            data["defrost_trace"]=self.defrost_trace.summary()
             data["heater_counter"]=self.heater_counter.summary(time.monotonic())
             return data
 
@@ -1368,6 +1377,10 @@ class Runtime:
                     self.ready_log_count+=1
             self.observe_heater(now)
             self.observe_registers(now)
+            try:
+                self.defrost_trace.save_if_due(now)
+            except Exception:
+                pass
             self.observe_hysteresis()
             state=None
             try:
