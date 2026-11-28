@@ -101,9 +101,49 @@ class ExperimentGuardTests(unittest.TestCase):
         from adaptive.regulator import ExperimentGuard
         g=ExperimentGuard()
         for t in range(0,1800,30):
-            self.assertIsNone(g.observe(self.sample(t),21,True))
-        self.assertEqual(g.observe(self.sample(1800),21,True),"water_shortfall")
+            self.assertIsNone(g.observe(self.sample(t,hz=40,requested_hz=40),21,True))
+        self.assertEqual(g.observe(self.sample(1800,hz=40,requested_hz=40),21,True),"water_shortfall")
         self.assertEqual(g.heating_state,"capacity_shortfall")
+
+    def test_plateau_below_limit_not_capacity_shortfall(self):
+        from adaptive.regulator import ExperimentGuard
+        g=ExperimentGuard()
+        for t in range(0,3601,30):
+            self.assertIsNone(g.observe(self.sample(t,hz=25,requested_hz=25),21,True))
+        self.assertEqual(g.capacity_state,"modulating_shortfall")
+        self.assertEqual(g.water_seconds,3600)
+
+    def test_capacity_learning_persistence_and_probe_guard(self):
+        from adaptive.regulator import CapacityLearning
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/".adaptive-capacity-v1.json"
+            model=CapacityLearning(path)
+            wall=time.time()-14400
+            for t in range(0,12601,30):
+                model.observe(self.sample(t,hz=40,requested_hz=40),1,True,wall+t)
+            self.assertTrue(model.avoid_probe(self.sample(12600),1,("quiet",True)))
+            self.assertFalse(model.avoid_probe(self.sample(12600),1,("eco",True)))
+            self.assertFalse(model.avoid_probe(self.sample(12600),5,("quiet",True)))
+            model.save_if_due(12600)
+            self.assertIsNone(model.error)
+            loaded=CapacityLearning(path)
+            self.assertIsNone(loaded.error)
+            self.assertTrue(loaded.avoid_probe(self.sample(12600),1,("quiet",True)))
+            before=loaded.summary()["hours"]
+            loaded.observe(self.sample(13000,hz=40,requested_hz=40),1,True,wall+13000)
+            loaded.observe(self.sample(13030,hz=40,requested_hz=40),1,True,wall+13030)
+            self.assertEqual(loaded.summary()["hours"],before)
+
+    def test_capacity_learning_excludes_defrost_and_gap(self):
+        from adaptive.regulator import CapacityLearning
+        model=CapacityLearning()
+        for t in range(0,1201,30):
+            model.observe(self.sample(t,hz=40,requested_hz=40),1,True,1000+t)
+        self.assertAlmostEqual(model.summary()["hours"],300/3600)
+        model.observe(self.sample(1230,defrost=True),1,True,2230)
+        model.observe(self.sample(1260,hz=40,requested_hz=40),1,True,2260)
+        model.observe(self.sample(1500,hz=40,requested_hz=40),1,True,2500)
+        self.assertAlmostEqual(model.summary()["hours"],300/3600)
 
     def test_rising_twi_or_two_does_not_confirm_capacity_shortfall(self):
         from adaptive.regulator import ExperimentGuard
@@ -111,7 +151,7 @@ class ExperimentGuardTests(unittest.TestCase):
             with self.subTest(sensor=sensor):
                 g=ExperimentGuard()
                 for t in range(0,1801,30):
-                    self.assertIsNone(g.observe(self.sample(t,**{sensor:29+t/600}),21,True))
+                    self.assertIsNone(g.observe(self.sample(t,hz=40,requested_hz=40,**{sensor:29+t/600}),21,True))
                 self.assertEqual(g.water_seconds,1800)
                 self.assertEqual(g.heating_state,"water_below_target")
 
