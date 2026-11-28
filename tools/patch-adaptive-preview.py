@@ -527,7 +527,8 @@ function amPaint(a){''')
     html=html.replace('v.auto_resume_pending?"Oczekuje na dane":v.control==="auto"?"Zapamiętane":"Wyłączone"', 'v.experiment_resume_pending?"Test – oczekuje na dane":v.auto_resume_pending?"Auto – oczekuje na dane":["auto","experiment"].includes(v.control)?"Zapamiętane":"Wyłączone"')
     html=html.replace('||!v.auto_resume_pending;', '||!(v.auto_resume_pending||v.experiment_resume_pending);')
     html=html.replace('&&amState.auto_resume_pending)))', '&&(amState.auto_resume_pending||amState.experiment_resume_pending))))')
-    html=html.replace('ex.resume_available?"Zapisana sesja gotowa do ręcznego wznowienia"', 'v.experiment_resume_pending?"Automatyczne wznowienie oczekuje na dane":ex.resume_available?"Zapisana sesja gotowa do ręcznego wznowienia"')
+    if 'v.experiment_resume_pending?"Automatyczne wznowienie oczekuje na dane"' not in html:
+        html=html.replace('ex.resume_available?"Zapisana sesja gotowa do ręcznego wznowienia"', 'v.experiment_resume_pending?"Automatyczne wznowienie oczekuje na dane":ex.resume_available?"Zapisana sesja gotowa do ręcznego wznowienia"')
     if 'id="am-window-checkpoint"' not in html:
         html=once(html,'<p id="am-experiment-checkpoint"></p>','<p id="am-experiment-checkpoint"></p><p id="am-window-checkpoint"></p>')
         html=once(html,' $("am-experiment-checkpoint").textContent=', ' $("am-window-checkpoint").textContent=ex&&ex.checkpoint_seconds>0?"Zapis okna: "+fmt(ex.checkpoint_seconds/60)+" / 30 min"+(ex.restoring_window?" · oczekiwanie na stabilizację po restarcie":""):"";\n $("am-experiment-checkpoint").textContent=')
