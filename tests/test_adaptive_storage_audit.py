@@ -66,6 +66,23 @@ class StorageAudit(unittest.TestCase):
         r.building_rates=[]
         self.assertIsNone(r.building_summary()["room_trend_k_h"])
 
+    def test_building_trend_ignores_stale_temperature(self):
+        from adaptive.regulator import Sample
+        r=self.runtime(None)
+        sample=Sample(now=1000,target=32,return_temp=30,supply_temp=32,hz=40,
+                      requested_hz=40,mode="quiet",relay=True,heating=True,defrost=False,fresh=True)
+        r.fresh_room_sensor=lambda key,wall: 21 if key=="intemp" else None
+        r.observe_building(sample,1000)
+        self.assertIsNone(r.building_previous)
+        r.fresh_room_sensor=lambda key,wall: 21 if key=="intemp" else 1
+        r.observe_building(sample,1030)
+        r.observe_building(sample,1060)
+        self.assertEqual(len(r.building_rates),1)
+        r.fresh_room_sensor=lambda key,wall: None
+        r.observe_building(sample,1090)
+        self.assertIsNone(r.building_previous)
+        self.assertEqual(len(r.building_rates),1)
+
     def test_diagnostics_read_only(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d)/".adaptive-test.json"
@@ -154,6 +171,15 @@ class ExperimentGuardTests(unittest.TestCase):
         self.assertEqual(model.startup_choice(sample,5,wall),(("quiet",True),"default"))
         self.assertEqual(model.startup_choice(sample,1,wall+31*86400),(("quiet",True),"default"))
         self.assertEqual(model.startup_choice(sample,None,wall),(("quiet",True),"default"))
+
+    def test_capacity_status_summary_matches_report_metadata(self):
+        from adaptive.regulator import CapacityLearning
+        model=CapacityLearning()
+        for t in range(0,1201,30):
+            model.observe(self.sample(t,hz=40,requested_hz=40),1,True,1000+t)
+        full=model.summary()
+        compact=model.summary(include_rows=False)
+        self.assertEqual(compact,{k:v for k,v in full.items() if k!="rows"})
 
     def test_capacity_learning_old_evidence_loses_weight(self):
         from adaptive.regulator import CapacityLearning
