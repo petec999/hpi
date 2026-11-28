@@ -341,7 +341,7 @@ class RuntimeTest(unittest.TestCase):
         with (patch.dict(FakeGPIO.values,{1:"1",2:"1"}),
               patch.object(Decoder,"GetMode",return_value="quiet"),
               patch.object(Decoder,"GetTwiTwo",return_value=[27,29]),
-              patch.object(Decoder,"GetCompInfo",return_value=[30,30,0,320,25]),
+              patch.object(Decoder,"GetCompInfo",return_value=[40,40,0,320,25]),
               patch.object(self.r,"fresh_room_sensor",side_effect=lambda key,wall: 21 if key=="intemp" else 1)):
             self.r.choose("experiment","legacy")
             self.r.experiment_counts_saved[:2]=[3,3]
