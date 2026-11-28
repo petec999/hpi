@@ -1,0 +1,22 @@
+[Unit]
+Description=HaierPi PR8 read-only history and event logger
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=haier
+Group=haier
+WorkingDirectory=/opt/haierpi-pr8
+EnvironmentFile=/etc/haierpi-pr8.env
+ExecStart=/opt/haierpi-pr8/.venv/bin/python -m diagnostics.mqtt_history
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/haierpi
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
