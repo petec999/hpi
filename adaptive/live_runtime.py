@@ -708,19 +708,22 @@ class Runtime:
         self.learning.cancel()
         self.learning_before=None
         self.reg.reset()
-        mode,relay=("quiet",True)
+        (mode,relay),basis=self.capacity_learning.startup_choice(s,self.fresh_room_sensor("outtemp",time.time()))
+        goal=(mode,relay)
         actual=s.mode+("+FLimit" if s.relay else "")
-        proposed="quiet+FLimit"
-        reason="Postój sprężarki – przygotowanie Quiet + FLimit"
-        if (s.mode,s.relay)==(mode,relay):
-            reason="Postój sprężarki – Quiet + FLimit gotowe do startu"
+        proposed=mode+("+FLimit" if relay else " / OFF")
+        label=mode.capitalize()+(" + FLimit" if relay else " / FLimit OFF")
+        reason="Postój sprężarki – przygotowanie "+label
+        if (s.mode,s.relay)==goal:
+            reason="Postój sprężarki – "+label+" gotowe do startu"
         elif previous is None or not 0<frame-previous<=self.MAX_AGE:
             reason="Postój sprężarki – potwierdzanie postoju przed przygotowaniem"
+        reason+=" · "+{"default":"ustawienie domyślne","no_valid_alternative":"brak potwierdzonej alternatywy","learned":"dobór z historii"}[basis]
         model=self.thresholds.model(s)
         if model["start_margin"] is not None and (model["start_margin"]<=0.5 or model["start_eta_min"] is not None and model["start_eta_min"]<=5):
             reason+=" · zbliża się prognozowany START"
         self.status={"reason":"idle startup preparation","reason_pl":reason,
-                     "risk":"paused","actual":actual,"proposed":proposed,
+                     "risk":"paused","actual":actual,"proposed":proposed,"startup_basis":basis,
                      "target":s.target,"return_temp":s.return_temp,"stop_target":model["stop_target"],
                      "supply_temp":s.supply_temp,"stop_sensor":"two","stop_margin":model["stop_target"]-s.supply_temp,"down_confirm":self.reg.cfg.down_confirm,
                      "surplus_band":self.reg.cfg.surplus_band}
@@ -739,14 +742,24 @@ class Runtime:
                     or (current.mode,current.relay)!=(s.mode,s.relay)
                     or abs(current.target-s.target)>0.25 or self.g.get("newframe")):
                 return True
-            # Enable frequency limit first; only then set Quiet.
+            # Recheck the learned goal with fresh telemetry before any write.
+            fresh_goal,_=self.capacity_learning.startup_choice(current,self.fresh_room_sensor("outtemp",time.time()))
+            if fresh_goal!=goal:
+                return True
+            # One output at a time: enable limit before changing preset,
+            # disable it only after the requested preset is confirmed.
             # Do not train the running policy on changes made at zero Hz.
-            mode,relay=(current.mode,True) if not current.relay else ("quiet",True)
+            if goal[1] and not current.relay:
+                mode,relay=current.mode,True
+            elif current.mode!=goal[0]:
+                mode,relay=goal[0],current.relay
+            else:
+                mode,relay=current.mode,goal[1]
             issued=time.monotonic()
             self.pending=(mode,relay,issued+90,issued)
             self.report_event("issued","idle: "+mode+" / FLimit "+str(relay))
-            if not current.relay:
-                _,ok=self.g["flimitchange"]("1")
+            if relay!=current.relay:
+                _,ok=self.g["flimitchange"](str(int(relay)))
                 if ok!="success" or self.gpio("freqlimitpin")!=relay:
                     self.fail("idle FLimit GPIO readback mismatch")
             else:
