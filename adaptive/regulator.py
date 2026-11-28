@@ -1649,10 +1649,11 @@ class PassiveInsights:
         self.last=None
         self.segment=None
         self.defrost_start=None
+        self.defrost_heater=None
         self.recovery=None
 
     def interrupt(self):
-        self.last=self.segment=self.defrost_start=self.recovery=None
+        self.last=self.segment=self.defrost_start=self.defrost_heater=self.recovery=None
 
     def prune(self,now):
         for rows in (self.resources,self.thermal,self.defrosts):
@@ -1693,7 +1694,7 @@ class PassiveInsights:
             out["write_bytes_per_day"]=round((b-a)*86400/span)
         return out
 
-    def observe(self,s,co_enabled,indoor=None,outdoor=None):
+    def observe(self,s,co_enabled,indoor=None,outdoor=None,heater=None):
         now=s.now
         if not s.fresh or not math.isfinite(now):
             self.interrupt()
@@ -1708,13 +1709,26 @@ class PassiveInsights:
             old=prev[1]
             if state=="defrost" and old in ("run","idle"):
                 self.defrost_start=now
+                self.defrost_heater={"seen_on":False,"missing":False,"on_seconds":0.0,"previous":None}
                 self.recovery=None
             elif old=="defrost" and state!="defrost":
                 if self.defrost_start is not None and state in ("run","idle"):
-                    row=[now,now-self.defrost_start,None]
+                    h=self.defrost_heater
+                    group=("heater_seen" if h and h["seen_on"] else
+                           "heater_not_seen" if h and not h["missing"] else "unknown")
+                    row=[now,now-self.defrost_start,None,group,h["on_seconds"] if h else 0.0]
                     self.defrosts.append(row)
                     self.recovery=row
-                self.defrost_start=None
+                self.defrost_start=self.defrost_heater=None
+            if state=="defrost" and self.defrost_heater is not None:
+                h=self.defrost_heater
+                if type(heater) is not bool:
+                    h["missing"]=True
+                else:
+                    h["seen_on"] |= heater
+                    if old=="defrost" and heater and h["previous"] is True:
+                        h["on_seconds"]+=now-prev[0]
+                h["previous"]=heater
             if self.recovery is not None:
                 ended=self.recovery[0]
                 if state=="run" and now-ended<=1800:
@@ -1765,10 +1779,18 @@ class PassiveInsights:
         thermal["cooling_proxy_h"]=round(median(cooling),1) if len(cooling)>=3 else None
         defrosts=[r for r in self.defrosts if now-86400<=r[0]<=now]
         recovery=[r[2] for r in defrosts if r[2] is not None]
+        defrost_groups={}
+        for group in ("heater_seen","heater_not_seen","unknown"):
+            rows=[r for r in defrosts if r[3]==group]
+            defrost_groups[group]={"completed":len(rows),
+                "median_seconds":median(r[1] for r in rows) if rows else None,
+                "heater_on_observed_seconds":sum(r[4] for r in rows),
+                "recovery_samples":sum(r[2] is not None for r in rows),
+                "recovery_median_seconds":median(r[2] for r in rows if r[2] is not None) if any(r[2] is not None for r in rows) else None}
         return {"stability_24h":self.stability(now,86400),
                 "stability_7d":self.stability(now,self.WEEK),
                 "thermal":thermal,
-                "defrost_24h":{"completed":len(defrosts),
+                "defrost_24h":{"completed":len(defrosts),"by_heater":defrost_groups,
                     "median_seconds":median(r[1] for r in defrosts) if defrosts else None,
                     "recovery_samples":len(recovery),
                     "recovery_median_seconds":median(recovery) if recovery else None},
