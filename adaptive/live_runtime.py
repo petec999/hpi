@@ -115,8 +115,13 @@ class Runtime:
             self.experiment_since=since
             self.experiment_initial=tuple(initial)
             self.experiment_saved=not session.get("finished",False)
-            if self.experiment_saved and self.resume_mode=="experiment":
+            if self.experiment_saved and getattr(self,"resume_mode",None)=="experiment":
                 self.continuous_trial.restore(session.get("partial_window"))
+                record=self.continuous_trial.resume_record
+                if record is not None:
+                    group=self.experiment_windows[self.EXPERIMENT_LEVELS.index(tuple(record["context"]))]
+                    if record["start"]<since or record["last"]>time.time()+60 or (group and group[-1]["stop"]>record["start"]):
+                        self.continuous_trial.reset("invalid_restart_checkpoint")
         except FileNotFoundError:
             pass
         except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError):
@@ -433,8 +438,7 @@ class Runtime:
                 return
             # Existing comfort recovery remains in charge if reference is breached.
             saved=self.continuous_trial.checkpoint()
-            self.choose("experiment","manual")
-            self.continuous_trial.restore(saved)
+            self.choose("experiment","manual",resume_record=saved)
         else:
             self.choose("auto","manual")
         self.g["logging"].info("Adaptive %s restored after restart; fresh telemetry verified",mode)
@@ -606,7 +610,7 @@ class Runtime:
             return "Temperatury poza zakresem regulatora"
         return None
 
-    def choose(self,mode,expected):
+    def choose(self,mode,expected,resume_record=None):
         with self.lock:
             restart_experiment=mode=="experiment_new"
             if restart_experiment:
@@ -658,9 +662,17 @@ class Runtime:
                 self.save_guard_checkpoint()
             self.experiment_guard.reset()
             self.continuous_trial.reset()
-            if mode=="experiment":
-                self.persist_owner("experiment")
             self.control=mode
+            if mode=="experiment":
+                try:
+                    if resume_record is not None and not restart_experiment:
+                        self.continuous_trial.restore(resume_record)
+                    self.save_guard_checkpoint()
+                    self.persist_owner("experiment")
+                except SelectionBlocked:
+                    self.control="manual"
+                    self.continuous_trial.reset()
+                    raise
             self.report_event("owner","selected "+mode)
             self.report.interrupt()
             self.capacity_learning.interrupt()
@@ -1830,5 +1842,7 @@ class Runtime:
                                     "initial":self.experiment_initial,"storage_error":self.experiment_error,"guard":self.guard_view(),
                                     "continuous":self.experiment_continuous,"continuous_seconds":self.continuous_trial.seconds,
                                     "continuous_reason":self.continuous_trial.reason,
+                                    "checkpoint_seconds":(getattr(self,"partial_saved",None) or {}).get("seconds",0),
+                                    "restoring_window":self.continuous_trial.resume_record is not None,
                                     "windows":self.experiment_windows,
                                     "continuous_stats":self.continuous_trial.stats})
