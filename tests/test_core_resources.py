@@ -72,6 +72,45 @@ class ResourceGuards(unittest.TestCase):
     def test_helper_compiles(self):
         ast.parse(PATCH["HELPER"])
 
+class SensorInputTests(unittest.TestCase):
+    def setUp(self):
+        import math
+        from unittest.mock import MagicMock
+        self.response=MagicMock()
+        self.response.status_code=200
+        self.response.__enter__.return_value=self.response
+        self.requests=MagicMock()
+        self.requests.get.return_value=self.response
+        env={"requests":self.requests,"math":math}
+        exec(PATCH["INPUT_HELPER"],env)
+        self.read=env["_hpi_ha_number"]
+
+    def test_valid_read_and_timeout(self):
+        self.response.json.return_value={"state":"21.36"}
+        self.assertEqual(self.read("http://ha",{},-40,80,(3,5)),21.4)
+        self.requests.get.assert_called_once_with("http://ha",headers={},timeout=(3,5))
+        self.response.raise_for_status.assert_called_once()
+        self.response.__exit__.assert_called_once()
+
+    def test_missing_invalid_nonfinite_and_out_of_range(self):
+        for data in ({},{"attributes":{"state":"21"}},[],{"state":True},{"state":"unknown"},
+                     {"state":"unavailable"},{"state":"nan"},{"state":"inf"},{"state":"81"}):
+            with self.subTest(data=data):
+                self.response.json.return_value=data
+                with self.assertRaises((ValueError,TypeError)):
+                    self.read("http://ha",{},-40,80,3)
+
+    def test_http_and_transport_errors_propagate(self):
+        self.response.status_code=503
+        self.response.json.return_value={"state":"21"}
+        with self.assertRaises(ValueError):
+            self.read("http://ha",{},-40,80,3)
+        self.response.json.assert_not_called()
+        self.requests.get.side_effect=TimeoutError("timeout")
+        with self.assertRaises(TimeoutError):
+            self.read("http://ha",{},-40,80,3)
+
+
 class HostAuditTests(unittest.TestCase):
     def setUp(self):
         self.audit=runpy.run_path(str(Path(__file__).resolve().parents[1]/"tools/host-resource-audit.py"))
