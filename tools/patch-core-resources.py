@@ -93,11 +93,79 @@ def config_patch(source):
     return source
 
 
+INPUT_MARK = '# HPI CORE SENSOR INPUT GUARDS v1'
+INPUT_HELPER = '''# HPI CORE SENSOR INPUT GUARDS v1
+def _hpi_ha_number(url, headers, minimum, maximum, timeout):
+    # A transport/HTTP/JSON failure must use the existing sensor fallback,
+    # never refresh the age of an old measurement.
+    with requests.get(url, headers=headers, timeout=timeout) as response:
+        response.raise_for_status()
+        if response.status_code != 200:
+            raise ValueError("HA unexpected HTTP status")
+        data = response.json()
+    if not isinstance(data, dict) or "state" not in data or isinstance(data["state"], bool):
+        raise ValueError("HA missing or invalid state")
+    value = float(data["state"])
+    if not math.isfinite(value) or not minimum <= value <= maximum:
+        raise ValueError("HA sensor value out of range")
+    return round(value, 1)
+
+'''
+
+def input_patch(source):
+    if INPUT_MARK in source:
+        if INPUT_HELPER not in source:
+            raise ValueError("Modified sensor input guard")
+        return source
+
+    def once(old, new):
+        nonlocal source
+        if source.count(old) != 1:
+            raise ValueError("Unexpected sensor anchor: "+old[:100])
+        source=source.replace(old,new,1)
+
+    # Replace the double JSON conversion and split exception handling in
+    # GetInsideTemp/GetHumidity. Keep their existing failure policies.
+    for key,lo,hi in (("intemp",-40.0,80.0),("humid",0.0,100.0)):
+        pattern=(r"(?ms)^        try:\n            resp = requests\.get\(url, headers=headers, timeout=\(3, 5\)\)\n"
+                 r"            json_str = json\.dumps\(resp\.json\(\)\)\n"
+                 r"        except requests\.exceptions\.RequestException as e:\n            logging\.error\(e\)\n"
+                 r"        try:\n            if 'state' in json_str:\n.*?"
+                 r"^            else:\n                logging\.error\([^\n]+\)\n"
+                 r"                return statusdict\['"+key+r"'\]\['value'\]\n")
+        source,n=re.subn(pattern,
+            "        try:\n            response = _hpi_ha_number(url, headers, %s, %s, (3, 5))\n"%(lo,hi),
+            source,count=1)
+        if n!=1:
+            raise ValueError("Unexpected HA sensor layout: "+key)
+
+    # DHW and outside temperature already have a single try/except.
+    for indent,lo,hi,result in (("        ",-10.0,110.0,"response = "),
+                               ("            ",-55.0,125.0,"return ")):
+        pattern=(r"(?ms)^"+indent+r"resp = requests\.get\(url, headers=headers, timeout=3\)\n"
+                 +indent+r"j = resp\.json\(\)\n"+indent+r"raw = j\.get\('state', None\)\n"
+                 +indent+r"f = float\(raw\)\n.*?^"+indent+re.escape(result)+r"round\(f, 1\)\n")
+        source,n=re.subn(pattern,indent+result+"_hpi_ha_number(url, headers, %s, %s, 3)\n"%(lo,hi),
+                         source,count=1)
+        if n!=1:
+            raise ValueError("Unexpected HA temperature layout")
+
+    # TAO must be decoded from a recent complete R241, not a cached
+    # statusdict value which could survive an RS485 disconnect.
+    once("        v = statusdict.get('tao', {}).get('value', None)\n        try:\n            f = float(v)",
+         "        try:\n            if not _pump_frame_fresh('R241'):\n                return None\n            f = float(PyHaier.GetTao(list(R241)))")
+    once("                float(_i)\n                float(_o)\n                return True",
+         "                if not all(math.isfinite(float(x)) for x in (_i, _o)):\n                    raise ValueError('Nonfinite startup temperature')\n                return True")
+    once("def GetInsideTemp(param):",INPUT_HELPER+"def GetInsideTemp(param):")
+    compile(source,'main.py','exec')
+    return source
+
+
 def patch(source):
     if MARK in source:
         if HELPER not in source:
             raise ValueError('Modified resource guard')
-        return config_patch(source)
+        return input_patch(config_patch(source))
     def once(old, new):
         nonlocal source
         if source.count(old) != 1:
@@ -144,4 +212,4 @@ def patch(source):
                 logging.exception("Crash diagnostic failed")
 ''')
     compile(source,'main.py','exec')
-    return config_patch(source)
+    return input_patch(config_patch(source))
