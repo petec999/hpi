@@ -665,10 +665,18 @@ def capacity_report_api(source):
         html=once(html,'<article><h2>Wyuczone konteksty</h2>','<article><h2>Charakterystyka wydajności CO — uczenie pasywne</h2><p id="capacity-learning-status"></p><div class="scroll"><table id="capacity-profile"></table></div><small>Zakresy temperatur co 2 K, po 15 min stabilizacji, bez CWU, defrostu i luk danych. Auto pomija opcjonalną redukcję, gdy w danym kontekście zgromadzono co najmniej 3 h obserwacji, w tym 30 min i 20% czasu na limicie z niedoborem Two >= 2 K, z ostatnim pomiarem w ciągu 30 dni. Nie blokuje ochrony przed STOP ani zwiększania mocy. Dane nie są pomiarem COP.</small></article><article><h2>Wyuczone konteksty</h2>')
         html=once(html,'function paint(d){','''function paint(d){
 const capacity=d.capacity_learning;
-el("capacity-learning-status").textContent=capacity?capacity.contexts+" kontekstów · "+num(capacity.hours)+" h obserwacji"+(capacity.unsaved?" · RAM":"")+(capacity.storage_error?" · błąd zapisu: "+capacity.storage_error:""):"Brak danych";
+el("capacity-learning-status").textContent=capacity?capacity.contexts+" kontekstów · "+num(capacity.hours)+" h ważonych obserwacji"+(capacity.unsaved?" · RAM":"")+(capacity.storage_error?" · błąd zapisu: "+capacity.storage_error:""):"Brak danych";
 table("capacity-profile",["Zewn. od °C","Nastawa od °C","Tryb","Godziny","Fact / Fset Hz","Na limicie %","Niedobór %","Limit + niedobór min","Śr. niedobór K","Ostatni pomiar"],(capacity?capacity.rows:[]).map(r=>[r.outdoor_band,r.target_band,r.mode+(r.flimit?" + FLimit":" / OFF"),num(r.seconds/3600),num(r.mean_fact)+"/"+num(r.mean_fset),num(r.limited_pct),num(r.shortfall_pct),num(r.limited_shortfall_seconds/60),num(r.mean_deficit,2),dt(r.last)]));''')
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
-    return source
+    html=html.replace("3 h obserwacji, w tym 30 min", "3 h ważonych obserwacji, w tym 30 min").replace("Dane nie są pomiarem COP.", "Dane nie są pomiarem COP. Waga obserwacji maleje o połowę co 30 dni.")
+    if 'id="energy-climate-history"' not in html:
+        html=once(html,'<article><h2>Wyuczone konteksty</h2>','<article><h2>Historia energetyczna CO</h2><p id="energy-climate-status"></p><div class="scroll"><table id="energy-climate-history"></table></div><small>COP szacunkowy, szczególnie przy ręcznie zadanym przepływie. Bilans obejmuje dostępne próbki CO, postojów i defrostu, nie pełne zużycie sezonowe. Nie służy do automatycznego wyboru trybu. Zmiana konfiguracji pomiarów rozpoczyna nową historię.</small></article><article><h2>Wyuczone konteksty</h2>')
+        html=once(html,'function paint(d){','''function paint(d){
+const eh=d.energy&&d.energy.climate_history;
+el("energy-climate-status").textContent=eh?eh.contexts+" kontekstów · "+(eh.flow_estimated?"przepływ ręczny — COP szacunkowy":"przepływ z czujnika lub brak pomiaru")+(eh.electricity_estimated?" · energia z całkowania mocy":" · licznik energii")+(eh.unsaved?" · RAM":"")+(eh.storage_error?" · błąd zapisu: "+eh.storage_error:""):"Brak danych";
+table("energy-climate-history",["Zewn. od °C","Nastawa od °C","Tryb","Godziny próbek","Prąd kWh","Ciepło netto kWh (szac.)","COP netto (szac.)","Pokrycie par %","Defrost min","Ostatni pomiar"],(eh?eh.rows:[]).map(r=>[r.outdoor_band,r.target_band,r.mode,num(r.seconds/3600),num(r.kwh,2),num(r.net_heat_kwh,2),num(r.cop_net,2),num(100*r.paired_fraction),num(r.defrost_seconds/60),dt(r.last)]));''')
+    current=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+    return once(source,current,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
 
 def register_watch_api(source):
     source=capacity_report_api(performance_report_api(source))
