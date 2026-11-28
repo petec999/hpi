@@ -658,8 +658,20 @@ def registers_page_api(source):
         source=once(source,line,"_WV_HTML = "+repr(html))
     return source
 
+def capacity_report_api(source):
+    line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+    html=ast.literal_eval(line.split("=",1)[1].strip())
+    if 'id="capacity-profile"' not in html:
+        html=once(html,'<article><h2>Wyuczone konteksty</h2>','<article><h2>Charakterystyka wydajności CO — uczenie pasywne</h2><p id="capacity-learning-status"></p><div class="scroll"><table id="capacity-profile"></table></div><small>Zakresy temperatur co 2 K, po 15 min stabilizacji, bez CWU, defrostu i luk danych. Auto pomija opcjonalną redukcję, gdy w danym kontekście zgromadzono co najmniej 3 h obserwacji, w tym 30 min i 20% czasu na limicie z niedoborem Two >= 2 K, z ostatnim pomiarem w ciągu 30 dni. Nie blokuje ochrony przed STOP ani zwiększania mocy. Dane nie są pomiarem COP.</small></article><article><h2>Wyuczone konteksty</h2>')
+        html=once(html,'function paint(d){','''function paint(d){
+const capacity=d.capacity_learning;
+el("capacity-learning-status").textContent=capacity?capacity.contexts+" kontekstów · "+num(capacity.hours)+" h obserwacji"+(capacity.unsaved?" · RAM":"")+(capacity.storage_error?" · błąd zapisu: "+capacity.storage_error:""):"Brak danych";
+table("capacity-profile",["Zewn. od °C","Nastawa od °C","Tryb","Godziny","Fact / Fset Hz","Na limicie %","Niedobór %","Limit + niedobór min","Śr. niedobór K","Ostatni pomiar"],(capacity?capacity.rows:[]).map(r=>[r.outdoor_band,r.target_band,r.mode+(r.flimit?" + FLimit":" / OFF"),num(r.seconds/3600),num(r.mean_fact)+"/"+num(r.mean_fset),num(r.limited_pct),num(r.shortfall_pct),num(r.limited_shortfall_seconds/60),num(r.mean_deficit,2),dt(r.last)]));''')
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    return source
+
 def register_watch_api(source):
-    source=performance_report_api(source)
+    source=capacity_report_api(performance_report_api(source))
     line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
     html=ast.literal_eval(line.split("=",1)[1].strip())
     if 'id="register-events"' not in html:
