@@ -178,6 +178,26 @@ class EnergyTests(unittest.TestCase):
         self.assertIsNone(m.window_summary(1000,1600,mode,999))
         self.assertIsNone(m.window_summary(1000,2200,mode,1000)["cop_net"])
 
+    def test_climate_history_persists_estimated_flow_and_excludes_gaps(self):
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/"energy.json"
+            m=EnergyMonitor({},path)
+            m.save(dict(DEFAULT,enabled=True,energy="sensor.energy",flow_source="manual",manual_flow=1.15))
+            state=("co_run","eco / FLimit OFF",5,1000,1,35,True)
+            for t in range(0,601,30):
+                m.accept(t,state,{"energy":10+t/3600,"flow":1.15},1000+t)
+            m.accept(900,state,{"energy":10.25,"flow":1.15},1900)
+            m.save_climate(900)
+            h=m.climate_history()
+            self.assertTrue(h["flow_estimated"])
+            self.assertEqual(h["rows"][0]["seconds"],600)
+            self.assertAlmostEqual(h["rows"][0]["cop_net"],1.163*1.15*5)
+            self.assertFalse(h["unsaved"])
+            restarted=EnergyMonitor({},path)
+            self.assertEqual(restarted.climate_history(),h)
+            restarted.save(dict(m.cfg,manual_flow=1.2))
+            self.assertEqual(EnergyMonitor({},path).climate_history()["contexts"],0)
+
     def test_ui_patch(self):
         fixture=("""
 _WV_HTML = '<nav></nav>'
