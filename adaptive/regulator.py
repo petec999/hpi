@@ -134,7 +134,7 @@ class Regulator:
             self.target=None
             self.changed_at=None
 
-    def step(self,s,control="shadow",allowed=None,stop_offset=STOP_HYSTERESIS):
+    def step(self,s,control="shadow",allowed=None,stop_offset=STOP_HYSTERESIS,capacity_model=None,outdoor=None):
         if not math.isfinite(stop_offset) or not 3.5<=stop_offset<=5.5:
             stop_offset=STOP_HYSTERESIS
         if control not in ("manual","legacy","shadow","auto"):
@@ -205,6 +205,13 @@ class Regulator:
         urgent=er>=c.urgent_deficit and es>=c.urgent_deficit and tr>=-c.trend_band and ts>=-c.trend_band
         shortfall=er>c.deficit_band and tr>=-c.trend_band and (
             (es>c.deficit_band and ts>=-c.trend_band) or (es>0.2 and self.integral>=c.integral_limit))
+        # Also recognize a settled, sustained supply deficit at the reference
+        # ceiling even if return-temperature trend alone masks the shortage.
+        limit=ExperimentGuard.FREQUENCY_LIMITS.get((s.mode,s.relay))
+        saturated=bool(limit and now-self.ready_since>=900 and now-self.changed_at>=900
+                       and all(min(x[3],x[4])>=limit-1 and abs(x[3]-x[4])<=3 for x in rows))
+        if saturated and es>=c.urgent_deficit and ts>=-c.trend_band:
+            shortfall=True
         # Return indicates surplus; supply approaching the empirical STOP
         # band independently calls for a reduction, even with a cold return.
         excess=(er<=-c.surplus_band and tr<=c.trend_band) or (
@@ -218,6 +225,12 @@ class Regulator:
                       abs(ts)<=c.trend_band and abs(tr)<=c.trend_band and
                       median(x[3] for x in rows)>=c.probe_hz and
                       abs(median(x[3]-x[4] for x in rows))<=2)
+        # Historical shortages only inhibit optional efficiency probes.
+        # Never inhibit urgent recovery, native STOP protection or surplus reduction.
+        if stable_probe and capacity_model is not None:
+            lower=adjacent(level,"down")
+            if lower!=level and capacity_model.avoid_probe(s,outdoor,LEVELS[lower]):
+                stable_probe=False
         if self.trial and now-self.trial[2]>c.trial_window:
             self.trial=None
         direction=None
@@ -2069,3 +2082,148 @@ class ContinuousTrial:
         self.seconds=0
         self.reason=None if result is not None else "insufficient_heating"
         return result
+
+
+class CapacityLearning:
+    """Persistent passive capacity evidence; independent of reduction learning.
+    Bins: outdoor 2 K, target 2 K, preset/FLimit. No cross-gap inference.
+    """
+    FIELDS=("seconds","limited_seconds","shortfall_seconds","limited_shortfall_seconds",
+            "fact_hz_seconds","fset_hz_seconds","deficit_k_seconds")
+    MAX_ROWS=2048
+    MAX_BYTES=1024*1024
+    SAVE_INTERVAL=900
+    MAX_GAP=65
+    SETTLE=900
+
+    def __init__(self,path=None):
+        self.path=Path(path) if path is not None else None
+        self.rows={}
+        self.last=None
+        self.since=None
+        self.dirty=False
+        self.saved=None
+        self.error=None
+        self.load()
+
+    @staticmethod
+    def key(s,outdoor,pair):
+        if (type(outdoor) not in (int,float) or not math.isfinite(outdoor)
+                or not -60<=outdoor<=60 or not 10<=s.target<=65 or pair not in LEVELS):
+            return None
+        return "%d:%d:%d"%(math.floor(outdoor/2),math.floor(s.target/2),LEVELS.index(pair))
+
+    def interrupt(self):
+        self.last=None
+        self.since=None
+
+    def observe(self,s,outdoor,eligible,wall):
+        pair=(s.mode,s.relay)
+        key=self.key(s,outdoor,pair)
+        limit=ExperimentGuard.FREQUENCY_LIMITS.get(pair)
+        if not (eligible and key is not None and limit and s.fresh and s.heating
+                and not (s.error or s.override or s.defrost or s.dhw)
+                and all(math.isfinite(x) for x in (s.now,s.hz,s.requested_hz,s.supply_temp,wall))
+                and 0<s.hz<=150 and 0<s.requested_hz<=150
+                and -10<=s.supply_temp<=85
+                and abs(s.hz-s.requested_hz)<=3):
+            self.interrupt()
+            return
+        deficit=max(0,s.target-s.supply_temp)
+        saturated=min(s.hz,s.requested_hz)>=limit-1
+        values=(1,int(saturated),int(deficit>=2),int(saturated and deficit>=2),
+                s.hz,s.requested_hz,deficit)
+        previous=self.last
+        self.last=(s.now,wall,key,s.target,values)
+        if previous is None or previous[2]!=key or abs(previous[3]-s.target)>.25 or not 0<s.now-previous[0]<=self.MAX_GAP or abs((wall-previous[1])-(s.now-previous[0]))>5:
+            self.since=s.now
+            return
+        if self.since is None or previous[0]-self.since<self.SETTLE:
+            return
+        dt=s.now-previous[0]
+        if key not in self.rows and len(self.rows)>=self.MAX_ROWS:
+            del self.rows[min(self.rows,key=lambda k:self.rows[k]["last"])]
+        row=self.rows.setdefault(key,dict.fromkeys(self.FIELDS,0.0))
+        for i,k in enumerate(self.FIELDS):
+            row[k]+=dt*(previous[4][i]+values[i])/2
+        row["last"]=wall
+        self.dirty=True
+
+    def avoid_probe(self,s,outdoor,pair):
+        key=self.key(s,outdoor,pair)
+        row=self.rows.get(key,{})
+        seconds=row.get("seconds",0)
+        # Evidence only; no positive recommendation or bypass of protections.
+        return (seconds>=10800 and time.time()-row.get("last",0)<=30*86400
+                and row.get("limited_shortfall_seconds",0)>=1800
+                and row["limited_shortfall_seconds"]/seconds>=.20)
+
+    def load(self):
+        if self.path is None:
+            return
+        try:
+            if self.path.is_symlink() or self.path.stat().st_size>self.MAX_BYTES:
+                raise ValueError("invalid capacity file")
+            data=json.loads(self.path.read_text(encoding="utf-8"))
+            rows=data["rows"]
+            if data["schema"]!=1 or not isinstance(rows,dict) or len(rows)>self.MAX_ROWS:
+                raise ValueError("invalid capacity schema")
+            for key,row in rows.items():
+                a,b,c=map(int,key.split(":"))
+                if not (-30<=a<=30 and 5<=b<=32 and 0<=c<6) or set(row)!=set(self.FIELDS)|{"last"}:
+                    raise ValueError("invalid capacity context")
+                if any(type(v) not in (int,float) or not math.isfinite(v) or v<0 for v in row.values()):
+                    raise ValueError("invalid capacity values")
+                if not (row["limited_shortfall_seconds"]<=min(row["shortfall_seconds"],row["limited_seconds"])<=row["seconds"]
+                        and max(row["shortfall_seconds"],row["limited_seconds"])<=row["seconds"]):
+                    raise ValueError("invalid capacity coverage")
+            self.rows=rows
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError) as exc:
+            self.error=type(exc).__name__
+
+    def save_if_due(self,now):
+        if not self.dirty or self.path is None or (self.saved is not None and now-self.saved<self.SAVE_INTERVAL):
+            return
+        self.saved=now
+        temp=None
+        try:
+            if self.path.is_symlink():
+                raise ValueError("symlink capacity path")
+            raw=json.dumps({"schema":1,"rows":self.rows},allow_nan=False,separators=(",",":")).encode()
+            if len(raw)>self.MAX_BYTES:
+                raise ValueError("capacity storage bound")
+            fd,temp=tempfile.mkstemp(prefix=".capacity-",dir=str(self.path.parent))
+            with os.fdopen(fd,"wb") as f:
+                f.write(raw)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp,self.path)
+            temp=None
+            self.dirty=False
+            self.error=None
+        except (OSError,ValueError,TypeError) as exc:
+            self.error=type(exc).__name__
+        finally:
+            if temp is not None:
+                try:
+                    os.unlink(temp)
+                except OSError:
+                    pass
+
+    def summary(self):
+        rows=[]
+        for key,row in sorted(self.rows.items()):
+            a,b,c=map(int,key.split(":"))
+            n=row["seconds"]
+            if n<=0:
+                continue
+            mode,relay=LEVELS[c]
+            rows.append(dict(row,outdoor_band=a*2,target_band=b*2,mode=mode,flimit=relay,
+                             mean_fact=row["fact_hz_seconds"]/n,mean_fset=row["fset_hz_seconds"]/n,
+                             limited_pct=100*row["limited_seconds"]/n,
+                             shortfall_pct=100*row["shortfall_seconds"]/n,
+                             mean_deficit=row["deficit_k_seconds"]/n))
+        return {"contexts":len(rows),"hours":sum(r["seconds"] for r in rows)/3600,
+                "unsaved":self.dirty,"storage_error":self.error,"rows":rows}
