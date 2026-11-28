@@ -71,5 +71,37 @@ class ResourceGuards(unittest.TestCase):
     def test_helper_compiles(self):
         ast.parse(PATCH["HELPER"])
 
+class HostAuditTests(unittest.TestCase):
+    def setUp(self):
+        self.audit=runpy.run_path(str(Path(__file__).resolve().parents[1]/"tools/host-resource-audit.py"))
+
+    def test_inventory_does_not_follow_symlinks(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            (root/"charts.pkl").write_bytes(b"123")
+            (root/".before-upgrade").mkdir()
+            (root/".before-upgrade"/"file").write_bytes(b"12")
+            (root/".adaptive-test").symlink_to(root/"charts.pkl")
+            (root/".before-upgrade"/"loop").symlink_to(root, target_is_directory=True)
+            result=self.audit["inventory"](root)
+            self.assertEqual(result["charts"]["bytes"],3)
+            self.assertEqual(result["adaptive_state"]["files"],0)
+            self.assertEqual(result["upgrade_rollback"]["bytes"],2)
+
+    def test_process_deltas_and_restart(self):
+        a={"at":1,"start_ticks":100,"cpu_ticks":100,"rss_bytes":1024,"threads":2,"fds":5,"write_bytes":4096}
+        b=dict(a,at=11,cpu_ticks=150,rss_bytes=2048,write_bytes=8192)
+        out=self.audit["difference"](a,b,100)
+        self.assertEqual(out["cpu_pct_one_core"],5)
+        self.assertEqual(out["write_bytes_delta"],4096)
+        self.assertEqual(out["rss_bytes_delta"],1024)
+        with self.assertRaises(ValueError):
+            self.audit["difference"](a,dict(b,start_ticks=101),100)
+
+    def test_current_process_readonly(self):
+        result=self.audit["snapshot"](os.getpid())
+        self.assertGreater(result["rss_bytes"],0)
+        self.assertGreaterEqual(result["threads"],1)
+
 if __name__=="__main__":
     unittest.main()
