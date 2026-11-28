@@ -155,6 +155,22 @@ class ExperimentGuardTests(unittest.TestCase):
         self.assertEqual(model.startup_choice(sample,1,wall+31*86400),(("quiet",True),"default"))
         self.assertEqual(model.startup_choice(sample,None,wall),(("quiet",True),"default"))
 
+    def test_capacity_learning_old_evidence_loses_weight(self):
+        from adaptive.regulator import CapacityLearning
+        model=CapacityLearning()
+        sample=self.sample(0)
+        wall=time.time()
+        key=model.key(sample,1,("quiet",True))
+        model.rows[key]=dict(seconds=14400,limited_seconds=14400,shortfall_seconds=7200,
+            limited_shortfall_seconds=7200,fact_hz_seconds=40*14400,
+            fset_hz_seconds=40*14400,deficit_k_seconds=2*14400,last=wall-30*86400)
+        self.assertFalse(model.avoid_probe(sample,1,("quiet",True)))
+        for t in range(0,931,30):
+            model.observe(self.sample(t,hz=40,requested_hz=40),1,True,wall+t)
+        self.assertLess(model.rows[key]["seconds"],7300)
+        self.assertGreater(model.rows[key]["seconds"],7200)
+        self.assertFalse(model.avoid_probe(sample,1,("quiet",True)))
+
     def test_capacity_learning_excludes_defrost_and_gap(self):
         from adaptive.regulator import CapacityLearning
         model=CapacityLearning()
