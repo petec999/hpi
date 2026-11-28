@@ -636,6 +636,13 @@ const run=el("run-kpis");''')
         # Re-read the current line after the preceding performance upgrade.
         line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'id="defrost-heater-groups"' not in html:
+        html=once(html,'<p id="defrost-insights"></p>','<p id="defrost-insights"></p><div class="scroll"><table id="defrost-heater-groups"></table></div><small>Pełne cykle CO z obserwowanym A4A; brak zaobserwowanego ON nie dowodzi braku zasilania. Czas ON to suma odstępów pomiędzy próbkami ON. Cykle z luką są odrzucane. Historia w RAM, nie pomiar energii.</small>')
+        html=once(html,'const deltaInsight=(o,k=1)=>', '''const dhg=df&&df.by_heater;
+table("defrost-heater-groups",["Sygnał grzałki A4A","Pełne cykle","Mediana min","Obserwowane ON min","Powrót CO min"],dhg?[["heater_seen","Zaobserwowano ON"],["heater_not_seen","Nie zaobserwowano ON"],["unknown","Niepełne dane A4A"]].map(([key,label])=>{const x=dhg[key];return [label,x.completed,fmtInsight(x.median_seconds,1/60),key==="unknown"?"—":fmtInsight(x.heater_on_observed_seconds,1/60),fmtInsight(x.recovery_median_seconds,1/60)]}):[]);
+const deltaInsight=(o,k=1)=>''')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
     if 'elif kind=="threshold_samples":' not in source:
         source=once(source,'    elif kind=="events":','''    elif kind=="thresholds":
         rows=data["thresholds"]["groups"]
