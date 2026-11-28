@@ -291,6 +291,41 @@ class ExperimentGuardTests(unittest.TestCase):
         self.assertEqual(g.seconds,0)
         self.assertIsNone(g.window)
 
+    def test_partial_window_restore_counts_only_observed_seconds(self):
+        from adaptive.regulator import ContinuousTrial
+        g=ContinuousTrial(duration=1800)
+        for t in range(0,1501,30):
+            self.assertIsNone(g.observe(self.sample(t),21,1,21,19,True,1000+t))
+        record=json.loads(json.dumps(g.checkpoint()))
+        self.assertEqual(record["seconds"],600)
+        g=ContinuousTrial(duration=1800)
+        g.restore(record)
+        for t in range(0,2100,30):
+            self.assertIsNone(g.observe(self.sample(t),21,1,21,19,True,2800+t))
+        trial=g.observe(self.sample(2100),21,1,21,19,True,4900)
+        self.assertEqual(trial["seconds"],1800)
+        self.assertEqual(trial["run_seconds"],1800)
+        self.assertTrue(trial["interrupted"])
+        self.assertGreater(trial["stop"]-trial["start"],1800)
+        self.assertEqual(trial["starts"],0)
+        self.assertIsNone(g.checkpoint())
+
+    def test_partial_window_invalid_context_or_long_gap_discards_old_time(self):
+        from adaptive.regulator import ContinuousTrial
+        g=ContinuousTrial(duration=1800)
+        for t in range(0,1501,30):
+            g.observe(self.sample(t),21,1,21,19,True,1000+t)
+        record=g.checkpoint()
+        for wall,room,mode in ((3500,21,"quiet"),(2800,21.6,"quiet"),(2800,21,"eco")):
+            g=ContinuousTrial(duration=1800)
+            g.restore(record)
+            for t in range(0,901,30):
+                g.observe(self.sample(t,mode=mode),room,1,room,19,True,wall+t)
+            self.assertIsNone(g.resume_record)
+            self.assertEqual(g.seconds,0)
+        g.restore(dict(record,seconds=99999))
+        self.assertIsNone(g.resume_record)
+
     def test_winter_blocks_include_defrost_and_idle_and_reject_idle_only(self):
         from adaptive.regulator import ContinuousTrial
         g=ContinuousTrial(duration=1800)
