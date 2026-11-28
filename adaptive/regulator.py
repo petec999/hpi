@@ -1403,6 +1403,159 @@ class RegisterWatch:
                     pass
 
 
+class DefrostTrace:
+    """Bounded raw diagnostic traces. No bus access, decoding or control output."""
+    BANKS={"R101":6,"R141":16,"R241":22}
+    PERIOD=5
+    GAP=30
+    PRE=60
+    POST=60
+    MAX_SAMPLES=256
+    MAX_TRACES=16
+    MAX_BYTES=2*1024*1024
+    SAVE_INTERVAL=300
+
+    def __init__(self,path=None):
+        import threading
+        self.lock=threading.Lock()
+        self.path=Path(path) if path else None
+        self.pre=deque(maxlen=13)
+        self.traces=deque(maxlen=self.MAX_TRACES)
+        self.active=None
+        self.last=None
+        self.stamps=None
+        self.last_save=None
+        self.revision=0
+        self.saved_revision=0
+        self.error=None
+        try:
+            if self.path is not None:
+                if self.path.is_symlink() or self.path.stat().st_size>self.MAX_BYTES:
+                    raise ValueError("invalid defrost trace file")
+                data=json.loads(self.path.read_text())
+                rows=data["traces"]
+                if data["schema"]!=1 or not isinstance(rows,list) or len(rows)>self.MAX_TRACES:
+                    raise ValueError("invalid trace schema")
+                for t in rows:
+                    if (set(t)!={"start","end","reason","samples"} or t["reason"] not in ("complete","gap","limit","start_unknown")
+                            or not AdaptiveReport.number(t["start"],0,9e10)
+                            or not AdaptiveReport.number(t["end"],t["start"],9e10)
+                            or not isinstance(t["samples"],list) or not 1<=len(t["samples"])<=self.MAX_SAMPLES):
+                        raise ValueError("invalid trace")
+                    for row in t["samples"]:
+                        if (not isinstance(row,list) or len(row)!=4 or not AdaptiveReport.number(row[0],0,9e10)
+                                or any(not isinstance(v,list) or len(v)!=n or any(type(x) is not int or not 0<=x<=65535 for x in v)
+                                       for v,n in zip(row[1:],self.BANKS.values()))):
+                            raise ValueError("invalid trace sample")
+                self.traces.extend(rows)
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError):
+            self.error="defrost trace load failed"
+
+    def finish(self,reason):
+        t=self.active
+        if t is not None:
+            rows=t["samples"]
+            self.traces.append({"start":t["start"],"end":max(t["start"],rows[-1][0]),
+                                "reason":"start_unknown" if reason=="complete" and not t["start_known"] else reason,
+                                "samples":rows})
+            self.revision+=1
+            self.active=None
+
+    def observe(self,frames,now,wall):
+        # Called from passive serial ingestion; only bounded RAM operations.
+        with self.lock:
+            if any(k not in frames for k in self.BANKS):
+                return
+            stamps=tuple(frames[k][0] for k in self.BANKS)
+            if any(not 0<=now-t<=self.GAP for t in stamps):
+                return
+            if self.last is not None and now-self.last[0]<self.PERIOD:
+                return
+            if self.stamps is not None and not all(a>b for a,b in zip(stamps,self.stamps)):
+                return
+            raw=[list(frames[k][1]) for k in self.BANKS]
+            if any(len(v)!=n for v,n in zip(raw,self.BANKS.values())):
+                return
+            row=[round(wall,3)]+raw
+            state=bool(raw[1][0]&0x2000)
+            old=self.last
+            continuous=old is not None and 0<now-old[0]<=self.GAP and abs((wall-old[1])-(now-old[0]))<=5
+            if not continuous:
+                self.finish("gap")
+                self.pre.clear()
+            self.last=(now,wall,state)
+            self.stamps=stamps
+            if self.active is None and state:
+                self.active={"start":row[0],"start_known":bool(continuous and not old[2]),
+                             "samples":[v for t,v in self.pre if now-t<=self.PRE],"post_since":None}
+            if self.active is not None:
+                a=self.active
+                a["samples"].append(row)
+                if state:
+                    a["post_since"]=None
+                elif a["post_since"] is None:
+                    a["post_since"]=now
+                if len(a["samples"])>=self.MAX_SAMPLES:
+                    self.finish("limit")
+                elif a["post_since"] is not None and now-a["post_since"]>=self.POST:
+                    self.finish("complete")
+            self.pre.append((now,row))
+
+    def expire(self,now):
+        with self.lock:
+            if self.last is not None and now-self.last[0]>self.GAP:
+                self.finish("gap")
+                self.last=None
+                self.stamps=None
+                self.pre.clear()
+
+    def summary(self):
+        with self.lock:
+            return {"saved_traces":len(self.traces),"active":self.active is not None,
+                    "unsaved":self.revision!=self.saved_revision,"storage_error":self.error,
+                    "latest":[{k:t[k] for k in ("start","end","reason")} for t in list(self.traces)[-5:]]}
+
+    def save_if_due(self,now):
+        self.expire(now)
+        if self.path is None:
+            return
+        with self.lock:
+            if self.revision==self.saved_revision or (self.last_save is not None and now-self.last_save<self.SAVE_INTERVAL):
+                return
+            self.last_save=now
+            revision=self.revision
+            traces=list(self.traces)
+        # Disk I/O outside the serial-reader lock; completed samples are immutable.
+        tmp=None
+        try:
+            if self.path.is_symlink():
+                raise ValueError("invalid trace path")
+            raw=json.dumps({"schema":1,"traces":traces},separators=(",",":"),allow_nan=False).encode()
+            if len(raw)>self.MAX_BYTES:
+                raise ValueError("trace size limit")
+            fd,tmp=tempfile.mkstemp(prefix=".defrost-trace-",dir=str(self.path.parent))
+            with os.fdopen(fd,"wb") as f:
+                f.write(raw)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp,self.path)
+            tmp=None
+            with self.lock:
+                self.saved_revision=revision
+                self.error=None
+        except (OSError,ValueError,TypeError):
+            with self.lock:
+                self.error="defrost trace save failed"
+        finally:
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+
 class HeaterCounter:
     """Observed A4A output transitions; not an electrical power measurement."""
     SAVE_INTERVAL=1800
