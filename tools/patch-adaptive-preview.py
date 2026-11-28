@@ -520,6 +520,18 @@ $("am-recent-decisions").addEventListener("toggle",()=>{if($("am-recent-decision
 function amPaint(a){''')
     html=html.replace("Legacy pozostaje domyślne po restarcie.","Zapisany Auto wraca po restarcie po weryfikacji danych.")
     html=continuous_ui(guard_ui(html))
+    # Boot continuation is also applied when migrating an installed page.
+    html=html.replace('Auto po restarcie</span>', 'Sterowanie po restarcie</span>')
+    html=html.replace('Anuluj wznowienie Auto', 'Anuluj wznowienie')
+    html=html.replace('Po restarcie wybierz Eksperyment, aby wznowić zapisane cykle; nie wznawia się sam.', 'Aktywny test wznawia się po restarcie po sprawdzeniu świeżych danych. Zatrzymany ręcznie nie wznawia się sam. Niedokończone okno zachowuje zmierzony czas, jeśli warunki pozostają zgodne; przerwa nie jest liczona.')
+    html=html.replace('v.auto_resume_pending?"Oczekuje na dane":v.control==="auto"?"Zapamiętane":"Wyłączone"', 'v.experiment_resume_pending?"Test – oczekuje na dane":v.auto_resume_pending?"Auto – oczekuje na dane":["auto","experiment"].includes(v.control)?"Zapamiętane":"Wyłączone"')
+    html=html.replace('||!v.auto_resume_pending;', '||!(v.auto_resume_pending||v.experiment_resume_pending);')
+    html=html.replace('&&amState.auto_resume_pending)))', '&&(amState.auto_resume_pending||amState.experiment_resume_pending))))')
+    html=html.replace('ex.resume_available?"Zapisana sesja gotowa do ręcznego wznowienia"', 'v.experiment_resume_pending?"Automatyczne wznowienie oczekuje na dane":ex.resume_available?"Zapisana sesja gotowa do ręcznego wznowienia"')
+    if 'id="am-window-checkpoint"' not in html:
+        html=once(html,'<p id="am-experiment-checkpoint"></p>','<p id="am-experiment-checkpoint"></p><p id="am-window-checkpoint"></p>')
+        html=once(html,' $("am-experiment-checkpoint").textContent=', ' $("am-window-checkpoint").textContent=ex&&ex.checkpoint_seconds>0?"Zapis okna: "+fmt(ex.checkpoint_seconds/60)+" / 30 min"+(ex.restoring_window?" · oczekiwanie na stabilizację po restarcie":""):"";\n $("am-experiment-checkpoint").textContent=')
+
     # Upgrade legacy descriptions on existing installations too.
     html=html.replace("Eksperyment zmienia tryb i FLimit tylko przy potwierdzonym postoju; 3 cykle na konfigurację, maks. 7 dni;", "Test zmienia tryb i FLimit na potwierdzonym postoju lub podczas stabilnego CO; 3 cykle albo 6 okien na konfigurację, maks. 7 dni;")
     html=html.replace("Eksperyment zmienia tryb i FLimit tylko przy potwierdzonym postoju; 3 cykle na konfigurację, bez limitu czasu;", "Test zmienia tryb i FLimit na potwierdzonym postoju lub podczas stabilnego CO; 3 cykle albo 6 okien na konfigurację;")
@@ -809,7 +821,10 @@ def experiment_api(source):
         source=once(source,new if new in source else old,latest)
     old='if current==value:'
     new='if current==value and not (key=="adaptive_control" and value=="manual" and _am.view()["auto_resume_pending"]):'
-    return guard_api(heater_status_api(source if new in source else once(source,old,new)))
+    latest_resume='if current==value and not (key=="adaptive_control" and value=="manual" and (_am.view()["auto_resume_pending"] or _am.view()["experiment_resume_pending"])):'
+    if latest_resume not in source:
+        source=once(source,new if new in source else old,latest_resume)
+    return guard_api(heater_status_api(source))
 
 def learning_block():
     policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")
