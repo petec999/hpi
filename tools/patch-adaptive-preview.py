@@ -519,7 +519,24 @@ $("am-decisions-refresh").addEventListener("click",amRefreshDecisions);
 $("am-recent-decisions").addEventListener("toggle",()=>{if($("am-recent-decisions").open)amRefreshDecisions();});
 function amPaint(a){''')
     html=html.replace("Legacy pozostaje domyślne po restarcie.","Zapisany Auto wraca po restarcie po weryfikacji danych.")
-    return continuous_ui(guard_ui(html))
+    html=continuous_ui(guard_ui(html))
+    # Upgrade legacy descriptions on existing installations too.
+    html=html.replace("Eksperyment zmienia tryb i FLimit tylko przy potwierdzonym postoju; 3 cykle na konfigurację, maks. 7 dni;", "Test zmienia tryb i FLimit na potwierdzonym postoju lub podczas stabilnego CO; 3 cykle albo 6 okien na konfigurację, maks. 7 dni;")
+    html=html.replace("Eksperyment zmienia tryb i FLimit tylko przy potwierdzonym postoju; 3 cykle na konfigurację, bez limitu czasu;", "Test zmienia tryb i FLimit na potwierdzonym postoju lub podczas stabilnego CO; 3 cykle albo 6 okien na konfigurację;")
+    html=html.replace("STOP.Aby", "STOP. Aby")
+    html=html.replace("sesji.Eksperyment", "sesji. Eksperyment")
+    if 'id="am-capacity-state"' not in html:
+        html=once(html,'<p id="am-reason"', '<div class="metric"><span>Sprężarka Fact / Fset</span><strong id="am-capacity-freq">—</strong></div><div class="metric"><span>Limit odniesienia / wykorzystanie Fact</span><strong id="am-capacity-limit">—</strong></div><div class="metric"><span>Nastawa minus Two</span><strong id="am-capacity-deficit">—</strong></div><div class="metric"><span>Ocena pracy CO</span><strong id="am-capacity-state">—</strong></div><div class="metric"><span>Czas bieżącego stanu (test)</span><strong id="am-capacity-time">—</strong></div><small>Limit odniesienia z historii tej instalacji, nie fabryczna gwarancja. Niedobór oznacza różnicę temperatur; nie jest pomiarem mocy cieplnej. Czas stanu liczony od ostatniej zmiany lub przerwy w danych.</small><p id="am-reason"')
+        html=once(html,' $("am-reason").textContent=v.fault||v.reason_pl||v.reason||"Brak odczytu.";',''' const cap=v.capacity_live;
+ const capLabels={unavailable:"Poza oceną CO / brak danych",idle:"Postój",transition:"Rozruch / zmiana obrotów",unknown_limit:"Nieznany limit",modulating_sufficient:"Modulacja – bez niedoboru Two",modulating_shortfall:"Modulacja – niedobór Two",limited_sufficient:"Na limicie – bez niedoboru Two",limited_shortfall:"Na limicie – niedobór Two"};
+ const capNum=(x,d=0)=>Number.isFinite(x)?x.toFixed(d).replace(".",","):"—";
+ $("am-capacity-freq").textContent=cap?capNum(cap.fact)+" / "+capNum(cap.fset)+" Hz":"—";
+ $("am-capacity-limit").textContent=cap?capNum(cap.limit_hz)+" Hz / "+capNum(cap.utilization_pct)+"%":"—";
+ $("am-capacity-deficit").textContent=cap&&Number.isFinite(cap.deficit_k)?capNum(cap.deficit_k,1)+" K":"—";
+ $("am-capacity-state").textContent=cap?(capLabels[cap.state]||"—"):"—";
+ $("am-capacity-time").textContent=cap&&Number.isFinite(cap.state_seconds)?capNum(cap.state_seconds/60,1)+" min":"—";
+ $("am-reason").textContent=v.fault||v.reason_pl||v.reason||"Brak odczytu.";''')
+    return html
 
 def report_api(source):
     if 'def _wv_adaptive_report_page():' in source:
