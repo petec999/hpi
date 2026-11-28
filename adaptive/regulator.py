@@ -1896,7 +1896,7 @@ class ExperimentGuard:
                 and self.capacity_seconds>=self.CAPACITY_TREND_WINDOW-self.MAX_GAP
                 and self.running_seconds>=self.SETTLE
                 and plateau and self.running_target-median(r[2] for r in rows)>=self.cfg["water_gap"]
-                and trend(rows,2)<=.03)
+                and trend(rows,1)<=.03 and trend(rows,2)<=.03)
 
     def observe(self,s,room,eligible,recovering=False,frame_at=None):
         now=s.now
