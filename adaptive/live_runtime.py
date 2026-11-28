@@ -229,7 +229,7 @@ class Runtime:
         for record,partial in records:
             keys={"start","stop","seconds","outdoor_min","outdoor_max","target_min","target_max","room_min","room_max"}
             stats={"run_seconds","idle_seconds","defrost_seconds","transition_seconds","starts","short_cycles","defrosts"}
-            if not isinstance(record,dict) or set(record) not in (keys,keys|{"energy"},keys|stats,keys|stats|{"energy"},keys|stats|{"energy","blocks"}) or any(type(record[k]) not in (int,float) or not math.isfinite(record[k]) for k in keys):
+            if not isinstance(record,dict) or (set(record)-{"capacity"}) not in (keys,keys|{"energy"},keys|stats,keys|stats|{"energy"},keys|stats|{"energy","blocks"}) or any(type(record[k]) not in (int,float) or not math.isfinite(record[k]) for k in keys):
                 raise ValueError("Invalid continuous trial")
             blocks=record.get("blocks",1)
             if type(blocks) is not int or blocks not in (1,6) or partial and blocks!=1:
@@ -243,6 +243,13 @@ class Runtime:
                     raise ValueError("Invalid trial counts")
                 if abs(sum(record[k] for k in ("run_seconds","idle_seconds","defrost_seconds","transition_seconds"))-record["seconds"])>1:
                     raise ValueError("Invalid trial phase coverage")
+            capacity=record.get("capacity")
+            if capacity is not None:
+                ckeys={"observed_seconds","limited_seconds","limited_deficit_seconds","deficit_k_seconds","fact_hz_seconds","fset_hz_seconds"}
+                if not stats<=set(record) or not isinstance(capacity,dict) or set(capacity)!=ckeys or any(type(v) not in (int,float) or not math.isfinite(v) or v<0 for v in capacity.values()):
+                    raise ValueError("Invalid capacity statistics")
+                if not capacity["limited_deficit_seconds"]<=capacity["limited_seconds"]<=capacity["observed_seconds"]<=record["run_seconds"]+1:
+                    raise ValueError("Invalid capacity coverage")
             energy=record.get("energy")
             if energy is not None:
                 ekeys={"seconds","kwh","paired_seconds","paired_kwh","net_heat_kwh","defrost_kwh","defrost_heat_kwh",
@@ -971,6 +978,9 @@ class Runtime:
         for k in ("outdoor","room","target"):
             result[k+"_min"]=min(w[k+"_min"] for w in group)
             result[k+"_max"]=max(w[k+"_max"] for w in group)
+        capacity=[w["capacity"] for w in group if w.get("capacity") is not None]
+        if capacity:
+            result["capacity"]={k:sum(c[k] for c in capacity) for k in capacity[0]}
         energy=[w["energy"] for w in group if w.get("energy") is not None]
         result["energy"]=None
         if energy:
@@ -1045,6 +1055,18 @@ class Runtime:
             else:
                 observations.append("Okna energetyczne mają różne warunki – bez rankingu COP.")
         for r in result:
+            records=([r["continuous"]] if r["continuous"] else r["windows"])
+            cap=[w["capacity"] for w in records if w.get("capacity")]
+            if cap:
+                c={k:sum(w[k] for w in cap) for k in cap[0]}
+                t=c["observed_seconds"]
+                if t>0:
+                    label=r["mode"]+(" + FLimit" if r["flimit"] else " / FLimit OFF")
+                    observations.append(label+": pomiar Hz "+str(round(t/60,1))+" min, średnio Fact/Fset "+
+                        str(round(c["fact_hz_seconds"]/t,1))+"/"+str(round(c["fset_hz_seconds"]/t,1))+
+                        " Hz, na limicie "+str(round(100*c["limited_seconds"]/t,1))+
+                        "%, limit z niedoborem Two >= 2 K "+str(round(c["limited_deficit_seconds"]/60,1))+
+                        " min, średni dodatni niedobór "+str(round(c["deficit_k_seconds"]/t,2))+" K (tylko nowe pomiary).")
             if r["duration_samples"]>=3 and r["short_cycles"]>=2:
                 observations.append(r["mode"]+(" + FLimit" if r["flimit"] else " / FLimit OFF")+": co najmniej 2 z 3 cykli poniżej 10 min; sprawdź taktowanie i zapotrzebowanie.")
         return {"since":self.experiment_since,"per_level":self.EXPERIMENT_CYCLES,"rows":result,
