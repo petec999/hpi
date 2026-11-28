@@ -668,7 +668,9 @@ const capacity=d.capacity_learning;
 el("capacity-learning-status").textContent=capacity?capacity.contexts+" kontekstów · "+num(capacity.hours)+" h ważonych obserwacji"+(capacity.unsaved?" · RAM":"")+(capacity.storage_error?" · błąd zapisu: "+capacity.storage_error:""):"Brak danych";
 table("capacity-profile",["Zewn. od °C","Nastawa od °C","Tryb","Godziny","Fact / Fset Hz","Na limicie %","Niedobór %","Limit + niedobór min","Śr. niedobór K","Ostatni pomiar"],(capacity?capacity.rows:[]).map(r=>[r.outdoor_band,r.target_band,r.mode+(r.flimit?" + FLimit":" / OFF"),num(r.seconds/3600),num(r.mean_fact)+"/"+num(r.mean_fset),num(r.limited_pct),num(r.shortfall_pct),num(r.limited_shortfall_seconds/60),num(r.mean_deficit,2),dt(r.last)]));''')
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
-    html=html.replace("3 h obserwacji, w tym 30 min", "3 h ważonych obserwacji, w tym 30 min").replace("Dane nie są pomiarem COP.", "Dane nie są pomiarem COP. Waga obserwacji maleje o połowę co 30 dni.")
+    html=html.replace("3 h obserwacji, w tym 30 min", "3 h ważonych obserwacji, w tym 30 min")
+    if "Waga obserwacji maleje o połowę co 30 dni." not in html:
+        html=html.replace("Dane nie są pomiarem COP.", "Dane nie są pomiarem COP. Waga obserwacji maleje o połowę co 30 dni.")
     if 'id="energy-climate-history"' not in html:
         html=once(html,'<article><h2>Wyuczone konteksty</h2>','<article><h2>Historia energetyczna CO</h2><p id="energy-climate-status"></p><div class="scroll"><table id="energy-climate-history"></table></div><small>COP szacunkowy, szczególnie przy ręcznie zadanym przepływie. Bilans obejmuje dostępne próbki CO, postojów i defrostu, nie pełne zużycie sezonowe. Nie służy do automatycznego wyboru trybu. Zmiana konfiguracji pomiarów rozpoczyna nową historię.</small></article><article><h2>Wyuczone konteksty</h2>')
         html=once(html,'function paint(d){','''function paint(d){
