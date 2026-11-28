@@ -2158,6 +2158,8 @@ class ContinuousTrial:
     SETTLE=ExperimentGuard.SETTLE
     DURATION=10800
     MAX_GAP=65
+    RESUME_GAP=900
+    MAX_WALL_SPAN=21600
 
     def __init__(self,duration=None):
         self.duration=self.DURATION if duration is None else duration
@@ -2172,6 +2174,48 @@ class ContinuousTrial:
         self.seconds=0
         self.stats=None
         self.run_start=None
+        self.resume_record=None
+        self.interrupted=False
+
+    def checkpoint(self):
+        if self.resume_record is not None:
+            return self.resume_record
+        if self.window is None or self.last is None or not 0<self.seconds<self.duration:
+            return None
+        return {"context":list(self.context),"start":self.window[1],"last":self.last[1],
+                "bounds":list(self.window[2:]),"seconds":self.seconds,
+                "stats":dict(self.stats,capacity=dict(self.stats["capacity"]))}
+
+    def restore(self,record):
+        # Never restore monotonic time or an in-flight cycle edge.
+        self.reset("restart_settling")
+        if record is None:
+            return
+        def num(v,lo,hi):
+            return type(v) in (int,float) and math.isfinite(v) and lo<=v<=hi
+        try:
+            if set(record)!={"context","start","last","bounds","seconds","stats"}:
+                raise ValueError()
+            context=record["context"]
+            if not isinstance(context,list) or len(context)!=2 or context[0] not in PRESETS or type(context[1]) is not bool:
+                raise ValueError()
+            start,last,seconds=(record[k] for k in ("start","last","seconds"))
+            if not num(start,0,9e10) or not num(last,start,start+self.MAX_WALL_SPAN) or not num(seconds,1,self.duration-1e-6) or last-start<seconds-20:
+                raise ValueError()
+            bounds=record["bounds"]
+            if len(bounds)!=6 or not all(num(bounds[i],lo,hi) for i,lo,hi in ((0,5,40),(1,5,40),(2,10,65),(3,10,65),(4,-60,60),(5,-60,60))) or any(not 0<=bounds[i+1]-bounds[i]<=limit+1e-6 for i,limit in ((0,.5),(2,1),(4,2))):
+                raise ValueError()
+            stats=record["stats"]
+            phases=("run_seconds","idle_seconds","defrost_seconds","transition_seconds")
+            counts=("starts","short_cycles","defrosts")
+            if set(stats)!=set(phases+counts+("capacity",)) or any(not num(stats[k],0,seconds) for k in phases+counts) or any(type(stats[k]) is not int for k in counts) or stats["short_cycles"]>stats["starts"] or abs(sum(stats[k] for k in phases)-seconds)>1:
+                raise ValueError()
+            c=stats["capacity"]
+            if set(c)!={"observed_seconds","limited_seconds","limited_deficit_seconds","deficit_k_seconds","fact_hz_seconds","fset_hz_seconds"} or any(not num(v,0,1e9) for v in c.values()) or not c["limited_deficit_seconds"]<=c["limited_seconds"]<=c["observed_seconds"]<=stats["run_seconds"]+1:
+                raise ValueError()
+            self.resume_record={"context":list(context),"start":start,"last":last,"bounds":list(bounds),"seconds":seconds,"stats":dict(stats,capacity=dict(c))}
+        except (ValueError,TypeError,KeyError,AttributeError,IndexError):
+            self.reason="invalid_restart_checkpoint"
 
     @staticmethod
     def weather_band(outdoor):
@@ -2190,7 +2234,10 @@ class ContinuousTrial:
                 not 0<s.now-self.last[0]<=self.MAX_GAP or
                 abs((wall-self.last[1])-(s.now-self.last[0]))>5 or
                 abs(s.target-self.last[2])>1.0):
+            saved=self.resume_record if self.last is None else None
             self.reset("new_context_or_gap")
+            if saved is not None and tuple(saved["context"])==context and 0<=wall-saved["last"]<=self.RESUME_GAP:
+                self.resume_record=saved
             self.context=context
             self.since=s.now
         previous=self.last
@@ -2201,10 +2248,27 @@ class ContinuousTrial:
             capacity=(min(s.hz,s.requested_hz)>=limit-ExperimentGuard.LIMIT_TOLERANCE,
                       max(0,s.target-s.supply_temp),s.hz,s.requested_hz)
         self.last=(s.now,wall,s.target,phase,capacity)
+        saved=self.resume_record
+        if saved is not None:
+            bounds=saved["bounds"]
+            for i,value,limit in ((0,room,.5),(2,s.target,1),(4,outdoor,2)):
+                if max(bounds[i+1],value)-min(bounds[i],value)>limit+1e-6:
+                    self.resume_record=None
+                    break
+            if wall-saved["start"]>self.MAX_WALL_SPAN-self.duration:
+                self.resume_record=None
         if s.now-self.since<self.SETTLE:
             self.reason="settling"
             return None
-        if self.window is None:
+        if self.window is None and self.resume_record is not None:
+            saved=self.resume_record
+            self.window=[s.now,saved["start"]]+list(saved["bounds"])
+            self.stats=saved["stats"]
+            self.seconds=saved["seconds"]
+            self.interrupted=True
+            self.resume_record=None
+        elif self.window is None:
+            self.interrupted=False
             self.window=[s.now,wall,room,room,s.target,s.target,outdoor,outdoor]
             self.stats={"run_seconds":0.0,"idle_seconds":0.0,"defrost_seconds":0.0,
                         "transition_seconds":0.0,"starts":0,"short_cycles":0,"defrosts":0}
@@ -2242,7 +2306,7 @@ class ContinuousTrial:
             self.reset("weather_target_or_room_range")
             return None
         self.reason=None
-        self.seconds=s.now-w[0]
+        self.seconds=sum(self.stats[k+"_seconds"] for k in ("run","idle","defrost","transition"))
         if self.seconds<self.duration:
             return None
         result={"start":w[1],"stop":wall,"seconds":self.seconds,
@@ -2250,6 +2314,8 @@ class ContinuousTrial:
                 "target_min":w[4],"target_max":w[5],
                 "room_min":w[2],"room_max":w[3]}
         result.update(self.stats)
+        if self.interrupted:
+            result["interrupted"]=True
         # A window of pure idle is not evidence that a preset can heat.
         if self.stats["run_seconds"]<300:
             result=None
