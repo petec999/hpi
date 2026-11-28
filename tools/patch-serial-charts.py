@@ -243,7 +243,10 @@ def patch(source):
         raise ValueError("Install core resource guards first")
     # Keep the existing write protocol and retry conditions, but make the
     # result request-local, check the deadline and always restore RX direction.
-    once("def WritePump(newframe): #rewrited",HELPER+"def WritePump(newframe, deadline): #rewrited")
+    source,n=re.subn(r'(?m)^def WritePump\(newframe\):[ \t]*(?:#[^\n]*)?$',
+                     lambda _: HELPER+"def WritePump(newframe, deadline):",source)
+    if n!=1:
+        raise ValueError("Unexpected WritePump signature")
     once("        global writed\n        if count == 6:","        if count == 6:")
     once("        time.sleep(1)\n        modbus.connect()\n        for x in range(5):\n            time.sleep(1)",
          "        if event.wait(1) or time.monotonic() >= deadline:\n            return False\n        if not modbus.connect():\n            return False\n        for x in range(5):\n            if event.wait(1) or time.monotonic() >= deadline:\n                return False")
@@ -266,7 +269,10 @@ def patch(source):
     # Do not let another caller interleave the wake-up and target mode writes.
     once('            ok = True\n            if (not _is_on) and str(newstate).strip().lower() != \'off\':',
          '            with _am.serial_lock:\n                ok = True\n                if (not _is_on) and str(newstate).strip().lower() != \'off\':')
-    once('                ok = _send_and_wait(PyHaier.SetState(R101, "on"), timeout_s=12.0)\n                # tiny pause so ReadPump can refresh R101; not required but helps with stability\n                time.sleep(0.3)\n\n            if ok:\n                ok = _send_and_wait(PyHaier.SetState(R101, newstate), timeout_s=12.0)',
+    wake_comment=re.search(r'(?m)^                ok = _send_and_wait\(PyHaier\.SetState\(R101, "on"\), timeout_s=12\.0\)\n(                #[^\n]*\n)                time\.sleep\(0\.3\)$',source)
+    if wake_comment is None:
+        raise ValueError("Unexpected state wake-up sequence")
+    once('                ok = _send_and_wait(PyHaier.SetState(R101, "on"), timeout_s=12.0)\n'+wake_comment[1]+'                time.sleep(0.3)\n\n            if ok:\n                ok = _send_and_wait(PyHaier.SetState(R101, newstate), timeout_s=12.0)',
          '                    ok = _send_and_wait(PyHaier.SetState(R101, "on"), timeout_s=12.0)\n                    # Wait for the next observed state as in the original code.\n                    time.sleep(0.3)\n\n                if ok:\n                    ok = _send_and_wait(PyHaier.SetState(R101, newstate), timeout_s=12.0)')
     # Collect a complete chart row before publishing it; readers see all or none.
     once('    if _do_chart: datechart.append(str(now))','    _chart_row={}\n    if _do_chart: _chart_row["datechart"]=str(now)')

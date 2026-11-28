@@ -330,6 +330,16 @@ def winter_status_ui(html):
     new='Konfiguracja ukończona: trzy czyste cykle albo sześć zapisanych okien po 30 min (również postoje i defrost).'
     if old in html:
         html=once(html,old,new)
+    for old,new in (
+        ("Bez wymuszania STOP; zwykła zmiana dopiero na naturalnym postoju.",
+         "Zmiana na potwierdzonym postoju lub podczas stabilnego CO. Pompa sama decyduje o START i STOP."),
+        ("Zwykłe zmiany testowe nadal tylko przy postoju. ", ""),
+        ("Zwykły eksperyment zmienia tryb przy potwierdzonym postoju; ochrona komfortu może zwiększyć moc podczas pracy; 3 cykle na konfigurację;",
+         "Test zmienia jeden parametr naraz i sprawdza odczyt zwrotny. Pomiar okien po 15 min stabilizacji;"),
+        ("Test aktywny – automatyczna zmiana konfiguracji przy postoju; ochrona komfortu włączona",
+         "Test aktywny – zmiany przy stabilnym CO lub na postoju"),
+    ):
+        html=html.replace(old,new)
     if 'amWinterProgress' not in html:
         line=next(l for l in html.splitlines() if '$("am-continuous-status").textContent=' in l)
         html=once(html,line,''' const amWinterProgress=ex&&Array.isArray(ex.windows)?ex.windows:[];
@@ -340,6 +350,8 @@ def winter_status_ui(html):
     if old in html:
         html=once(html,old,' const amWinterReasons={comfort_or_telemetry:')
         html=once(html,'(reasons[ex.continuous_reason]||ex.continuous_reason)','(amWinterReasons[ex.continuous_reason]||ex.continuous_reason)')
+    html=html.replace('const amWinterReasons={comfort_or_telemetry:"komfort lub dane",new_context_or_gap:',
+                      'const amWinterReasons={comfort_or_telemetry:"komfort lub dane",settling:"15 min stabilizacji",new_context_or_gap:')
     return html
 
 def continuous_ui(html):

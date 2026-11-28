@@ -233,7 +233,7 @@ class RuntimeTest(unittest.TestCase):
             self.assertFalse(self.writes)
             self.assertEqual(self.r.status["proposed"],"quiet+FLimit")
 
-    def test_experiment_writes_only_after_fresh_idle(self):
+    def test_experiment_can_write_after_confirmed_natural_idle(self):
         with patch.dict(FakeGPIO.values,{1:"1",2:"1"}):
             self.r.choose("experiment","legacy")
             for t in range(1000,1181,30):
@@ -255,6 +255,135 @@ class RuntimeTest(unittest.TestCase):
                 self.assertIsNotNone(self.r.pending)
                 self.r.choose("shadow","experiment")
                 self.assertEqual(self.r.control,"manual")
+
+    def advance_experiment(self,start,end):
+        for t in range(start,end+1,30):
+            self.now.return_value=t
+            self.refresh()
+            self.r.tick()
+
+    def test_experiment_advances_after_six_windows_without_compressor_stop(self):
+        with (patch.dict(FakeGPIO.values,{1:"1",2:"1"}),
+              patch.object(Decoder,"GetMode",return_value="quiet") as preset,
+              patch.object(Decoder,"GetTwiTwo",return_value=[30,32]),
+              patch.object(Decoder,"GetCompInfo",return_value=[30,30,0,320,25]),
+              patch.object(self.r,"fresh_room_sensor",side_effect=lambda key,wall: 21 if key=="intemp" else 1),
+              patch("adaptive.live_runtime.time.time",side_effect=lambda: 1700000000+self.now.return_value)):
+            self.r.choose("experiment","legacy")
+            self.r.experiment_counts_saved[:2]=[3,3]
+            sixth_window_end=1000+900+6*1800+5*self.r.PERIOD
+            self.advance_experiment(1000,sixth_window_end-30)
+            self.assertEqual(len(self.r.experiment_windows[2]),5)
+            self.assertEqual(self.writes,[])
+            self.advance_experiment(sixth_window_end,sixth_window_end)
+            completed=self.r.experiment_continuous[2]
+            self.assertEqual((completed["blocks"],completed["seconds"],completed["starts"]),(6,10800,0))
+            self.assertEqual(self.writes,[("preset","eco")])
+            self.assertEqual(self.r.pending[:2],("eco",True))
+            self.advance_experiment(sixth_window_end+30,sixth_window_end+30)
+            self.assertIsNotNone(self.r.pending)
+            preset.return_value="eco"
+            confirmed_at=sixth_window_end+60
+            self.advance_experiment(confirmed_at,confirmed_at+870)
+            self.assertIsNone(self.r.pending)
+            self.assertIsNone(self.r.continuous_trial.window)
+            self.advance_experiment(confirmed_at+900,confirmed_at+900)
+            self.assertIsNotNone(self.r.continuous_trial.window)
+            self.assertEqual(self.writes,[("preset","eco")])
+
+    def test_experiment_confirms_flimit_both_ways_during_running_co(self):
+        for preset,initial,completed in (("quiet",False,2),("turbo",True,5)):
+            with (self.subTest(preset=preset),
+                  patch.dict(FakeGPIO.values,{1:str(int(initial)),2:"1"}),
+                  patch.object(Decoder,"GetMode",return_value=preset),
+                  patch.object(Decoder,"GetTwiTwo",return_value=[30,32]),
+                  patch.object(Decoder,"GetCompInfo",return_value=[30,30,0,320,25])):
+                self.writes.clear()
+                self.r=Runtime(self.g)
+                self.now.return_value=1000
+                self.refresh()
+                self.r.choose("experiment","legacy")
+                self.r.experiment_counts_saved[:completed]=[3]*completed
+                def relay_write(value):
+                    self.writes.append(("relay",value))
+                    FakeGPIO.values[1]=value
+                    return "Frequency limit relay","success"
+                with patch.dict(self.g,flimitchange=relay_write):
+                    self.advance_experiment(1000,1870)
+                    self.assertEqual(self.writes,[])
+                    self.advance_experiment(1900,1900)
+                    expected=str(int(not initial))
+                    self.assertEqual(self.writes,[("relay",expected)])
+                    self.assertEqual(self.r.pending[:2],(preset,not initial))
+                    # An acknowledged relay and new R201 alone do not verify post-write compressor data.
+                    self.now.return_value=1930
+                    self.r.note("R201",[5])
+                    self.r.tick()
+                    self.assertIsNotNone(self.r.pending)
+                    self.advance_experiment(1960,1960)
+                    self.assertIsNone(self.r.pending)
+                    self.assertEqual(self.writes,[("relay",expected)])
+                    detail=self.r.report.events[-1]["detail"]
+                    self.assertIn("actual/requested 30/30 Hz",detail)
+
+    def test_experiment_disarms_on_wrong_running_relay_readback(self):
+        with (patch.dict(FakeGPIO.values,{1:"0",2:"1"}),
+              patch.object(Decoder,"GetMode",return_value="quiet"),
+              patch.object(Decoder,"GetTwiTwo",return_value=[30,32])):
+            self.r.choose("experiment","legacy")
+            self.r.experiment_counts_saved[:2]=[3,3]
+            self.advance_experiment(1000,1900)
+            self.assertEqual(self.writes,[("relay","1")])
+            self.assertEqual(self.r.control,"manual")
+            self.assertIn("FLimit readback",self.r.fault)
+
+    def test_experiment_defers_capacity_shortfall_and_releases_limit_first(self):
+        with (patch.dict(FakeGPIO.values,{1:"1",2:"1"}),
+              patch.object(Decoder,"GetMode",return_value="quiet"),
+              patch.object(Decoder,"GetTwiTwo",return_value=[27,29]),
+              patch.object(Decoder,"GetCompInfo",return_value=[30,30,0,320,25]),
+              patch.object(self.r,"fresh_room_sensor",side_effect=lambda key,wall: 21 if key=="intemp" else 1)):
+            self.r.choose("experiment","legacy")
+            self.r.experiment_counts_saved[:2]=[3,3]
+            def release_limit(value):
+                self.writes.append(("relay",value))
+                FakeGPIO.values[1]=value
+                return "Frequency limit relay","success"
+            with patch.dict(self.g,flimitchange=release_limit):
+                self.advance_experiment(1000,2770)
+                self.assertEqual(self.writes,[])
+                self.advance_experiment(2800,2800)
+                self.assertTrue(self.r.experiment_recovering)
+                self.assertEqual(self.r.experiment_deferred[2]["reason"],"water_shortfall")
+                self.assertIsNone(self.r.experiment_continuous[2])
+                self.assertEqual(self.r.experiment_windows[2],[])
+                self.assertIn("Niedobór mocy",self.r.status["reason_pl"])
+                self.assertEqual(self.writes,[("relay","0")])
+                self.assertEqual(self.r.pending[:2],("quiet",False))
+                self.advance_experiment(2830,2830)
+                self.assertEqual(self.writes,[("relay","0"),("preset","turbo")])
+
+    def test_experiment_defrost_and_stop_risk_block_running_change(self):
+        with (patch.dict(FakeGPIO.values,{1:"1",2:"1"}),
+              patch.object(Decoder,"GetMode",return_value="quiet"),
+              patch.object(Decoder,"GetTwiTwo",return_value=[30,32]) as water,
+              patch.object(Decoder,"GetDefrost",return_value="OFF") as defrost):
+            self.r.choose("experiment","legacy")
+            self.r.experiment_counts_saved[:3]=[3,3,3]
+            self.advance_experiment(1000,1870)
+            defrost.return_value="DEFROST"
+            self.advance_experiment(1900,1900)
+            self.assertIn("Odszranianie",self.r.status["reason_pl"])
+            defrost.return_value="OFF"
+            self.advance_experiment(1930,2800)
+            self.assertEqual(self.writes,[])
+            water.return_value=[34,37]
+            self.advance_experiment(2830,2830)
+            self.assertIn("przewidywanego STOP",self.r.status["reason_pl"])
+            self.assertEqual(self.writes,[])
+            water.return_value=[30,32]
+            self.advance_experiment(2860,2860)
+            self.assertEqual(self.writes,[("preset","eco")])
 
     def test_experiment_has_no_calendar_timeout(self):
         self.r.choose("experiment","legacy")
@@ -478,6 +607,8 @@ class SourceIntegration(unittest.TestCase):
             self.assertIn('href="#am-curve-editor"',html)
             self.assertIn('id="am-c-save"',html)
             self.assertIn('v.reason_pl||v.reason',html)
+            self.assertIn('podczas stabilnego CO',html)
+            self.assertIn('settling:"15 min stabilizacji"',html)
             self.assertIn('id="am-return-temp"',html)
             self.assertIn('id="am-stop-margin"',html)
             self.assertIn('paused:"Oczekiwanie"',html)

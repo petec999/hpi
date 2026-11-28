@@ -1068,9 +1068,10 @@ class Runtime:
         self.experiment_counts_saved=counts
         self.experiment_watermark=watermark
 
-    def experiment_tick(self,s,zone,curve):
-        # Regular experiment changes occur at native idle. Comfort recovery
-        # is the only permitted running change and can only increase capacity.
+    def experiment_tick(self,s,zone,curve,compressor_stamp=None):
+        if compressor_stamp is None:
+            with self.frames_lock:
+                compressor_stamp=self.frames["R241"][0]
         counts=self.experiment_counts()
         actual=(s.mode,s.relay)
         wall=time.time()
@@ -1080,12 +1081,15 @@ class Runtime:
         outdoor=self.fresh_room_sensor("outtemp",wall)
         if outdoor is not None and not -60<=outdoor<=60:
             outdoor=None
-        eligible=self.activation_reason(s,zone,curve) is None and self.gpio("heatdemandpin") and self.flag(self.raw("pch"))
+        blocker=self.activation_reason(s,zone,curve)
+        eligible=blocker is None and self.gpio("heatdemandpin") and self.flag(self.raw("pch"))
         before_ref=self.experiment_guard.reference
-        decision=self.experiment_guard.observe(s,room,eligible,self.experiment_recovering)
-        self.status={"reason":"experiment observation","reason_pl":"Eksperyment – obserwacja cyklu, bez zmian podczas pracy",
+        decision=self.experiment_guard.observe(s,room,eligible,self.experiment_recovering,compressor_stamp)
+        heating_state=self.experiment_guard.heating_state
+        self.status={"reason":"experiment observation","reason_pl":"Eksperyment – obserwacja CO",
                      "risk":"paused","actual":s.mode+(" + FLimit" if s.relay else " / FLimit OFF"),
-                     "target":s.target,"return_temp":s.return_temp,"supply_temp":s.supply_temp}
+                     "target":s.target,"return_temp":s.return_temp,"supply_temp":s.supply_temp,
+                     "hz":s.hz,"requested_hz":s.requested_hz,"heating_state":heating_state}
         # Defrost is observational only: never issue a command during it.
         normal_defrost=(s.defrost and s.fresh and not (s.error or s.dhw or s.override)
                         and zone=="normal" and abs(curve-s.target)<=1
@@ -1095,7 +1099,7 @@ class Runtime:
         if not eligible and not normal_defrost:
             self.continuous_trial.reset("priority_or_no_demand")
             self.experiment_idle=None
-            self.status["reason_pl"]="Eksperyment wstrzymany – warunek priorytetowy lub brak zapotrzebowania"
+            self.status["reason_pl"]="Eksperyment wstrzymany – "+(blocker or "brak zapotrzebowania lub wyłączone CO")
             return
         if decision in ("room_shortfall","water_shortfall") and not self.experiment_recovering:
             i=self.EXPERIMENT_LEVELS.index(actual)
@@ -1105,7 +1109,11 @@ class Runtime:
             self.experiment_guard.reset()
             self.observer.interrupt("context_changed",wall)
             self.experiment_idle=None
-            self.report_event("fault","Ochrona komfortu: odłożono "+self.status["actual"]+" ("+decision+")")
+            why={"room_shortfall":"spadek temperatury w domu",
+                 "water_shortfall":"utrzymujący się niedobór temperatury zasilania"}[decision]
+            if heating_state=="capacity_shortfall":
+                why="niedobór mocy przy ustalonej częstotliwości"
+            self.report_event("fault","Odłożona próba "+self.status["actual"]+" – "+why)
             try:
                 self.save_guard_checkpoint()
             except SelectionBlocked:
@@ -1143,11 +1151,17 @@ class Runtime:
             self.experiment_idle=None
             self.status["reason_pl"]="Odszranianie – wliczane do próby, bez zmian sterowania"
             return
+        idle=self.idle_snapshot_valid(s,zone,curve)
+        running=self.experiment_guard.running_stable(s)
         remaining=[i for i,n in enumerate(counts) if n<self.EXPERIMENT_CYCLES and self.experiment_continuous[i] is None]
         candidates=[i for i in remaining if self.experiment_guard.can_retry(self.experiment_deferred[i],outdoor)]
         done=not remaining
         if self.experiment_recovering:
-            self.status.update(reason_pl="Ochrona komfortu – przywracanie mocy: Turbo / FLimit OFF",
+            why=self.experiment_deferred[current_index]
+            reason="Ochrona komfortu – przywracanie mocy: Turbo / FLimit OFF"
+            if why is not None and why["reason"]=="water_shortfall":
+                reason="Niedobór mocy CO – przywracanie mocy: Turbo / FLimit OFF"
+            self.status.update(reason_pl=reason,
                                proposed="turbo / FLimit OFF",risk="shortfall")
             self.experiment_idle=None
             if actual!=("turbo",False):
@@ -1162,9 +1176,8 @@ class Runtime:
             if not done and not candidates:
                 self.status["reason_pl"]="Komfort odzyskany – oczekiwanie na cieplejsze warunki do pozostałych prób"
                 return
-            # Re-enter the experiment only in native idle, not mid-cycle.
-            if not self.idle_snapshot_valid(s,zone,curve):
-                self.status["reason_pl"]="Komfort odzyskany – oczekiwanie na naturalny STOP"
+            if not (idle or running):
+                self.status["reason_pl"]="Komfort odzyskany – oczekiwanie na stabilną pracę lub postój"
                 return
             self.experiment_recovering=False
             try:
@@ -1174,6 +1187,7 @@ class Runtime:
                 return
             self.experiment_guard.reset()
             self.observer.interrupt("context_changed",wall)
+            return
         if not done and not candidates:
             # E.g. after manually resuming a saved session in cold weather.
             # Do not keep a deferred restricted configuration running.
@@ -1186,24 +1200,17 @@ class Runtime:
             return
         goal=self.experiment_initial if done else self.EXPERIMENT_LEVELS[candidates[0]]
         self.status["proposed"]=goal[0]+(" + FLimit" if goal[1] else " / FLimit OFF")
-        if not self.idle_snapshot_valid(s,zone,curve):
+        if not idle:
             self.experiment_idle=None
-            if self.experiment_continuous[current_index] is not None:
-                self.status["reason_pl"]="Próba ciągła zaliczona – oczekiwanie na naturalny STOP przed zmianą konfiguracji"
-            return
-        with self.frames_lock:
-            stamp=self.frames["R241"][0]
-        if self.experiment_idle is None:
-            self.experiment_idle=(stamp,stamp)
-            return
-        first,previous=self.experiment_idle
-        if stamp<=previous or stamp-previous>self.MAX_AGE:
-            if stamp-previous>self.MAX_AGE:
-                self.experiment_idle=(stamp,stamp)
-            return
-        self.experiment_idle=(first,stamp)
-        if stamp-first<60 or self.observer.stop is not None:
-            return
+        elif actual!=goal:
+            first,previous=self.experiment_idle or (compressor_stamp,compressor_stamp)
+            if compressor_stamp-previous>self.MAX_AGE:
+                first=compressor_stamp
+            fresh_idle=compressor_stamp>previous and compressor_stamp-first>=60
+            self.experiment_idle=(first,compressor_stamp)
+            if not fresh_idle or self.observer.stop is not None:
+                self.status["reason_pl"]="Zmiana konfiguracji – potwierdzanie 60 s naturalnego postoju"
+                return
         if actual==goal:
             if done:
                 self.control="manual"
@@ -1216,14 +1223,34 @@ class Runtime:
                 except SelectionBlocked:
                     self.status["reason_pl"]="Eksperyment zakończony – konfiguracja przywrócona, błąd zapisu stanu"
                     self.fault=self.experiment_error
-            else:
-                self.status["reason_pl"]="Eksperyment – konfiguracja gotowa, oczekiwanie na naturalny START"
+            elif idle:
+                self.status["reason_pl"]="Eksperyment – postój w badanej konfiguracji"
+            elif self.continuous_trial.reason=="settling":
+                self.status["reason_pl"]="Eksperyment – 15 min stabilizacji przed pomiarem"
+            elif heating_state=="modulating":
+                self.status.update(reason_pl="Eksperyment – stabilna modulacja CO, zasilanie w granicach progu niedoboru",risk="balanced")
+            elif heating_state=="water_below_target":
+                self.status["reason_pl"]="Eksperyment – zasilanie poniżej nastawy, obserwacja trendu i komfortu"
             return
+        if not idle:
+            if not running:
+                self.status["reason_pl"]="Zmiana konfiguracji – oczekiwanie na 15 min pracy CO i stabilne śledzenie żądanych Hz"
+                return
+            reason=self.experiment_running_blocker(s,room)
+            if reason is not None:
+                self.status["reason_pl"]=reason
+                return
         with self.serial_lock:
             current,z,target,_=self.snapshot()
-            if (not self.idle_snapshot_valid(current,z,target) or not self.gpio("heatdemandpin")
+            if (self.activation_reason(current,z,target) is not None or not self.gpio("heatdemandpin")
+                    or not self.flag(self.raw("pch"))
                     or (current.mode,current.relay)!=actual or abs(current.target-s.target)>0.25
                     or self.g.get("newframe")):
+                return
+            if idle:
+                if not self.idle_snapshot_valid(current,z,target):
+                    return
+            elif self.experiment_running_blocker(current,self.fresh_room_sensor("intemp",time.time())) is not None:
                 return
             # One output at a time; enable limit first if needed, then preset,
             # then remove limit if needed. No writes in Shadow.
@@ -1236,8 +1263,14 @@ class Runtime:
                 relay=goal[1]
             issued=time.monotonic()
             self.pending=(mode,relay,issued+90,issued)
-            self.observer.interrupt()
+            self.observer.interrupt("context_changed",wall)
             self.experiment_idle=None
+            self.continuous_trial.reset("settling")
+            self.experiment_guard.reset()
+            detail=f"{mode} / FLimit {'ON' if relay else 'OFF'}"
+            phase="postój" if idle else f"CO {current.hz:g}/{current.requested_hz:g} Hz (actual/requested)"
+            self.report_event("issued",f"Zmiana eksperymentu – {detail}, {phase}")
+            self.status["reason_pl"]=f"Wysłano zmianę na {detail} – oczekiwanie na odczyt zwrotny"
             if mode!=actual[0]:
                 _,ok=self.g["new_presetchange"](mode)
                 if ok is not True:
@@ -1246,7 +1279,17 @@ class Runtime:
                 _,ok=self.g["flimitchange"]("1" if relay else "0")
                 if ok!="success" or self.gpio("freqlimitpin")!=relay:
                     self.fail("experiment FLimit readback mismatch")
-            self.g["logging"].info("Hysteresis experiment issued: %s / FLimit %s",mode,relay)
+            self.g["logging"].info("Adaptive experiment issued: %s, %s",detail,phase)
+
+    def experiment_running_blocker(self,s,room):
+        if not s.heating or min(s.hz,s.requested_hz)<=0 or not self.experiment_guard.running_stable(s):
+            return "Zmiana konfiguracji – sprężarka w rozruchu, zatrzymaniu lub zmianie obrotów"
+        if self.experiment_guard.room_low(room) or s.target-s.supply_temp>=self.experiment_guard.cfg["water_gap"]:
+            return "Zmiana konfiguracji wstrzymana – obserwacja niedoboru temperatury"
+        model=self.thresholds.model(s)
+        if model["stop_margin"]<=self.reg.cfg.stop_margin or (model["stop_eta_min"] is not None and model["stop_eta_min"]<=3):
+            return "Zmiana konfiguracji wstrzymana – zasilanie blisko przewidywanego STOP"
+        return None
 
     def tick(self):
         now=time.monotonic()
@@ -1313,12 +1356,17 @@ class Runtime:
             if self.control=="legacy" and self.pending is None:
                 return
             try:
-                s,zone,curve,stamp=self.snapshot()
+                with self.frames_lock:
+                    frames=dict(self.frames)
+                s,zone,curve,stamp=self.snapshot(frames)
             except Exception as e:
                 self.idle_frame=None
                 self.learning.cancel()
                 self.learning_before=None
                 self.reg.reset()
+                self.experiment_idle=None
+                self.experiment_guard.reset()
+                self.continuous_trial.reset("comfort_or_telemetry")
                 if self.invalid_since is None:
                     self.invalid_since=now
                 if self.pending and now>self.pending[2]:
@@ -1332,9 +1380,15 @@ class Runtime:
             self.invalid_since=None
             if self.pending:
                 mode,relay,deadline,issued=self.pending
-                if (s.mode,s.relay)==(mode,relay) and stamp>issued:
+                experiment=self.control=="experiment"
+                fresh_readback=stamp>issued and (not experiment or frames["R241"][0]>issued)
+                if (s.mode,s.relay)==(mode,relay) and fresh_readback:
                     self.pending=None
-                    self.report_event("confirmed",mode+" / FLimit "+str(relay))
+                    detail=mode+" / FLimit "+str(relay)
+                    if experiment:
+                        detail+=f", actual/requested {s.hz:g}/{s.requested_hz:g} Hz"
+                        self.g["logging"].info("Adaptive experiment confirmed: %s",detail)
+                    self.report_event("confirmed",detail)
                     before=self.learning_before
                     self.learning_before=None
                     if before is not None and self.control=="auto":
@@ -1347,10 +1401,11 @@ class Runtime:
                     self.fail("command readback did not match")
                     return
                 else:
-                    self.status={"reason":"waiting for confirmed preset and relay","risk":"paused"}
+                    self.status={"reason":"waiting for confirmed preset and relay","risk":"paused",
+                                 "reason_pl":f"Oczekiwanie na odczyt zwrotny {mode} / FLimit {'ON' if relay else 'OFF'}"}
                     return
             if self.control=="experiment":
-                self.experiment_tick(s,zone,curve)
+                self.experiment_tick(s,zone,curve,frames["R241"][0])
                 return
             if self.control=="manual":
                 if self.fault is None:

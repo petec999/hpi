@@ -1761,7 +1761,11 @@ class PassiveInsights:
 
 
 class ExperimentGuard:
-    """Pure comfort guard for the active experiment. No actuator I/O."""
+    """Comfort, heating capacity and running stability for the active test."""
+    SETTLE=900
+    MAX_GAP=65
+    CAPACITY_TREND_WINDOW=300
+    FREQUENCY_TOLERANCE=3
     DEFAULT={"water_gap":2.0,"water_minutes":30,"room_drop":0.5,
              "room_minutes":10,"minimum_room":19.0,"retry_warmer":2.0,
              "recovery_minutes":15}
@@ -1795,12 +1799,61 @@ class ExperimentGuard:
         self.water_seconds=0
         self.room_seconds=0
         self.recovery_seconds=0
+        self.running_since=None
+        self.running_seconds=0
+        self.running_target=None
+        self.heating_state="unavailable"
+        self.running_samples=deque(maxlen=64)
 
     @staticmethod
     def valid_room(room):
         return type(room) in (float,int) and math.isfinite(room) and 5<=room<=40
 
-    def observe(self,s,room,eligible,recovering=False):
+    def room_low(self,room):
+        return self.valid_room(room) and (room<self.cfg["minimum_room"] or
+                    self.reference is not None and self.reference-room>=self.cfg["room_drop"]-1e-6)
+
+    def running_stable(self,s):
+        recent=[r for r in self.running_samples if s.now-r[0]<=120]
+        requested=[s.requested_hz]+[r[4] for r in recent]
+        return (self.running_seconds>=self.SETTLE and len(recent)>=3
+                and recent[-1][0]-recent[0][0]>=60
+                and max(requested)-min(requested)<=2*self.FREQUENCY_TOLERANCE
+                and all(abs(r[3]-r[4])<=self.FREQUENCY_TOLERANCE for r in recent)
+                and abs(s.hz-s.requested_hz)<=self.FREQUENCY_TOLERANCE)
+
+    def observe_running(self,s,now):
+        running=s.heating and s.hz>0 and s.requested_hz>0
+        if not running:
+            self.running_since=None
+            self.running_seconds=0
+            self.running_samples.clear()
+            self.heating_state="idle" if s.hz==s.requested_hz==0 else "transition"
+            return False
+        if self.running_since is None or abs(s.target-self.running_target)>.25:
+            self.running_since=now
+            self.running_target=s.target
+            self.running_samples.clear()
+            self.water_since=None
+        self.running_seconds=now-self.running_since
+        self.running_samples.append((now,s.return_temp,s.supply_temp,s.hz,s.requested_hz))
+        while now-self.running_samples[0][0]>self.CAPACITY_TREND_WINDOW:
+            self.running_samples.popleft()
+        self.heating_state="running"
+        return True
+
+    def capacity_shortfall(self):
+        rows=list(self.running_samples)
+        if len(rows)<5 or rows[-1][0]-rows[0][0]<self.CAPACITY_TREND_WINDOW-self.MAX_GAP:
+            return False
+        requested=[r[4] for r in rows]
+        actual=[r[3] for r in rows]
+        plateau=all(max(freq)-min(freq)<=self.FREQUENCY_TOLERANCE for freq in (requested,actual))
+        # Use the observed plateau, without assuming any model-specific maximum Hz.
+        return (plateau and self.running_target-median(r[1] for r in rows)>=self.cfg["water_gap"]
+                and trend(rows,1)<=.03 and trend(rows,2)<=.03)
+
+    def observe(self,s,room,eligible,recovering=False,frame_at=None):
         now=s.now
         room=room if self.valid_room(room) else None
         if not eligible or not s.fresh or s.error or s.override or s.defrost or s.dhw:
@@ -1809,8 +1862,11 @@ class ExperimentGuard:
         if self.reference is None and room is not None:
             self.reference=room
         previous=self.previous
-        if previous is None or not 0<now-previous[0]<=65 or previous[1:3]!=(s.mode,s.relay) or previous[4]!=recovering:
+        stamp=now if frame_at is None else frame_at
+        if previous is None or not 0<=stamp-previous[0]<=self.MAX_GAP or previous[1:3]!=(s.mode,s.relay) or previous[4]!=recovering:
             self.reset()
+        elif stamp==previous[0] and abs(previous[3]-s.target)<=.25 and s.heating and s.hz>0 and s.requested_hz>0:
+            return None
         elif abs(previous[3]-s.target)>.5:
             # A changed water target starts a new water confirmation, but
             # does not erase independently measured cooling of the house.
@@ -1818,12 +1874,11 @@ class ExperimentGuard:
             self.water_seconds=0
             self.recovery_since=None
             self.recovery_seconds=0
-        self.previous=(now,s.mode,s.relay,s.target,recovering)
+        self.previous=(stamp,s.mode,s.relay,s.target,recovering)
         self.room_missing_since=(self.room_missing_since if self.room_missing_since is not None else now) if room is None else None
-        low_room=room is not None and (room<self.cfg["minimum_room"] or
-                    self.reference is not None and self.reference-room>=self.cfg["room_drop"]-1e-6)
-        water_low=s.heating and s.hz>0 and s.requested_hz>0 and s.target-s.supply_temp>=self.cfg["water_gap"]
-        running=s.heating and s.hz>0 and s.requested_hz>0
+        low_room=self.room_low(room)
+        running=self.observe_running(s,stamp)
+        water_low=running and s.target-s.supply_temp>=self.cfg["water_gap"]
         idle=s.hz==0 and s.requested_hz==0
         if recovering:
             # At full-capacity preset, wait until measured comfort is back.
@@ -1838,17 +1893,24 @@ class ExperimentGuard:
             return "recovered" if self.recovery_seconds>=60*self.cfg["recovery_minutes"] else None
         # A low room is meaningful even if a native idle occurs. The controller
         # still cannot change demand or force a compressor start.
-        self.water_since=(self.water_since if self.water_since is not None else now) if water_low else None
+        self.water_since=(self.water_since if self.water_since is not None else stamp) if water_low else None
         self.room_since=(self.room_since if self.room_since is not None else now) if low_room else None
-        self.water_seconds=now-self.water_since if self.water_since is not None else 0
+        self.water_seconds=stamp-self.water_since if self.water_since is not None else 0
         self.room_seconds=now-self.room_since if self.room_since is not None else 0
+        if running:
+            if water_low:
+                self.heating_state="water_below_target"
+            elif self.running_stable(s) and not low_room:
+                self.heating_state="modulating"
         if self.room_seconds>=60*self.cfg["room_minutes"]:
             return "room_shortfall"
-        # A water deficit alone is not a comfort failure when a valid room
-        # sensor confirms acceptable temperature. Use water-only fallback
-        # only when room data are unavailable throughout the confirmation.
-        if self.water_seconds>=60*self.cfg["water_minutes"] and self.room_missing_since is not None and now-self.room_missing_since>=60*self.cfg["water_minutes"]:
-            return "water_shortfall"
+        if self.water_seconds>=60*self.cfg["water_minutes"]:
+            if self.capacity_shortfall():
+                self.heating_state="capacity_shortfall"
+                return "water_shortfall"
+            # When room telemetry is missing, keep the existing water-only fallback.
+            if self.room_missing_since is not None and now-self.room_missing_since>=60*self.cfg["water_minutes"]:
+                return "water_shortfall"
         return None
 
     def can_retry(self,record,outdoor):
@@ -1862,12 +1924,13 @@ class ExperimentGuard:
     def view(self):
         return {"settings":dict(self.cfg),"reference":self.reference,
                 "water_seconds":self.water_seconds,"room_seconds":self.room_seconds,
+                "running_seconds":self.running_seconds,"heating_state":self.heating_state,
                 "recovery_seconds":self.recovery_seconds}
 
 
 class ContinuousTrial:
     """Normal-operation observation; no actuator I/O or invented cycle edges."""
-    SETTLE=900
+    SETTLE=ExperimentGuard.SETTLE
     DURATION=10800
     MAX_GAP=65
 
@@ -1909,6 +1972,7 @@ class ContinuousTrial:
         phase="defrost" if s.defrost else "run" if s.heating and s.hz>0 else "idle" if s.hz==0 and s.requested_hz==0 else "transition"
         self.last=(s.now,wall,s.target,phase)
         if s.now-self.since<self.SETTLE:
+            self.reason="settling"
             return None
         if self.window is None:
             self.window=[s.now,wall,room,room,s.target,s.target,outdoor,outdoor]

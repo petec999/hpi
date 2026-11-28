@@ -92,8 +92,44 @@ class ExperimentGuardTests(unittest.TestCase):
         from adaptive.regulator import ExperimentGuard
         g=ExperimentGuard()
         for t in range(0,7201,30):
+            hz=25+(t//30)%4
+            self.assertIsNone(g.observe(self.sample(t,supply_temp=35,hz=hz,requested_hz=hz),21,True))
+        self.assertEqual(g.heating_state,"modulating")
+        self.assertEqual(g.water_seconds,0)
+
+    def test_flat_water_deficit_on_frequency_plateau_is_capacity_shortfall(self):
+        from adaptive.regulator import ExperimentGuard
+        g=ExperimentGuard()
+        for t in range(0,1800,30):
             self.assertIsNone(g.observe(self.sample(t),21,True))
-        self.assertEqual(g.water_seconds,7200)
+        self.assertEqual(g.observe(self.sample(1800),21,True),"water_shortfall")
+        self.assertEqual(g.heating_state,"capacity_shortfall")
+
+    def test_rising_twi_or_two_does_not_confirm_capacity_shortfall(self):
+        from adaptive.regulator import ExperimentGuard
+        for sensor in ("return_temp","supply_temp"):
+            with self.subTest(sensor=sensor):
+                g=ExperimentGuard()
+                for t in range(0,1801,30):
+                    self.assertIsNone(g.observe(self.sample(t,**{sensor:29+t/600}),21,True))
+                self.assertEqual(g.water_seconds,1800)
+                self.assertEqual(g.heating_state,"water_below_target")
+
+    def test_duplicate_frames_and_gaps_do_not_build_running_stability(self):
+        from adaptive.regulator import ExperimentGuard
+        g=ExperimentGuard()
+        for t in range(0,1801,30):
+            g.observe(self.sample(t,supply_temp=35),21,True,frame_at=0)
+        self.assertEqual(g.running_seconds,0)
+        for t in range(1830,2731,30):
+            g.observe(self.sample(t,supply_temp=35),21,True)
+        self.assertTrue(g.running_stable(self.sample(2730)))
+        ramp=self.sample(2760,hz=40,requested_hz=40)
+        g.observe(ramp,21,True)
+        self.assertFalse(g.running_stable(ramp))
+        after_gap=self.sample(3000)
+        g.observe(after_gap,21,True)
+        self.assertEqual(g.running_seconds,0)
 
     def test_room_drop_and_recovery(self):
         from adaptive.regulator import ExperimentGuard
@@ -111,10 +147,10 @@ class ExperimentGuardTests(unittest.TestCase):
         from adaptive.regulator import ExperimentGuard
         g=ExperimentGuard()
         for t in range(0,1800,30):
-            self.assertIsNone(g.observe(self.sample(t),None,True))
-        self.assertEqual(g.observe(self.sample(1800),None,True),"water_shortfall")
+            self.assertIsNone(g.observe(self.sample(t,return_temp=34),None,True))
+        self.assertEqual(g.observe(self.sample(1800,return_temp=34),None,True),"water_shortfall")
         # A fresh comfort reading cancels the water-only fallback.
-        self.assertIsNone(g.observe(self.sample(1830),21,True))
+        self.assertIsNone(g.observe(self.sample(1830,return_temp=34),21,True))
         self.assertIsNone(g.observe(self.sample(1860,defrost=True),None,True))
         self.assertEqual(g.water_seconds,0)
         self.assertIsNone(g.observe(self.sample(2000),None,True))

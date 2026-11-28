@@ -16,4 +16,13 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m py_compile adaptive/live_runtime.py tools/patch-adaptive-preview.py
       - run: python -m unittest discover -s tests -p test_adaptive_storage_audit.py -v
+      - name: Test runtime and installer against pinned Stable 1.4.5
+        env:
+          STABLE_ROOT: /tmp/haierpi-stable
+        run: |
+          curl -fsSL --retry 3 https://raw.githubusercontent.com/kamilostatek/hpi/93887c747d5c7171752032341319bd3eccebe1ab/1.4.5_stable.tar.gz -o /tmp/haierpi-stable.tar.gz
+          printf '%s  %s\n' ca803a3f8777efa75a40739d2efeb0362365ffa4291d3eb76d9a231c6cb53976 /tmp/haierpi-stable.tar.gz | sha256sum -c -
+          mkdir -p "$STABLE_ROOT"
+          tar -xzf /tmp/haierpi-stable.tar.gz -C "$STABLE_ROOT"
+          python -m unittest discover -s tests -p test_adaptive_integration.py -v
       - run: python -m unittest discover -s tests -p test_register_watch.py -v

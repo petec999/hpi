@@ -23,11 +23,11 @@ Repeat with `--apply` after a successful dry-run and when a brief service restar
 | Manual | User controls preset and FLimit |
 | Shadow | Adaptive proposals only; legacy automation may still act |
 | Auto | Experimental supervisor using the six preset/FLimit combinations |
-| Experiment | Optional idle-only trials; three accepted cycles per configuration |
+| Experiment | Optional trials during stable heating or confirmed idle; three accepted cycles or six 30-minute windows per configuration |
 
 Auto does not command compressor frequency, demand or water setpoint. It preserves native and priority protections. Saved Auto waits for two distinct fresh sets of frames and eligible normal CO before resuming after restart. Manual/Legacy selection cancels resume. Failed commands or prolonged telemetry loss may disarm to Manual.
 
-The experiment has no calendar deadline; completion restores the original combination at an eligible idle, then selects Manual. Its checkpoint survives restart, but it never automatically resumes: explicitly select Experiment to continue or Experiment – od nowa to begin a new session. The original combination is retained; cancellation/pause/restart does not itself restore it. Existing sessions started before checkpoint support cannot be reliably recovered. Progress is based on saved accepted cycles (bounded history); in-flight cycles are not saved.
+The experiment has no calendar deadline. It restores the original combination on completion and selects Manual. Use **Test aktywny – rozpocznij / wznów** after a restart to continue from saved cycles and measurement windows. The experiment waits 15 minutes before collecting windows after a configuration change. A partial window and an in-flight cycle are held in memory.
 
 ## Diagnostics and data
 

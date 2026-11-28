@@ -121,7 +121,10 @@ def patch(source):
     source,n = re.subn(r'(?m)^            resp\s*=\s*requests\.get\(url, headers=headers\)$', '            resp = requests.get(url, headers=headers, timeout=(3, 5))', source)
     if n!=2:
         raise ValueError('Unexpected HTTP call layout')
-    once('        # Configure callbacks\n','        # Bound QoS 1 messages during disconnects (Paho default is unlimited).\n        cl.max_queued_messages_set(512)\n        # Configure callbacks\n')
+    once('        cl.on_connect = on_connect\n',
+         '        # Bound QoS 1 messages during disconnects (Paho default is unlimited).\n'
+         '        cl.max_queued_messages_set(512)\n'
+         '        cl.on_connect = on_connect\n')
     once('            globals()[_name] = _value\n','            _default = globals()[_name]\n            if not isinstance(_value, (list, tuple, collections.deque)):\n                continue\n            _seq = list(_value)[-8640:]\n            globals()[_name] = collections.deque(list(_default)[:8640-len(_seq)]+_seq, maxlen=8640)\n')
     once('    logging.info("Cannot load charts pickle")\n','    logging.info("Cannot load charts pickle")\nfinally:\n    # Do not keep a second copy of the deserialized chart data.\n    for _chart_tmp in ("_charts_data", "_value", "_val", "_seq", "_pad", "_default"):\n        globals().pop(_chart_tmp, None)\n')
     once("            proc = subprocess.Popen(['journalctl', '-t', 'HaierPi', '-p','debug'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)\n            f=open(\"/opt/haier/crashlog-\"+crash_date+\".log\", \"w\")\n            for line in iter(proc.stdout.readline, ''):\n                f.write(line)\n            f.close()\n            with open(\"/opt/haier/crashlog-\"+crash_date+\".log\", \"r\") as f:\n                files = {\"file\": f}\n                headers = {'Authorization': f\"Bearer {hpikey}\"}\n                r=requests.post(\"https://app.haierpi.pl/upload\", files=files, headers=headers)\n", '''            try:
