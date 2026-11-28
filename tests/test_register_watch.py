@@ -75,9 +75,20 @@ class RegisterWatchTest(unittest.TestCase):
         d=RegisterWatch.decode_registers(a)
         self.assertEqual(len(d["rows"]),45)
         self.assertEqual(len({r["register"] for r in d["rows"]}),45)
-        self.assertEqual(d["signals"][0]["value"],"Praca (26)")
+        self.assertEqual(d["signals"][0]["value"],26)
         self.assertEqual(d["signals"][1]["value"],2)
-        self.assertEqual(d["signals"][0]["quality"],"candidate")
+        self.assertEqual(d["signals"][0]["quality"],"unknown")
+        signals={x["address"]:x for x in d["signals"]}
+        self.assertFalse(signals["R156 bit4 / R141 bit13"]["value"])
+        self.assertFalse(signals["R156 bit11 / R144 bit8"]["value"])
+        a["R141"][0]=0x2000
+        a["R141"][15]=0x0810
+        signals={x["address"]:x for x in RegisterWatch.decode_registers(a)["signals"]}
+        self.assertTrue(signals["R156 bit4 / R141 bit13"]["value"])
+        self.assertTrue(signals["R156 bit11 / R144 bit8"]["value"])
+        self.assertEqual(signals["R156 bit11"]["quality"],"candidate")
+        a["R141"][0]=0
+        a["R141"][15]=16
         self.assertEqual(RegisterWatch.decode_registers({})["rows"],[])
         w=RegisterWatch()
         w.observe(a,(0,)*4,{},0,1000)
