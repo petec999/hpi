@@ -176,11 +176,14 @@ class ExperimentGuardTests(unittest.TestCase):
         model=CapacityLearning()
         for t in range(0,1201,30):
             model.observe(self.sample(t,hz=40,requested_hz=40),1,True,1000+t)
-        self.assertAlmostEqual(model.summary()["hours"],300/3600)
+        # Ten measured 30 s intervals, with the new half-life weighting.
+        expected=sum(30*2**(-i*30/(30*86400)) for i in range(10))/3600
+        self.assertAlmostEqual(model.summary()["hours"],expected)
+        before=model.summary()["hours"]
         model.observe(self.sample(1230,defrost=True),1,True,2230)
         model.observe(self.sample(1260,hz=40,requested_hz=40),1,True,2260)
         model.observe(self.sample(1500,hz=40,requested_hz=40),1,True,2500)
-        self.assertAlmostEqual(model.summary()["hours"],300/3600)
+        self.assertEqual(model.summary()["hours"],before)
 
     def test_rising_twi_or_two_does_not_confirm_capacity_shortfall(self):
         from adaptive.regulator import ExperimentGuard
