@@ -6,6 +6,56 @@ from adaptive.regulator import RegisterWatch
 def frames():
     return {k:[0]*n for k,n in RegisterWatch.SIZES.items()}
 
+class DefrostTraceTests(unittest.TestCase):
+    def feed(self,t,now,state=False,heater=False):
+        a=frames()
+        a["R141"][0]=0x2000 if state else 0
+        a["R141"][3]=0x0100 if heater else 0
+        a["R241"][2]=80 if state else 40
+        t.observe({k:(now,v) for k,v in a.items()},now,1000+now)
+
+    def test_pre_post_persistence_and_distinct_samples(self):
+        from adaptive.regulator import DefrostTrace
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/"trace.json"
+            t=DefrostTrace(path)
+            for now in range(0,181,5):
+                self.feed(t,now,60<=now<120,80<=now<100)
+                self.feed(t,now,60<=now<120,80<=now<100)
+            self.assertEqual(len(t.traces),1)
+            row=t.traces[0]
+            self.assertEqual(row["reason"],"complete")
+            self.assertEqual(row["start"],1060)
+            self.assertEqual(row["end"],1180)
+            self.assertEqual(len(row["samples"]),37)
+            self.assertEqual(sum(bool(x[2][3]&0x100) for x in row["samples"]),4)
+            self.assertFalse(t.summary()["active"])
+            t.save_if_due(180)
+            self.assertEqual(list(DefrostTrace(path).traces),list(t.traces))
+            self.assertFalse(t.summary()["unsaved"])
+
+    def test_gap_and_start_unknown_are_not_complete(self):
+        from adaptive.regulator import DefrostTrace
+        t=DefrostTrace()
+        self.feed(t,0)
+        self.feed(t,5,True)
+        t.expire(40)
+        self.assertEqual(t.traces[-1]["reason"],"gap")
+        for now in range(45,126,5):
+            self.feed(t,now,now<65)
+        self.assertEqual(t.traces[-1]["reason"],"start_unknown")
+
+    def test_stale_bank_never_becomes_new_sample(self):
+        from adaptive.regulator import DefrostTrace
+        t=DefrostTrace()
+        self.feed(t,0)
+        a=frames()
+        a["R141"][0]=0x2000
+        t.observe({k:(0 if k=="R241" else 10,v) for k,v in a.items()},10,1010)
+        self.assertFalse(t.summary()["active"])
+        self.assertEqual(len(t.pre),1)
+
+
 class RegisterWatchTest(unittest.TestCase):
     def test_reference_edges_and_dhw_samples(self):
         w=RegisterWatch()
