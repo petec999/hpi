@@ -16,11 +16,11 @@ STAGE="$(mktemp -d /tmp/haier-adaptive-preview.XXXXXXXX)"
 trap 'rm -rf -- "$STAGE"' EXIT
 BASE="https://raw.githubusercontent.com/petec999/hpi/$REF"
 FILES=(
-  adaptive/regulator.py adaptive/live_runtime.py
+  adaptive/regulator.py adaptive/live_runtime.py adaptive/energy.py
   patches/stable-gpio.py patches/stable-mqtt.py
   tools/install-mqtt-watchdog.py tools/install-1454-core.py
   tools/install-web-ui-v2.py tools/patch-adaptive-preview.py
-  tools/install-adaptive-preview.py
+  tools/patch-core-resources.py tools/patch-serial-charts.py tools/patch-local-auth.py tools/patch-energy.py tools/patch-backup.py tools/haierpi-backup.py tools/install-adaptive-preview.py
 )
 for path in "${FILES[@]}"; do
   mkdir -p "$STAGE/$(dirname "$path")"
@@ -28,6 +28,7 @@ for path in "${FILES[@]}"; do
 done
 if [[ "$MODE" == "--apply" ]]; then
   python3 "$STAGE/tools/install-adaptive-preview.py" --apply
+  /opt/haier/env/bin/python "$STAGE/tools/haierpi-backup.py" --setup
 else
   python3 "$STAGE/tools/install-adaptive-preview.py"
 fi

@@ -274,6 +274,119 @@ def curve_editor_api(source):
                 with _am.lock:''')
     return source
 
+
+def guard_ui(html):
+    if 'id="am-guard-settings"' in html:
+        return html
+    fields=(("water_gap","Niedobór Two [K]",1,5,.1),
+            ("water_minutes","Potwierdzenie niedoboru wody [min]",15,90,1),
+            ("room_drop","Spadek temperatury domu [K]",.3,1.5,.1),
+            ("room_minutes","Potwierdzenie chłodzenia domu [min]",5,30,1),
+            ("minimum_room","Minimalna temperatura domu [°C]",10,25,.1),
+            ("retry_warmer","Ponów po ociepleniu o [K]",1,5,.1),
+            ("recovery_minutes","Stabilizacja przed wznowieniem [min]",10,60,1))
+    inputs="".join('<label>'+label+'<input id="am-g-'+key+'" type="number" min="'+str(lo)+'" max="'+str(hi)+'" step="'+str(step)+'" disabled></label>' for key,label,lo,hi,step in fields)
+    html=once(html,'<p id="am-experiment"></p>','<p id="am-experiment"></p><details id="am-guard-settings"><summary>Ochrona komfortu podczas testu</summary><p id="am-g-status"></p><p id="am-g-deferred"></p><div style="display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(170px,1fr))">'+inputs+'</div><button id="am-g-save" disabled>Zapisz progi</button><button id="am-g-cancel" disabled>Anuluj</button><p id="am-g-msg" role="status"></p><small>Progi można zmieniać poza aktywnym testem. Gdy zabraknie mocy, ochrona może odłączyć FLimit i wybrać Turbo podczas pracy. Zwykłe zmiany testowe nadal tylko przy postoju. Odłożone próby wrócą przy cieplejszej pogodzie po odzyskaniu komfortu. Bez wymuszania START/STOP.</small></details>')
+    html=html.replace('Eksperyment zmienia tryb i FLimit tylko przy potwierdzonym postoju; 3 cykle na konfigurację, bez limitu czasu;', 'Zwykły eksperyment zmienia tryb przy potwierdzonym postoju; ochrona komfortu może zwiększyć moc podczas pracy; 3 cykle na konfigurację;')
+    html=html.replace('Test aktywny – automatyczna zmiana konfiguracji przy postoju','Test aktywny – automatyczna zmiana konfiguracji przy postoju; ochrona komfortu włączona')
+    js="""
+let guardBase=null,guardDirty=false,guardBusy=false,guardMsg="";
+const guardKeys=["water_gap","water_minutes","room_drop","room_minutes","minimum_room","retry_warmer","recovery_minutes"];
+function guardPaint(v){
+ const ex=v&&v.experiment,g=ex&&ex.guard,c=g&&g.settings;
+ if(c&&!guardDirty&&!guardBusy){guardBase=c;for(const k of guardKeys)$("am-g-"+k).value=c[k];}
+ const locked=!c||guardBusy||v.control==="experiment"||v.pending;
+ for(const k of guardKeys)$("am-g-"+k).disabled=locked;
+ const conflict=guardDirty&&c&&guardBase&&JSON.stringify(c)!==JSON.stringify(guardBase);
+ $("am-g-save").disabled=locked||!guardDirty||!!conflict;
+ $("am-g-cancel").disabled=guardBusy||!guardDirty;
+ $("am-g-msg").textContent=guardMsg||(g&&g.settings_error)|| (conflict?"Ustawienia zmienione; anuluj i odśwież.":v&&v.control==="experiment"?"Zatrzymaj test, aby zmienić progi.":"");
+ $("am-g-status").textContent=g?(g.recovering?"ODZYSKIWANIE KOMFORTU / oczekiwanie":"Ochrona gotowa")+" · punkt odniesienia "+fmt(g.reference)+" °C · niedobór wody "+Math.round(g.water_seconds/60)+" min · chłodzenie domu "+Math.round(g.room_seconds/60)+" min · stabilizacja "+Math.round(g.recovery_seconds/60)+" min":"Brak odczytu";
+ $("am-g-deferred").textContent=g&&ex&&Array.isArray(g.deferred)?g.deferred.map((r,i)=>r?ex.levels[i]+": "+(r.reason==="room_shortfall"?"spadek komfortu":"nie osiąga nastawy")+" przy "+fmt(r.outdoor)+" °C"+(r.outdoor==null?" (brak świeżej temperatury; wymaga nowej próby ręcznej)":"; ponów od "+fmt(r.outdoor+c.retry_warmer)+" °C"):"").filter(Boolean).join(" · "):"";
+}
+for(const k of guardKeys)$("am-g-"+k).addEventListener("input",()=>{guardDirty=true;guardMsg="";guardPaint(amState||{});});
+$("am-g-cancel").addEventListener("click",()=>{guardDirty=false;guardMsg="";guardPaint(amState||{});});
+$("am-g-save").addEventListener("click",async()=>{
+ if(!guardBase||!amState||$("am-g-save").disabled)return;
+ const value={};
+ for(const k of guardKeys){const el=$("am-g-"+k);if(!el.checkValidity()||el.value.trim()===""){guardMsg="Nieprawidłowy próg";guardPaint(amState);return;}value[k]=Number(el.value);}
+ guardBusy=true;guardMsg="Zapisywanie…";guardPaint(amState);
+ const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),15000);
+ try{
+  const res=await fetch("./api/control",{method:"POST",credentials:"same-origin",cache:"no-store",headers:{"Content-Type":"application/json","X-HaierPi-CSRF":document.querySelector('meta[name="wv-csrf"]').content},body:JSON.stringify({key:"experiment_guard",value,expected:guardBase}),signal:ctrl.signal});
+  const body=res.redirected?{}:await res.json();
+  if(!res.ok||!body.accepted)throw Error(body.reason||"Zapis odrzucony (HTTP "+res.status+")");
+  guardDirty=false;guardMsg="Zapisano. Oczekiwanie na kolejny odczyt.";
+ }catch(e){guardMsg=e.message||"Niepotwierdzony zapis";}
+ finally{clearTimeout(timer);guardBusy=false;guardPaint(amState||{});}
+});
+"""
+    html=once(html,'function amPaint(a){',js+'\nfunction amPaint(a){')
+    html=once(html,' const ex=v.experiment;',' const ex=v.experiment;guardPaint(v);')
+    return html
+
+def winter_status_ui(html):
+    old='Konfiguracja ukończona: trzy zaakceptowane cykle albo osobna próba ciągła 3 h po stabilizacji.'
+    new='Konfiguracja ukończona: trzy czyste cykle albo sześć zapisanych okien po 30 min (również postoje i defrost).'
+    if old in html:
+        html=once(html,old,new)
+    for old,new in (
+        ("Bez wymuszania STOP; zwykła zmiana dopiero na naturalnym postoju.",
+         "Zmiana na potwierdzonym postoju lub podczas stabilnego CO. Pompa sama decyduje o START i STOP."),
+        ("Zwykłe zmiany testowe nadal tylko przy postoju. ", ""),
+        ("Zwykły eksperyment zmienia tryb przy potwierdzonym postoju; ochrona komfortu może zwiększyć moc podczas pracy; 3 cykle na konfigurację;",
+         "Test zmienia jeden parametr naraz i sprawdza odczyt zwrotny. Pomiar okien po 15 min stabilizacji;"),
+        ("Test aktywny – automatyczna zmiana konfiguracji przy postoju; ochrona komfortu włączona",
+         "Test aktywny – zmiany przy stabilnym CO lub na postoju"),
+    ):
+        html=html.replace(old,new)
+    if 'amWinterProgress' not in html:
+        line=next(l for l in html.splitlines() if '$("am-continuous-status").textContent=' in l)
+        html=once(html,line,''' const amWinterProgress=ex&&Array.isArray(ex.windows)?ex.windows:[];
+ const amWinterReasons={comfort_or_telemetry:"komfort lub dane",new_context_or_gap:"nowy kontekst / przerwa",weather_target_or_room_range:"zmiana warunków",priority_or_no_demand:"priorytet lub brak zapotrzebowania",insufficient_heating:"brak dostatecznej pracy CO"};
+ $("am-continuous-status").textContent=ex&&ex.since?"Bieżące okno: "+Math.round((ex.continuous_seconds||0)/60)+" / 30 min"+(ex.continuous_reason?" · "+(amWinterReasons[ex.continuous_reason]||ex.continuous_reason):"")+" · zapisane: "+ex.levels.map((label,i)=>label+" "+(continuous[i]?6:((amWinterProgress[i]||[]).length))+"/6").join(" | "):"";''')
+    # Upgrade the already installed winter UI as well as fresh installs.
+    old=' const reasons={comfort_or_telemetry:'
+    if old in html:
+        html=once(html,old,' const amWinterReasons={comfort_or_telemetry:')
+        html=once(html,'(reasons[ex.continuous_reason]||ex.continuous_reason)','(amWinterReasons[ex.continuous_reason]||ex.continuous_reason)')
+    html=html.replace('const amWinterReasons={comfort_or_telemetry:"komfort lub dane",new_context_or_gap:',
+                      'const amWinterReasons={comfort_or_telemetry:"komfort lub dane",settling:"15 min stabilizacji",new_context_or_gap:')
+    return html
+
+def continuous_ui(html):
+    if 'id="am-continuous-status"' in html:
+        return winter_status_ui(html)
+    html=once(html,'<p id="am-test-count"></p>','<p id="am-test-count"></p><p id="am-continuous-status"></p><small>Konfiguracja ukończona: trzy zaakceptowane cykle albo osobna próba ciągła 3 h po stabilizacji. Bez wymuszania STOP; zwykła zmiana dopiero na naturalnym postoju.</small>')
+    html=once(html,' $("am-test-count").textContent=total?done+" / "+total+" ukończonych cykli":"Brak danych";',''' const continuous=ex&&Array.isArray(ex.continuous)?ex.continuous:[];
+ const completed=ex?ex.counts.filter((n,i)=>n>=ex.per_level||continuous[i]).length:0;
+ const units=ex?ex.counts.reduce((a,n,i)=>a+(continuous[i]?ex.per_level:n),0):0;
+ $("am-test-progress").max=ex?ex.levels.length:6;
+ $("am-test-progress").value=completed;
+ $("am-test-count").textContent=ex?completed+" / "+ex.levels.length+" konfiguracji ukończonych · "+done+" pełnych cykli":"Brak danych";
+ $("am-continuous-status").textContent=ex&&ex.since?"Próba ciągła: "+Math.round((ex.continuous_seconds||0)/60)+" / 180 min"+(continuous.some(Boolean)?" · zaliczone: "+continuous.map((x,i)=>x?ex.levels[i]:"").filter(Boolean).join(", "):""):"";''')
+    return winter_status_ui(html)
+
+def guard_api(source):
+    if '    out["experiment_guard"]' in source:
+        return source
+    source=once(source,'    out["curve_settings"]=_am.curve_settings()','    out["curve_settings"]=_am.curve_settings()\n    out["experiment_guard"]=_am.guard_settings()')
+    source=once(source,'    if key=="curve_settings":\n        value=_am.validate_curve(value)', '''    if key=="experiment_guard":
+        validator=_am_sys.modules["_hpi_adaptive_policy"].ExperimentGuard.validate
+        value=validator(value)
+        expected=validator(expected)
+    elif key=="curve_settings":
+        value=_am.validate_curve(value)''')
+    source=once(source,'key not in ("adaptive_control","curve_settings")','key not in ("adaptive_control","curve_settings","experiment_guard")')
+    source=once(source,'            if key=="curve_settings":\n                try:', '''            if key=="experiment_guard":
+                try:
+                    _am.save_experiment_guard(value,expected)
+                except _am_sys.modules["_hpi_adaptive_runtime"].SelectionBlocked as exc:
+                    return reply({"accepted":False,"reason":str(exc)},409)
+            elif key=="curve_settings":
+                try:''')
+    return source
+
 def status_ui(html):
     old=' $("am-reason").textContent=v.fault||v.reason||"Brak odczytu.";'
     new=' $("am-reason").textContent=v.fault||v.reason_pl||v.reason||"Brak odczytu.";'
@@ -353,7 +466,89 @@ def status_ui(html):
  $("am-observer-diagnostics").textContent=diag?"Obserwator: "+(phases[diag.phase]||diag.phase)+(diag.blocker?" · "+reasonLabel(diag.blocker):"")+" · odrzucone próby: "+diag.rejected:"";
  $("am-observer-rejections").textContent=diag?Object.entries(diag.reasons||{}).sort((a,b)=>b[1]-a[1]).map(([k,n])=>reasonLabel(k)+": "+n).join(" · ")+(diag.last_rejection?" | ostatnia: "+reasonLabel(diag.last_rejection.reason)+(diag.last_rejection.detail?" ("+diag.last_rejection.detail+")":""):""):"";
  const hs=(x)=>''')
+    if 'id="am-storage-diagnostics"' not in html:
+        html=once(html,'<p id="am-experiment"></p>','<p id="am-experiment"></p><details><summary>Diagnostyka systemowa RAM / SD</summary><p id="am-storage-diagnostics"></p><p id="am-storage-files"></p><small>Zapisy procesu od uruchomienia, nie fizyczne zużycie karty SD. Bez zapisywania historii diagnostyki.</small></details>')
+        html=once(html,' const ex=v.experiment;', ''' const sd=v.storage_diagnostics||{};
+ const mib=x=>Number.isFinite(x)?(x/1048576).toFixed(2)+" MiB":"—";
+ $("am-storage-diagnostics").textContent="RAM: "+mib(sd.VmRSS_bytes)+" · maksimum: "+mib(sd.VmHWM_bytes)+" · wolne: "+mib(sd.disk_free_bytes)+" / "+mib(sd.disk_total_bytes)+" · zapisy procesu: "+mib(sd.write_bytes_bytes)+" · średnio: "+mib(sd.write_bytes_per_day)+"/dobę · wątki: "+(sd.threads??"—")+" · FD: "+(sd.open_fds??"—");
+ $("am-storage-files").textContent=Object.entries(sd.state_files||{}).map(([k,n])=>k+": "+mib(n)).join(" · ");
+ if(sd.serial && Object.keys(sd.serial).length){const x=sd.serial;$("am-storage-files").textContent+=" · RS485: "+x.valid+" poprawnych / "+x.crc_errors+" CRC / "+x.short_frames+" niepełnych / "+x.reconnects+" ponownych otwarć / "+x.write_timeouts+" timeoutów zapisu";}
+ const ex=v.experiment;''')
+    # Upgrade installed dashboards too, not only new installations.
+    if "sd.write_bytes_per_day" not in html:
+        html=once(html,'+" · zapisy procesu: "+mib(sd.write_bytes_bytes);','+" · zapisy procesu: "+mib(sd.write_bytes_bytes)+" · średnio: "+mib(sd.write_bytes_per_day)+"/dobę · wątki: "+(sd.threads??"—")+" · FD: "+(sd.open_fds??"—");')
+    if "sd.serial &&" not in html:
+        html=once(html,' $("am-storage-files").textContent=Object.entries(sd.state_files||{}).map(([k,n])=>k+": "+mib(n)).join(" · ");', ''' $("am-storage-files").textContent=Object.entries(sd.state_files||{}).map(([k,n])=>k+": "+mib(n)).join(" · ");
+ if(sd.serial && Object.keys(sd.serial).length){const x=sd.serial;$("am-storage-files").textContent+=" · RS485: "+x.valid+" poprawnych / "+x.crc_errors+" CRC / "+x.short_frames+" niepełnych / "+x.reconnects+" ponownych otwarć / "+x.write_timeouts+" timeoutów zapisu";}''')
+    # Presentation only: keep control values and runtime policy unchanged.
+    if 'id="am-test-progress"' not in html:
+        html=html.replace('Auto – eksperymentalne</option>', 'Auto – regulacja adaptacyjna</option>')
+        html=html.replace('Eksperyment – rozpocznij / wznów</option>', 'Test aktywny – rozpocznij / wznów</option>')
+        html=html.replace('Eksperyment – od nowa</option>', 'Test aktywny – od nowa</option>')
+        html=html.replace('Auto jest eksperymentalne.', 'Auto reguluje moc; Test aktywny porównuje konfiguracje. Obserwacja nie zmienia konfiguracji przez Adaptive.')
+        html=once(html,'<p id="am-experiment"></p>','<p id="am-experiment"></p><p id="am-test-status" role="status"></p><label>Postęp testu <progress id="am-test-progress" max="18" value="0" style="width:100%"></progress></label><p id="am-test-count"></p><small>Aby przerwać test, wybierz inny tryb sterowania. Zapisany postęp można wznowić.</small>')
+        html=once(html,' const ex=v.experiment;', ''' const ex=v.experiment;
+ const total=ex&&Array.isArray(ex.levels)?ex.levels.length*ex.per_level:0;
+ const done=ex&&Array.isArray(ex.counts)?ex.counts.reduce((a,b)=>a+b,0):0;
+ $("am-test-progress").max=total||18;
+ $("am-test-progress").value=done;
+ $("am-test-count").textContent=total?done+" / "+total+" ukończonych cykli":"Brak danych";
+ $("am-test-status").textContent=!amState?"Brak odczytu":v.control==="experiment"?(v.activation_blocker?"Test wybrany – "+v.activation_blocker:"Test aktywny – automatyczna zmiana konfiguracji przy postoju"):v.control==="auto"?"Auto – regulacja adaptacyjna, nie test":ex&&ex.resume_available?"Test nieaktywny – można wznowić":"Test nieaktywny";''')
+        html=html.replace('auto:"Adaptive Auto",experiment:"Eksperyment"', 'auto:"Regulacja adaptacyjna",experiment:"Test aktywny"')
+    if 'id="am-recent-decisions"' not in html:
+        html=once(html,'<p id="am-experiment"></p>','<p id="am-experiment"></p><details id="am-recent-decisions"><summary>Ostatnie decyzje i potwierdzenia</summary><button id="am-decisions-refresh">Odśwież decyzje</button><p id="am-decisions-status" role="status"></p><ol id="am-decisions-list"></ol><small>Ostatnie 10 zdarzeń z istniejącego raportu. Odczyt na żądanie, bez dodatkowych zapisów.</small></details>')
+        html=once(html,'function amPaint(a){', '''async function amRefreshDecisions(){
+ const b=$("am-decisions-refresh"),status=$("am-decisions-status"),list=$("am-decisions-list");
+ if(b.disabled)return;
+ b.disabled=true;list.replaceChildren();status.textContent="Odczyt…";
+ const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),10000);
+ try{
+  const r=await fetch("/v2/api/adaptive-report",{cache:"no-store",credentials:"same-origin",signal:ctrl.signal});
+  if(!r.ok||r.redirected)throw Error("Brak dostępu do raportu");
+  const d=await r.json(),events=Array.isArray(d.events)?d.events.slice(-10).reverse():[];
+  for(const e of events){
+   const li=document.createElement("li");
+   li.textContent=new Date(e.at*1000).toLocaleString()+" · "+e.kind+" · "+e.owner+" · "+e.detail;
+   list.append(li);
+  }
+  status.textContent=events.length?"Odczyt: "+new Date().toLocaleTimeString():"Brak zdarzeń";
+ }catch(e){status.textContent="Nie udało się odczytać decyzji: "+e.message;}
+ finally{clearTimeout(timer);b.disabled=false;}
+}
+$("am-decisions-refresh").addEventListener("click",amRefreshDecisions);
+$("am-recent-decisions").addEventListener("toggle",()=>{if($("am-recent-decisions").open)amRefreshDecisions();});
+function amPaint(a){''')
     html=html.replace("Legacy pozostaje domyślne po restarcie.","Zapisany Auto wraca po restarcie po weryfikacji danych.")
+    html=continuous_ui(guard_ui(html))
+    # Boot continuation is also applied when migrating an installed page.
+    html=html.replace('Auto po restarcie</span>', 'Sterowanie po restarcie</span>')
+    html=html.replace('Anuluj wznowienie Auto', 'Anuluj wznowienie')
+    html=html.replace('Po restarcie wybierz Eksperyment, aby wznowić zapisane cykle; nie wznawia się sam.', 'Aktywny test wznawia się po restarcie po sprawdzeniu świeżych danych. Zatrzymany ręcznie nie wznawia się sam. Niedokończone okno zachowuje zmierzony czas, jeśli warunki pozostają zgodne; przerwa nie jest liczona.')
+    html=html.replace('v.auto_resume_pending?"Oczekuje na dane":v.control==="auto"?"Zapamiętane":"Wyłączone"', 'v.experiment_resume_pending?"Test – oczekuje na dane":v.auto_resume_pending?"Auto – oczekuje na dane":["auto","experiment"].includes(v.control)?"Zapamiętane":"Wyłączone"')
+    html=html.replace('||!v.auto_resume_pending;', '||!(v.auto_resume_pending||v.experiment_resume_pending);')
+    html=html.replace('&&amState.auto_resume_pending)))', '&&(amState.auto_resume_pending||amState.experiment_resume_pending))))')
+    if 'v.experiment_resume_pending?"Automatyczne wznowienie oczekuje na dane"' not in html:
+        html=html.replace('ex.resume_available?"Zapisana sesja gotowa do ręcznego wznowienia"', 'v.experiment_resume_pending?"Automatyczne wznowienie oczekuje na dane":ex.resume_available?"Zapisana sesja gotowa do ręcznego wznowienia"')
+    if 'id="am-window-checkpoint"' not in html:
+        html=once(html,'<p id="am-experiment-checkpoint"></p>','<p id="am-experiment-checkpoint"></p><p id="am-window-checkpoint"></p>')
+        html=once(html,' $("am-experiment-checkpoint").textContent=', ' $("am-window-checkpoint").textContent=ex&&ex.checkpoint_seconds>0?"Zapis okna: "+fmt(ex.checkpoint_seconds/60)+" / 30 min"+(ex.restoring_window?" · oczekiwanie na stabilizację po restarcie":""):"";\n $("am-experiment-checkpoint").textContent=')
+
+    # Upgrade legacy descriptions on existing installations too.
+    html=html.replace("Eksperyment zmienia tryb i FLimit tylko przy potwierdzonym postoju; 3 cykle na konfigurację, maks. 7 dni;", "Test zmienia tryb i FLimit na potwierdzonym postoju lub podczas stabilnego CO; 3 cykle albo 6 okien na konfigurację, maks. 7 dni;")
+    html=html.replace("Eksperyment zmienia tryb i FLimit tylko przy potwierdzonym postoju; 3 cykle na konfigurację, bez limitu czasu;", "Test zmienia tryb i FLimit na potwierdzonym postoju lub podczas stabilnego CO; 3 cykle albo 6 okien na konfigurację;")
+    html=html.replace("STOP.Aby", "STOP. Aby")
+    html=html.replace("sesji.Eksperyment", "sesji. Eksperyment")
+    if 'id="am-capacity-state"' not in html:
+        html=once(html,'<p id="am-reason"', '<div class="metric"><span>Sprężarka Fact / Fset</span><strong id="am-capacity-freq">—</strong></div><div class="metric"><span>Limit odniesienia / wykorzystanie Fact</span><strong id="am-capacity-limit">—</strong></div><div class="metric"><span>Nastawa minus Two</span><strong id="am-capacity-deficit">—</strong></div><div class="metric"><span>Ocena pracy CO</span><strong id="am-capacity-state">—</strong></div><div class="metric"><span>Czas bieżącego stanu (test)</span><strong id="am-capacity-time">—</strong></div><small>Limit odniesienia z historii tej instalacji, nie fabryczna gwarancja. Niedobór oznacza różnicę temperatur; nie jest pomiarem mocy cieplnej. Czas stanu liczony od ostatniej zmiany lub przerwy w danych.</small><p id="am-reason"')
+        html=once(html,' $("am-reason").textContent=v.fault||v.reason_pl||v.reason||"Brak odczytu.";',''' const cap=v.capacity_live;
+ const capLabels={unavailable:"Poza oceną CO / brak danych",idle:"Postój",transition:"Rozruch / zmiana obrotów",unknown_limit:"Nieznany limit",modulating_sufficient:"Modulacja – bez niedoboru Two",modulating_shortfall:"Modulacja – niedobór Two",limited_sufficient:"Na limicie – bez niedoboru Two",limited_shortfall:"Na limicie – niedobór Two"};
+ const capNum=(x,d=0)=>Number.isFinite(x)?x.toFixed(d).replace(".",","):"—";
+ $("am-capacity-freq").textContent=cap?capNum(cap.fact)+" / "+capNum(cap.fset)+" Hz":"—";
+ $("am-capacity-limit").textContent=cap?capNum(cap.limit_hz)+" Hz / "+capNum(cap.utilization_pct)+"%":"—";
+ $("am-capacity-deficit").textContent=cap&&Number.isFinite(cap.deficit_k)?capNum(cap.deficit_k,1)+" K":"—";
+ $("am-capacity-state").textContent=cap?(capLabels[cap.state]||"—"):"—";
+ $("am-capacity-time").textContent=cap&&Number.isFinite(cap.state_seconds)?capNum(cap.state_seconds/60,1)+" min":"—";
+ $("am-reason").textContent=v.fault||v.reason_pl||v.reason||"Brak odczytu.";''')
     return html
 
 def report_api(source):
@@ -387,6 +582,64 @@ const run=el("run-kpis");run.replaceChildren();const st=d.current_streak;
 for(const [a,b] of [["Bieżąca ciągła praca Auto",st&&st.owner==="auto"?num(st.seconds/3600,2)+" h":"—"],["Rekord Auto",auto.max_continuous_s?num(auto.max_continuous_s/3600,2)+" h":"—"],["Rekord Legacy",owners.legacy&&owners.legacy.max_continuous_s?num(owners.legacy.max_continuous_s/3600,2)+" h":"—"],["Auto – godziny ponad 1 h ciągłości",num(auto.beyond_hour_s/3600,2)+" h"],["Auto – czas pracy Fact",num(auto.running_s/3600,2)+" h"]]){const k=node("div");k.className="kpi";k.append(node("small",a),node("b",b));run.append(k)}
 const ts=(d.thresholds?d.thresholds.groups:[]).flatMap(g=>(g.samples||[]).map(x=>[x.at,g.edge,g.preset,g.flimit?"ON":"OFF",g.target_band,x.twi_offset,x.two_offset]));ts.sort((a,b)=>b[0]-a[0]);table("threshold-samples",["Czas","Przejście","Tryb","FLimit","Nastawa od °C","Twi K","Two K"],ts.map(x=>[dt(x[0]),...x.slice(1,5),num(x[5],3),num(x[6],3)]));''')
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'id="experiment-comparison"' not in html:
+        html=once(html,'<article><h2>Uczenie</h2>','<article><h2>Porównanie konfiguracji testu aktywnego</h2><p id="experiment-comparison-status"></p><div class="scroll"><table id="experiment-comparison"></table></div><small>Mediany z zapisanych zaakceptowanych cykli sesji. Fact przy STOP, nie średnia częstotliwość pracy. Brak danych nie oznacza zera. Nie jest to ranking COP ani zużycia energii.</small></article><article><h2>Uczenie</h2>')
+        html=once(html,'const run=el("run-kpis");', '''const ec=d.experiment_comparison;
+el("experiment-comparison-status").textContent=ec&&ec.since?"Sesja od "+dt(ec.since):"Brak sesji";
+const ecNum=(x,k=1)=>x==null?"—":num(x*k,2);
+table("experiment-comparison",["Tryb","FLimit","Postęp","Zachowane cykle","Praca min","Fact STOP Hz","Delta T STOP K"],ec?ec.rows.map(x=>[x.mode,x.flimit?"ON":"OFF",x.completed+"/"+ec.per_level,x.retained,ecNum(x.run_seconds,1/60),ecNum(x.stop_fact),ecNum(x.stop_delta)]):[]);
+const run=el("run-kpis");''')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if "ec.assessment" not in html:
+        html=once(html,'ec&&ec.since?"Sesja od "+dt(ec.since):"Brak sesji"','ec&&ec.since?"Sesja od "+dt(ec.since)+(ec.assessment?" · "+ec.assessment:"")+(ec.outdoor_spread!=null?" · rozpiętość temperatur "+num(ec.outdoor_spread,1)+" K":""):"Brak sesji"')
+        html=once(html,'["Tryb","FLimit","Postęp","Zachowane cykle","Praca min","Fact STOP Hz","Delta T STOP K"],ec?ec.rows.map(x=>[x.mode,x.flimit?"ON":"OFF",x.completed+"/"+ec.per_level,x.retained,ecNum(x.run_seconds,1/60),ecNum(x.stop_fact),ecNum(x.stop_delta)]):[]','["Tryb","FLimit","Postęp","Zachowane cykle","Praca min","Fact STOP Hz","Delta T STOP K","Na zewnątrz °C","Cykle <10 min"],ec?ec.rows.map(x=>[x.mode,x.flimit?"ON":"OFF",x.completed+"/"+ec.per_level,x.retained,ecNum(x.run_seconds,1/60),ecNum(x.stop_fact),ecNum(x.stop_delta),ecNum(x.outdoor),x.duration_samples?x.short_cycles+"/"+x.duration_samples:"—"]):[]')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'id="experiment-guard-report"' not in html:
+        html=once(html,'<p id="experiment-comparison-status">','<p id="experiment-guard-report"></p><p id="experiment-comparison-status">')
+        html=once(html,'const run=el("run-kpis");','''const eg=ec&&ec.guard;
+el("experiment-guard-report").textContent=eg?(eg.recovering?"Ochrona komfortu aktywna. ":"")+ec.rows.map(x=>x.deferred?x.mode+(x.flimit?" + FLimit":" / OFF")+": "+(x.deferred.reason==="room_shortfall"?"spadek komfortu":"niedobór Two")+" przy "+ecNum(x.deferred.outdoor)+" °C":"").filter(Boolean).join(" · "):"";
+const run=el("run-kpis");''')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'id="experiment-continuous-report"' not in html:
+        html=once(html,'<p id="experiment-comparison-status">','<h3>Próby ciągłe (oddzielnie od cykli)</h3><div class="scroll"><table id="experiment-continuous-report"></table></div><small>3 h normalnej eksploatacji po 15 min stabilizacji, z postojami i odszranianiem. COP netto dotyczy tylko zmierzonych przedziałów.</small><p id="experiment-comparison-status">')
+        html=once(html,'const run=el("run-kpis");','''table("experiment-continuous-report",["Tryb","Czas min","Pogoda °C","Nastawa °C","Dom °C","Prąd kWh","Ciepło netto kWh","Pokrycie czasu %","COP próbek"],ec?ec.rows.filter(x=>x.continuous).map(x=>{const c=x.continuous,e=c.energy;return [x.mode+(x.flimit?" + FLimit":" / OFF"),ecNum(c.seconds,1/60),ecNum(c.outdoor_min)+" – "+ecNum(c.outdoor_max),ecNum(c.target_min)+" – "+ecNum(c.target_max),ecNum(c.room_min)+" – "+ecNum(c.room_max),ecNum(e&&e.kwh),ecNum(e&&e.net_heat_kwh),ecNum(e&&e.time_fraction,100),ecNum(e&&e.cop_net)]}):[]);
+const run=el("run-kpis");''')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'winterWindowRows' not in html:
+        old='Stabilne 3 h pracy bez STOP i defrostu, po 15 min stabilizacji; COP dotyczy tylko zmierzonych przedziałów. Nie zastępuje bilansu z defrostem.'
+        new='3 h normalnej eksploatacji po 15 min stabilizacji, z postojami i odszranianiem. COP netto dotyczy tylko zmierzonych przedziałów.'
+        note='Sześć okien po 30 min; zapis po każdym oknie, przerwy nie są wliczane. COP netto tylko przy dostatecznym pokryciu i podobnych warunkach; starty i defrosty są obserwowanymi przejściami.'
+        html=once(html,old if old in html else new,note)
+        line_js=next(l for l in html.splitlines() if 'table("experiment-continuous-report",' in l)
+        html=once(html,line_js,'''const winterWindowRows=ec?ec.rows.flatMap(x=>x.continuous?[{x,c:x.continuous,label:"Suma"}]:(x.windows||[]).map((c,i)=>({x,c,label:"Okno "+(i+1)}))):[];
+table("experiment-continuous-report",["Tryb","Próba","Min","Pogoda °C","Nastawa °C","Dom °C","Starty","Krótkie","Defrosty","Defrost min","Prąd kWh","Defrost kWh","Ciepło netto kWh","Pokrycie %","COP netto"],winterWindowRows.map(({x,c,label})=>{const e=c.energy;return [x.mode+(x.flimit?" + FLimit":" / OFF"),label,ecNum(c.seconds,1/60),ecNum(c.outdoor_min)+" – "+ecNum(c.outdoor_max),ecNum(c.target_min)+" – "+ecNum(c.target_max),ecNum(c.room_min)+" – "+ecNum(c.room_max),ecNum(c.starts),ecNum(c.short_cycles),ecNum(c.defrosts),ecNum(c.defrost_seconds,1/60),ecNum(e&&e.kwh),ecNum(e&&e.defrost_kwh),ecNum(e&&e.net_heat_kwh),ecNum(e&&e.time_fraction,100),ecNum(e&&e.cop_net)]}));''')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'id="passive-diagnostics"' not in html:
+        html=once(html,'<article><h2>Uczenie</h2>','<article><h2>Diagnostyka i obserwacja budynku</h2><p id="passive-diagnostics"></p><p id="building-trend"></p><small>Trend temperatury pomieszczenia z maksymalnie 120 świeżych przedziałów w RAM. Nie jest modelem strat ciepła ani podstawą automatycznego sterowania.</small></article><article><h2>Uczenie</h2>')
+        html=once(html,'const run=el("run-kpis");', '''const pd=d.diagnostics,bt=pd&&pd.building;
+el("passive-diagnostics").textContent=pd?(pd.warnings.join(" · ")||"Brak wykrytych ostrzeżeń"):"Brak danych";
+el("building-trend").textContent=bt?"Próbki: "+bt.samples+" · pokrycie "+num(bt.coverage_seconds/60,1)+" min · trend "+(bt.room_trend_k_h==null?"za mało danych":num(bt.room_trend_k_h,2)+" K/h")+" · różnica wewnątrz/zewnątrz "+(bt.indoor_outdoor_delta==null?"—":num(bt.indoor_outdoor_delta,1)+" K"):"Brak danych";
+const run=el("run-kpis");''')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'id="passive-insights"' not in html:
+        html=once(html,'<article><h2>Uczenie</h2>','<article id="passive-insights"><h2>Wnioski i stabilność</h2><p id="experiment-insights"></p><h3>Ogrzewanie i stygnięcie (do 7 dni)</h3><div id="thermal-insights"></div><h3>Odszranianie (24 h)</h3><p id="defrost-insights"></p><h3>Zasoby procesu</h3><div class="scroll"><table id="stability-insights"></table></div><small>Historia tylko w RAM, od restartu. Okna 30 min po 10 min ustalenia stanu. Wychładzanie uwzględnia bezwładność instalacji i zyski ciepła. Brak danych nie jest zerem. Nie jest to pomiar COP, mocy ani zużycia fizycznego SD.</small></article><article><h2>Uczenie</h2>')
+        html=once(html,'const run=el("run-kpis");', '''const pi=d.diagnostics&&d.diagnostics.insights;
+el("experiment-insights").textContent=ec&&ec.observations?ec.observations.join(" · "):"Brak wniosków";
+const thermal=pi&&pi.thermal,fmtInsight=(x,k=1)=>x==null?"—":num(x*k,2);
+el("thermal-insights").textContent=thermal?["Praca: "+thermal.run.windows+" okien, "+fmtInsight(thermal.run.median_k_h)+" K/h","Postój: "+thermal.idle.windows+" okien, "+fmtInsight(thermal.idle.median_k_h)+" K/h","Orientacyjna skala stygnięcia: "+fmtInsight(thermal.cooling_proxy_h)+" h ("+thermal.cooling_windows+" okien)"].join(" · "):"Brak danych";
+const df=pi&&pi.defrost_24h;
+el("defrost-insights").textContent=df?df.completed+" pełnych obserwowanych odszronień · mediana "+fmtInsight(df.median_seconds,1/60)+" min · do ponownej pracy CO "+fmtInsight(df.recovery_median_seconds,1/60)+" min ("+df.recovery_samples+" pomiarów)":"Brak danych";
+const deltaInsight=(o,k=1)=>o?fmtInsight(o.delta,k)+" / max "+fmtInsight(o.peak,k):"—";
+table("stability-insights",["Okno","Próbki","Pokrycie h","Status","RAM Δ / max MiB","Wątki Δ / max","FD Δ / max","Zapisy MiB/d"],pi?[["24 h",pi.stability_24h],["7 dni",pi.stability_7d]].map(([label,x])=>[label,x.samples,fmtInsight(x.span_seconds,1/3600),x.complete?"pełne":"niepełne",deltaInsight(x.VmRSS_bytes,1/1048576),deltaInsight(x.threads),deltaInsight(x.open_fds),fmtInsight(x.write_bytes_per_day,1/1048576)]):[]);
+const run=el("run-kpis");''')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
     if 'id="operation-24h"' not in html:
         html=once(html,'<article><h2>Uczenie</h2>','<article><h2>Ostatnie 24 godziny — wszystkie tryby</h2><p id="operation-window"></p><div class="grid" id="operation-24h"></div><small>96 zakończonych kwadransów UTC, do 15 min opóźnienia. Szacunki z kolejnych świeżych próbek; nieznany czas nie oznacza postoju. Starty według Fact. Odszranianie i CWU wg wskazań sterownika, nie pomiar energii.</small></article><article><h2>Uczenie</h2>')
         html=once(html,'const run=el("run-kpis");', '''const op=d.operation_24h,opGrid=el("operation-24h");opGrid.replaceChildren();
@@ -394,6 +647,20 @@ el("operation-window").textContent=op?dt(op.window_start)+" → "+dt(op.window_e
 if(op){const hours=x=>num(x/3600,2)+" h", st=op.states||{};for(const [a,b] of [["Pokrycie danych",hours(op.coverage_s)],["Brak danych",hours(op.missing_s)],["Praca sprężarki Fact",hours(op.compressor_s)],["Starty sprężarki",op.starts],["Starty CO",op.co_starts],["CO – praca",hours(st.co_run)],["CO – postój",hours(st.co_idle)],["Odszranianie",hours(st.defrost)],["Starty odszraniania",op.defrost_starts],["CWU",hours(st.dhw)],["Ochrona / serwis",hours(st.protection)],["Błąd / inne",hours((st.fault||0)+(st.other||0))]]){const k=node("div");k.className="kpi";k.append(node("small",a),node("b",String(b)));opGrid.append(k)}}
 const run=el("run-kpis");''')
         # Re-read the current line after the preceding performance upgrade.
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'id="defrost-heater-groups"' not in html:
+        html=once(html,'<p id="defrost-insights"></p>','<p id="defrost-insights"></p><div class="scroll"><table id="defrost-heater-groups"></table></div><small>Pełne cykle CO z obserwowanym A4A; brak zaobserwowanego ON nie dowodzi braku zasilania. Czas ON to suma odstępów pomiędzy próbkami ON. Cykle z luką są odrzucane. Historia w RAM, nie pomiar energii.</small>')
+        html=once(html,'const deltaInsight=(o,k=1)=>', '''const dhg=df&&df.by_heater;
+table("defrost-heater-groups",["Sygnał grzałki A4A","Pełne cykle","Mediana min","Obserwowane ON min","Powrót CO min"],dhg?[["heater_seen","Zaobserwowano ON"],["heater_not_seen","Nie zaobserwowano ON"],["unknown","Niepełne dane A4A"]].map(([key,label])=>{const x=dhg[key];return [label,x.completed,fmtInsight(x.median_seconds,1/60),key==="unknown"?"—":fmtInsight(x.heater_on_observed_seconds,1/60),fmtInsight(x.recovery_median_seconds,1/60)]}):[]);
+const deltaInsight=(o,k=1)=>''')
+        line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    if 'id="defrost-trace-status"' not in html:
+        html=once(html,'<table id="defrost-heater-groups"></table></div>','<table id="defrost-heater-groups"></table></div><p id="defrost-trace-status"></p><small>Rejestrator pasywny: próbki co najmniej 5 s od siebie, tylko gdy wszystkie potrzebne banki są nowe; do 60 s przed i po cyklu. 16 ostatnich zapisów, również niepełnych. Szczegóły w pliku .adaptive-defrost-trace-v1.json. Bez dodatkowych zapytań do pompy.</small>')
+        html=once(html,'const deltaInsight=(o,k=1)=>', '''const tr=d.defrost_trace;
+el("defrost-trace-status").textContent=tr?"Ślady defrostu: "+tr.saved_traces+(tr.active?" · rejestracja trwa":"")+(tr.unsaved?" · oczekuje na zapis":"")+(tr.storage_error?" · "+tr.storage_error:""):"Brak rejestratora";
+const deltaInsight=(o,k=1)=>''')
         line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
         source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
     if 'elif kind=="threshold_samples":' not in source:
@@ -407,8 +674,41 @@ const run=el("run-kpis");''')
         source=once(source,'"completed","run_s"]+["level_"','"completed","run_s","max_continuous_s","beyond_hour_s"]+["level_"')
     return source
 
+def registers_page_api(source):
+    if 'def _wv_registers_page():' not in source:
+        source=once(source,"# HOME-IOT WEB UI V2 END","_WV_REGISTERS_HTML = \"<!doctype html><html lang=\\\"pl\\\"><head><meta charset=\\\"utf-8\\\"><meta name=\\\"viewport\\\" content=\\\"width=device-width,initial-scale=1\\\"><title>Rejestry RS485</title><style>:root{color-scheme:light dark}body{font:15px system-ui;max-width:1180px;margin:auto;padding:16px}table{border-collapse:collapse;width:100%}td,th{padding:7px;text-align:left;border-bottom:1px solid #8885}th{position:sticky;top:0;background:Canvas}section{overflow:auto}button{padding:8px}small{opacity:.8}code{white-space:nowrap}h1{font-size:24px}h2{font-size:18px}</style></head><body><p><a href=\\\"/v2\\\">Panel HaierPi</a> · <a href=\\\"/v2/adaptive-report\\\">Raport Adaptive</a></p><h1>Rejestry RS485 – diagnostyka</h1><p>Tylko odczyt z istniejących ramek. Nie wysyła zapytań ani poleceń do pompy. Działa również w trybie Legacy i Manual.</p><button id=\\\"refresh\\\">Odśwież</button> <a href=\\\"/v2/api/registers\\\">JSON</a> · <a href=\\\"/v2/api/adaptive-report.csv?kind=register_changes\\\">CSV zmian</a><p id=\\\"status\\\">Oczekiwanie</p><h2>Interpretacja sygnałów</h2><p>Znane = dekodowane przez PyHaier; kandydat = opis z innych projektów, do sprawdzenia na tej pompie; nieznane = bez interpretacji. H/L: starszy/młodszy bajt.</p><section><table id=\\\"signals\\\"></table></section><h2>Wszystkie 45 rejestrów (adresy dziesiętne)</h2><section><table id=\\\"registers\\\"></table></section><h2>Historia zmian (próbki zdarzeniowe, maks. 256)</h2><p>Nie jest to pełny zapis transmisji: zmiany pomiędzy próbkami mogą być pominięte. Zapis co 30 minut.</p><section><table id=\\\"history\\\"></table></section><script>\\n\\\"use strict\\\";\\nconst el=id=>document.getElementById(id);\\nfunction table(id,head,rows){const t=el(id);t.replaceChildren();const h=document.createElement(\\\"thead\\\"),b=document.createElement(\\\"tbody\\\");function row(parent,tag,values){const tr=document.createElement(\\\"tr\\\");for(const v of values){const td=document.createElement(tag);td.textContent=v==null?\\\"—\\\":String(v);tr.append(td)}parent.append(tr)}row(h,\\\"th\\\",head);for(const r of rows)row(b,\\\"td\\\",r);t.append(h,b)}\\nconst hex=(n,width=4)=>\\\"0x\\\"+n.toString(16).toUpperCase().padStart(width,\\\"0\\\");\\nconst show=v=>typeof v===\\\"boolean\\\"?(v?\\\"ON\\\":\\\"OFF\\\"):Array.isArray(v)?v.join(\\\", \\\"):v;\\nconst quality={known:\\\"Znane\\\",candidate:\\\"Kandydat\\\",unknown:\\\"Nieznane\\\"};\\nlet busy=false;\\nasync function refresh(){if(busy)return;busy=true;try{const r=await fetch(\\\"/v2/api/registers\\\",{cache:\\\"no-store\\\",credentials:\\\"same-origin\\\"});if(!r.ok||r.redirected)throw Error(\\\"Brak dostępu\\\");const d=await r.json();el(\\\"status\\\").textContent=(d.fresh?\\\"Świeże dane\\\":\\\"Brak świeżych danych\\\")+\\\" · \\\"+d.rows.length+\\\"/45 · historia \\\"+d.events.length+\\\"/\\\"+d.limit+(d.unsaved?\\\" · RAM\\\":\\\"\\\")+(d.storage_error?\\\" · \\\"+d.storage_error:\\\"\\\");table(\\\"signals\\\",[\\\"Sygnał\\\",\\\"Pole\\\",\\\"Wartość\\\",\\\"Pewność\\\",\\\"Opis\\\"],d.signals.map(s=>[s.label,s.address,show(s.value),quality[s.quality],s.description]));table(\\\"registers\\\",[\\\"Rejestr\\\",\\\"DEC\\\",\\\"HEX\\\",\\\"H\\\",\\\"L\\\",\\\"Bity 15…0\\\",\\\"Bity ON\\\",\\\"Opis\\\"],d.rows.map(s=>[\\\"R\\\"+s.register,s.value,hex(s.value),hex(s.high,2),hex(s.low,2),s.value.toString(2).padStart(16,\\\"0\\\"),s.bits.join(\\\", \\\"),s.description]));table(\\\"history\\\",[\\\"Czas\\\",\\\"Typ\\\",\\\"Rejestr\\\",\\\"Przed\\\",\\\"Po\\\",\\\"Bity ON\\\",\\\"Bity OFF\\\"],d.events.slice().reverse().flatMap(e=>e.changes.map(c=>[new Date(e.at*1000).toLocaleString(),e.kind,\\\"R\\\"+c.register,hex(c.before),hex(c.after),c.set_bits.join(\\\",\\\"),c.cleared_bits.join(\\\",\\\")])))}catch(e){el(\\\"status\\\").textContent=\\\"Błąd odczytu: \\\"+e.message;table(\\\"signals\\\",[\\\"Sygnał\\\"],[]);table(\\\"registers\\\",[\\\"Rejestr\\\"],[])}finally{busy=false}}\\nel(\\\"refresh\\\").addEventListener(\\\"click\\\",refresh);refresh();setInterval(refresh,10000);\\n</script></body></html>\"\n\n@app.route(\"/v2/registers\", methods=[\"GET\"])\n@login_required\ndef _wv_registers_page():\n    return _wv_headers(_wv_Response(_WV_REGISTERS_HTML,mimetype=\"text/html\"))\n\n@app.route(\"/v2/api/registers\", methods=[\"GET\"])\n@login_required\ndef _wv_registers_json():\n    return _wv_headers(_wv_jsonify(_am.register_view()))\n\n"+"# HOME-IOT WEB UI V2 END")
+    line=next(l for l in source.splitlines() if l.startswith("_WV_HTML = "))
+    html=ast.literal_eval(line.split("=",1)[1].strip())
+    if 'href="/v2/registers"' not in html:
+        anchor='<a href="/v2/adaptive-report">Raport Adaptive →</a>'
+        html=once(html,anchor,anchor+' · <a href="/v2/registers">Rejestry RS485 →</a>')
+        source=once(source,line,"_WV_HTML = "+repr(html))
+    return source
+
+def capacity_report_api(source):
+    line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+    html=ast.literal_eval(line.split("=",1)[1].strip())
+    if 'id="capacity-profile"' not in html:
+        html=once(html,'<article><h2>Wyuczone konteksty</h2>','<article><h2>Charakterystyka wydajności CO — uczenie pasywne</h2><p id="capacity-learning-status"></p><div class="scroll"><table id="capacity-profile"></table></div><small>Zakresy temperatur co 2 K, po 15 min stabilizacji, bez CWU, defrostu i luk danych. Auto pomija opcjonalną redukcję, gdy w danym kontekście zgromadzono co najmniej 3 h obserwacji, w tym 30 min i 20% czasu na limicie z niedoborem Two >= 2 K, z ostatnim pomiarem w ciągu 30 dni. Nie blokuje ochrony przed STOP ani zwiększania mocy. Dane nie są pomiarem COP.</small></article><article><h2>Wyuczone konteksty</h2>')
+        html=once(html,'function paint(d){','''function paint(d){
+const capacity=d.capacity_learning;
+el("capacity-learning-status").textContent=capacity?capacity.contexts+" kontekstów · "+num(capacity.hours)+" h ważonych obserwacji"+(capacity.unsaved?" · RAM":"")+(capacity.storage_error?" · błąd zapisu: "+capacity.storage_error:""):"Brak danych";
+table("capacity-profile",["Zewn. od °C","Nastawa od °C","Tryb","Godziny","Fact / Fset Hz","Na limicie %","Niedobór %","Limit + niedobór min","Śr. niedobór K","Ostatni pomiar"],(capacity?capacity.rows:[]).map(r=>[r.outdoor_band,r.target_band,r.mode+(r.flimit?" + FLimit":" / OFF"),num(r.seconds/3600),num(r.mean_fact)+"/"+num(r.mean_fset),num(r.limited_pct),num(r.shortfall_pct),num(r.limited_shortfall_seconds/60),num(r.mean_deficit,2),dt(r.last)]));''')
+        source=once(source,line,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+    html=html.replace("3 h obserwacji, w tym 30 min", "3 h ważonych obserwacji, w tym 30 min")
+    if "Waga obserwacji maleje o połowę co 30 dni." not in html:
+        html=html.replace("Dane nie są pomiarem COP.", "Dane nie są pomiarem COP. Waga obserwacji maleje o połowę co 30 dni.")
+    if 'id="energy-climate-history"' not in html:
+        html=once(html,'<article><h2>Wyuczone konteksty</h2>','<article><h2>Historia energetyczna CO</h2><p id="energy-climate-status"></p><div class="scroll"><table id="energy-climate-history"></table></div><small>COP szacunkowy, szczególnie przy ręcznie zadanym przepływie. Bilans obejmuje dostępne próbki CO, postojów i defrostu, nie pełne zużycie sezonowe. Nie służy do automatycznego wyboru trybu. Zmiana konfiguracji pomiarów rozpoczyna nową historię.</small></article><article><h2>Wyuczone konteksty</h2>')
+        html=once(html,'function paint(d){','''function paint(d){
+const eh=d.energy&&d.energy.climate_history;
+el("energy-climate-status").textContent=eh?eh.contexts+" kontekstów · "+(eh.flow_estimated?"przepływ ręczny — COP szacunkowy":"przepływ z czujnika lub brak pomiaru")+(eh.electricity_estimated?" · energia z całkowania mocy":" · licznik energii")+(eh.unsaved?" · RAM":"")+(eh.storage_error?" · błąd zapisu: "+eh.storage_error:""):"Brak danych";
+table("energy-climate-history",["Zewn. od °C","Nastawa od °C","Tryb","Godziny próbek","Prąd kWh","Ciepło netto kWh (szac.)","COP netto (szac.)","Pokrycie par %","Defrost min","Ostatni pomiar"],(eh?eh.rows:[]).map(r=>[r.outdoor_band,r.target_band,r.mode,num(r.seconds/3600),num(r.kwh,2),num(r.net_heat_kwh,2),num(r.cop_net,2),num(100*r.paired_fraction),num(r.defrost_seconds/60),dt(r.last)]));''')
+    current=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
+    return once(source,current,"_WV_ADAPTIVE_REPORT_HTML = "+repr(html))
+
 def register_watch_api(source):
-    source=performance_report_api(source)
+    source=capacity_report_api(performance_report_api(source))
     line=next(l for l in source.splitlines() if l.startswith("_WV_ADAPTIVE_REPORT_HTML = "))
     html=ast.literal_eval(line.split("=",1)[1].strip())
     if 'id="register-events"' not in html:
@@ -425,7 +725,7 @@ table("events",["Czas","Typ","Właściciel","Szczegóły"]''')
         rows=[dict(c,at=e["at"],kind=e["kind"],flags=";".join(e["flags"]),set_bits=";".join(map(str,c["set_bits"])),cleared_bits=";".join(map(str,c["cleared_bits"]))) for e in data["register_watch"]["events"] for c in e["changes"]]
         fields=["at","kind","flags","register","before","after","xor","set_bits","cleared_bits"]
     elif kind=="events":''')
-    return source
+    return registers_page_api(source)
 
 def heater_counter_api(source):
     source=register_watch_api(source)
@@ -522,13 +822,17 @@ def experiment_api(source):
         source=once(source,new if new in source else old,latest)
     old='if current==value:'
     new='if current==value and not (key=="adaptive_control" and value=="manual" and _am.view()["auto_resume_pending"]):'
-    return heater_status_api(source if new in source else once(source,old,new))
+    latest_resume='if current==value and not (key=="adaptive_control" and value=="manual" and (_am.view()["auto_resume_pending"] or _am.view()["experiment_resume_pending"])):'
+    if latest_resume not in source:
+        source=once(source,new if new in source else old,latest_resume)
+    return guard_api(heater_status_api(source))
 
 def learning_block():
     policy=(ROOT/"adaptive/regulator.py").read_text(encoding="utf-8")
-    runtime=(ROOT/"adaptive/live_runtime.py").read_text(encoding="utf-8").replace("from adaptive.regulator import","from _hpi_adaptive_policy import")
+    energy=(ROOT/"adaptive/energy.py").read_text(encoding="utf-8")
+    runtime=(ROOT/"adaptive/live_runtime.py").read_text(encoding="utf-8").replace("from adaptive.regulator import","from _hpi_adaptive_policy import").replace("from adaptive.energy import","from _hpi_adaptive_energy import")
     block=MARK+"\nimport sys as _am_sys, types as _am_types\n"
-    for name,code in (("_hpi_adaptive_policy",policy),("_hpi_adaptive_runtime",runtime)):
+    for name,code in (("_hpi_adaptive_policy",policy),("_hpi_adaptive_energy",energy),("_hpi_adaptive_runtime",runtime)):
         block+=f'_am_module = _am_types.ModuleType({name!r})\n_am_sys.modules[{name!r}] = _am_module\nexec(compile({code!r}, {name!r}, "exec"), _am_module.__dict__)\n'
     block+='_am = _am_module.Runtime(globals(), learning_path="/opt/haier/.adaptive-learning-two-v3.json")\n# HOME-IOT ADAPTIVE MODULATION END'
     return block

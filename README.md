@@ -2,14 +2,14 @@
 
 Opt-in anti-cycling supervision for existing HaierPi Stable 1.4.5 installations, with authenticated WWW v2, bounded online learning and read-only diagnostics.
 
-**Current functional revision (2026-11-27):** [`f252db5b`](https://github.com/petec999/hpi/commit/f252db5bae2c6a47a7a1258a2cafdc2b6651c8df) — [Python 3.9/3.11 and Stable writer audit passed](https://github.com/petec999/hpi/actions/runs/45943635658). This is an experimental preview, not a production release. Physical acceptance of the latest version remains open.
+**Current functional revision (2026-11-28):** [`1feaf0c7`](https://github.com/petec999/hpi/commit/1feaf0c7900012277917c541531e2f5263adc87c) — [Python 3.9/3.11 and Stable writer audit passed](https://github.com/petec999/hpi/actions/runs/46139881021). This is an experimental preview, not a production release. Physical acceptance of the latest version remains open.
 
 ## Install / update
 
 On the HaierPi host, as root, only on a compatible existing installation:
 
 ```bash
-REF=f252db5bae2c6a47a7a1258a2cafdc2b6651c8df
+REF=1feaf0c7900012277917c541531e2f5263adc87c
 curl -fsSL "https://raw.githubusercontent.com/petec999/hpi/$REF/install-adaptive-preview.sh" -o /tmp/install-adaptive-preview.sh && bash /tmp/install-adaptive-preview.sh "$REF" --dry-run
 ```
 
@@ -23,11 +23,11 @@ Repeat with `--apply` after a successful dry-run and when a brief service restar
 | Manual | User controls preset and FLimit |
 | Shadow | Adaptive proposals only; legacy automation may still act |
 | Auto | Experimental supervisor using the six preset/FLimit combinations |
-| Experiment | Optional idle-only trials; three accepted cycles per configuration |
+| Experiment | Optional trials during stable heating or confirmed idle; three accepted cycles or six 30-minute windows per configuration |
 
 Auto does not command compressor frequency, demand or water setpoint. It preserves native and priority protections. Saved Auto waits for two distinct fresh sets of frames and eligible normal CO before resuming after restart. Manual/Legacy selection cancels resume. Failed commands or prolonged telemetry loss may disarm to Manual.
 
-The experiment has no calendar deadline; completion restores the original combination at an eligible idle, then selects Manual. Its checkpoint survives restart, but it never automatically resumes: explicitly select Experiment to continue or Experiment – od nowa to begin a new session. The original combination is retained; cancellation/pause/restart does not itself restore it. Existing sessions started before checkpoint support cannot be reliably recovered. Progress is based on saved accepted cycles (bounded history); in-flight cycles are not saved.
+The experiment has no calendar deadline. It restores the original combination on completion and selects Manual. Use **Test aktywny – rozpocznij / wznów** after a restart to continue from saved cycles and measurement windows. The experiment waits 15 minutes before collecting windows after a configuration change. A partial window and an in-flight cycle are held in memory.
 
 ## Diagnostics and data
 
@@ -60,6 +60,7 @@ Data is sampled and bounded. Counters exclude gaps; they are not utility-meter r
 Hardware verification of Auto/learning and MQTT, evaluation of continuous run lengths versus Legacy, and read-only investigation of DHW. No savings claim or guarantee of continuous operation at minimum capacity.
 
 - [Current handover](docs/ADAPTIVE_HANDOVER.md)
+- [Cumulative research findings and empirical evidence (PL)](docs/RESEARCH_FINDINGS.md)
 - [Earlier documentation and detailed evolution](https://github.com/petec999/hpi/blob/3d9ae8eda2c7419c241a5933df74716fbebdc50c/README.md)
 - [Integrated preview guide (earlier design)](docs/INTEGRATED_ADAPTIVE_PREVIEW.md)
 - [Stable and published releases](https://github.com/petec999/hpi#start-here)

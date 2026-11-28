@@ -105,7 +105,7 @@ class Regulator:
             raise ValueError("Invalid settings")
         if settings.window<90 or settings.urgent_deficit<=settings.deficit_band:
             raise ValueError("Invalid policy bands")
-        self.history=deque()
+        self.history=deque(maxlen=256)
         self.last=None
         self.level=None
         self.target=None
@@ -134,7 +134,7 @@ class Regulator:
             self.target=None
             self.changed_at=None
 
-    def step(self,s,control="shadow",allowed=None,stop_offset=STOP_HYSTERESIS):
+    def step(self,s,control="shadow",allowed=None,stop_offset=STOP_HYSTERESIS,capacity_model=None,outdoor=None):
         if not math.isfinite(stop_offset) or not 3.5<=stop_offset<=5.5:
             stop_offset=STOP_HYSTERESIS
         if control not in ("manual","legacy","shadow","auto"):
@@ -205,6 +205,13 @@ class Regulator:
         urgent=er>=c.urgent_deficit and es>=c.urgent_deficit and tr>=-c.trend_band and ts>=-c.trend_band
         shortfall=er>c.deficit_band and tr>=-c.trend_band and (
             (es>c.deficit_band and ts>=-c.trend_band) or (es>0.2 and self.integral>=c.integral_limit))
+        # Also recognize a settled, sustained supply deficit at the reference
+        # ceiling even if return-temperature trend alone masks the shortage.
+        limit=ExperimentGuard.FREQUENCY_LIMITS.get((s.mode,s.relay))
+        saturated=bool(limit and now-self.ready_since>=900 and now-self.changed_at>=900
+                       and all(min(x[3],x[4])>=limit-1 and abs(x[3]-x[4])<=3 for x in rows))
+        if saturated and es>=c.urgent_deficit and ts>=-c.trend_band:
+            shortfall=True
         # Return indicates surplus; supply approaching the empirical STOP
         # band independently calls for a reduction, even with a cold return.
         excess=(er<=-c.surplus_band and tr<=c.trend_band) or (
@@ -218,6 +225,12 @@ class Regulator:
                       abs(ts)<=c.trend_band and abs(tr)<=c.trend_band and
                       median(x[3] for x in rows)>=c.probe_hz and
                       abs(median(x[3]-x[4] for x in rows))<=2)
+        # Historical shortages only inhibit optional efficiency probes.
+        # Never inhibit urgent recovery, native STOP protection or surplus reduction.
+        if stable_probe and capacity_model is not None:
+            lower=adjacent(level,"down")
+            if lower!=level and capacity_model.avoid_probe(s,outdoor,LEVELS[lower]):
+                stable_probe=False
         if self.trial and now-self.trial[2]>c.trial_window:
             self.trial=None
         direction=None
@@ -366,7 +379,7 @@ class Learning:
             return
         t["last"]=s.now
         t["samples"].append((s.now,s.target-s.return_temp,s.hz,s.target-s.supply_temp))
-        t["samples"]=[x for x in t["samples"] if s.now-x[0]<=120]
+        t["samples"]=[x for x in t["samples"] if s.now-x[0]<=120][-256:]
         if s.now-t["start"]<90 or len(t["samples"])<3:
             return
         e=median(x[1] for x in t["samples"])
@@ -944,8 +957,8 @@ class NativeThresholds:
         self.stable_since=None
         self.phase_since=None
         self.pending=None
-        self.idle=deque()
-        self.running=deque()
+        self.idle=deque(maxlen=256)
+        self.running=deque(maxlen=256)
         self.dirty=False
         self.last_save=None
         self.saved_at=None
@@ -1243,6 +1256,9 @@ class RegisterWatch:
         if changed:
             self.add(wall,"edge",old,f,oldctx,c,changed)
             self.last_sample=now
+        elif any((old["R141"][i]^f["R141"][i])&mask for i,mask in ((3,0xfe00),(9,0xff00),(10,0xff00),(14,0x001e),(15,0x0010))):
+            self.add(wall,"candidate",old,f,oldctx,c,[])
+            self.last_sample=now
         elif flags["dhw_enabled"]:
             candidate=any((old[bank][i]^f[bank][i])&mask
                           for bank,indices in self.CANDIDATES.items() for i,mask in indices.items())
@@ -1280,6 +1296,81 @@ class RegisterWatch:
                 "flags":copy.deepcopy(self.last[3]) if fresh else None,
                 "context":copy.deepcopy(self.last[2]) if fresh else None}
 
+    # Read-only register reference. Existing fields: PyHaier; candidates:
+    # kmalysiak/haier-monoblok-modbus and Elektroda topic3994059.
+    # H/L mean high/low byte; bits numbered 0..15 in the full word.
+    DESCRIPTIONS={
+        101:"H: command/readback; L: bit0 ON, bit1 COOL, bit2 HEAT, bit7 TANK; bit3/5 heater/pump request",
+        102:"H: CO setpoint x0.5 C; L: compensation (raw-30)/2; alternative cooling interpretation unverified",
+        103:"Unknown",104:"Unknown; low nibble preserved by PyHaier writes",
+        105:"H/L unknown; L: alternative DHW setpoint hypothesis, conflicts with R106",
+        106:"H: DHW setpoint x0.5 C; L: DHW compensation (raw-30)/2",
+        141:"H: bit1 DHW, bit2 CO, bit3 antifreeze, bit5 defrost; L: error",
+        142:"Unknown",143:"Unknown",
+        144:"H: bit0 heater, bit1 pump; remaining bits not a confirmed phase code; L unknown",
+        145:"Unknown",146:"H unknown; L: packed Twi/Two upper nibbles",
+        147:"H: Twi low byte; L: Two low byte",
+        148:"H: packed Thi/Tho upper nibbles; L: Thi low byte",
+        149:"H: Tho low byte; L unknown",
+        150:"H: observed cycle hours, delayed reset on stop; L unknown",
+        151:"H: observed cycle hours, earlier reset on stop than R150; L unknown",
+        152:"Unknown",153:"Unknown",154:"DHW sensor temperature x0.1 C",
+        155:"H unknown; L: bits1 COOL,2 HEAT,3 TANK,4 50% power (candidates)",
+        156:"bit4 mirrors defrost, bit11 mirrors heater readback in observed samples; other bits unknown",
+        201:"H unknown/readback; L: 0 Eco, 1 Quiet, 2 Turbo",
+        241:"H: operating mode (candidate); L: last error",
+        242:"Unknown; possible error/status, not confirmed",
+        243:"H unknown; L: actual compressor Hz",
+        244:"H: requested compressor Hz; L: fan1 RPM x5",
+        245:"H: fan2 RPM x5; L unknown",
+        246:"H: EEV position; L: Pd target x0.2",
+        247:"H: Pd actual x0.2; L: packed Pd saturation upper nibbles",
+        248:"H/L: Pd saturation low bytes",
+        249:"H/L: Ps target/actual x0.2",
+        250:"H: packed Ps saturation upper nibbles; L: Ps target saturation low byte",
+        251:"H: Ps actual saturation low byte; L: packed Td/Ts upper nibbles",
+        252:"H/L: Td/Ts low bytes",253:"H: packed Tao/Tdef upper nibbles; L: Tao low byte",
+        254:"H: Tdef low byte; L unknown",255:"H unknown; L: compressor temperature x0.1 C",
+        256:"H: inverter current x0.2 A; L: voltage x4 V",
+        257:"Unknown",258:"Unknown",259:"H: firmware /10; L unknown",
+        260:"H/L: archive errors 1 and 2",261:"H: archive error 3; L: unknown / candidate extra error",
+        262:"H/L: unknown / candidate extra error bytes",
+    }
+    # Separate hypotheses from confirmed PyHaier signals. No control uses this.
+    @classmethod
+    def decode_registers(cls,frames):
+        if not cls.valid(frames):
+            return {"rows":[],"signals":[]}
+        words={int(bank[1:])+i:v for bank,values in frames.items() for i,v in enumerate(values)}
+        def hi(n): return words[n]>>8
+        def lo(n): return words[n]&255
+        def signal(label,address,value,quality,description):
+            return dict(label=label,address=address,value=value,quality=quality,description=description)
+        phase=hi(144)&0xfe
+        signals=[
+            signal("Kod statusu bez bitu grzalki","R144 H",phase,"unknown","Nie rozroznia faz w obserwowanych probkach 0–80 Hz"),
+            signal("Godziny cyklu R150","R150 H",hi(150),"candidate","Licznik godzin; zaobserwowane opoznione zerowanie"),
+            signal("Godziny cyklu R151","R151 H",hi(151),"candidate","Licznik godzin; zeruje sie wczesniej od R150"),
+            signal("Ograniczenie mocy","R155 bit4",bool(words[155]&16),"candidate","Mozliwa flaga 50% mocy; nie utozsamiac automatycznie z FLimit"),
+            signal("Chlodzenie","R155 bit1",bool(words[155]&2),"candidate","Hipoteza stanu pracy"),
+            signal("Grzanie CO","R155 bit2",bool(words[155]&4),"candidate","Hipoteza stanu pracy"),
+            signal("CWU","R155 bit3",bool(words[155]&8),"candidate","Hipoteza stanu pracy"),
+            signal("Defrost dodatkowy","R156 bit4",bool(words[156]&16),"candidate","Zgodny z R141 bit13 w dotychczasowych probkach"),
+            signal("Grzalka dodatkowa","R156 bit11",bool(words[156]&2048),"candidate","Zgodny z R144 bit8 w dotychczasowych probkach"),
+            signal("Zgodnosc defrost","R156 bit4 / R141 bit13",bool(words[156]&16)==bool(words[141]&8192),"candidate","Porownanie flag, nie niezalezny pomiar"),
+            signal("Zgodnosc grzalki","R156 bit11 / R144 bit8",bool(words[156]&2048)==bool(words[144]&256),"candidate","Porownanie flag, nie pomiar pradu"),
+            signal("Defrost PyHaier","R141 bit13",bool(words[141]&8192),"known","Istniejacy odczyt PyHaier"),
+            signal("Pompa obiegowa","R144 bit9",bool(words[144]&512),"known","Istniejacy odczyt PyHaier"),
+            signal("Grzalka","R144 bit8",bool(words[144]&256),"known","Istniejacy odczyt PyHaier"),
+            signal("Czestotliwosc rzeczywista","R243 L",lo(243),"known","Hz"),
+            signal("Czestotliwosc zadana","R244 H",hi(244),"known","Hz"),
+            signal("Dodatkowe bajty bledow","R261 L / R262 H,L",[lo(261),hi(262),lo(262)],"unknown","Surowe bajty; niepotwierdzona historia bledow"),
+        ]
+        rows=[dict(register=n,value=v,high=v>>8,low=v&255,
+                   bits=[j for j in range(16) if v&(1<<j)],
+                   description=cls.DESCRIPTIONS.get(n,"Unknown")) for n,v in sorted(words.items())]
+        return dict(rows=rows,signals=signals)
+
     def save_if_due(self,now):
         if not self.dirty or self.path is None or (self.last_save is not None and now-self.last_save<self.SAVE_INTERVAL):
             return
@@ -1304,6 +1395,159 @@ class RegisterWatch:
             self.error=None
         except (OSError,ValueError,TypeError):
             self.error="register watch save failed"
+        finally:
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+
+class DefrostTrace:
+    """Bounded raw diagnostic traces. No bus access, decoding or control output."""
+    BANKS={"R101":6,"R141":16,"R241":22}
+    PERIOD=5
+    GAP=30
+    PRE=60
+    POST=60
+    MAX_SAMPLES=256
+    MAX_TRACES=16
+    MAX_BYTES=2*1024*1024
+    SAVE_INTERVAL=300
+
+    def __init__(self,path=None):
+        import threading
+        self.lock=threading.Lock()
+        self.path=Path(path) if path else None
+        self.pre=deque(maxlen=13)
+        self.traces=deque(maxlen=self.MAX_TRACES)
+        self.active=None
+        self.last=None
+        self.stamps=None
+        self.last_save=None
+        self.revision=0
+        self.saved_revision=0
+        self.error=None
+        try:
+            if self.path is not None:
+                if self.path.is_symlink() or self.path.stat().st_size>self.MAX_BYTES:
+                    raise ValueError("invalid defrost trace file")
+                data=json.loads(self.path.read_text())
+                rows=data["traces"]
+                if data["schema"]!=1 or not isinstance(rows,list) or len(rows)>self.MAX_TRACES:
+                    raise ValueError("invalid trace schema")
+                for t in rows:
+                    if (set(t)!={"start","end","reason","samples"} or t["reason"] not in ("complete","gap","limit","start_unknown")
+                            or not AdaptiveReport.number(t["start"],0,9e10)
+                            or not AdaptiveReport.number(t["end"],t["start"],9e10)
+                            or not isinstance(t["samples"],list) or not 1<=len(t["samples"])<=self.MAX_SAMPLES):
+                        raise ValueError("invalid trace")
+                    for row in t["samples"]:
+                        if (not isinstance(row,list) or len(row)!=4 or not AdaptiveReport.number(row[0],0,9e10)
+                                or any(not isinstance(v,list) or len(v)!=n or any(type(x) is not int or not 0<=x<=65535 for x in v)
+                                       for v,n in zip(row[1:],self.BANKS.values()))):
+                            raise ValueError("invalid trace sample")
+                self.traces.extend(rows)
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError):
+            self.error="defrost trace load failed"
+
+    def finish(self,reason):
+        t=self.active
+        if t is not None:
+            rows=t["samples"]
+            self.traces.append({"start":t["start"],"end":max(t["start"],rows[-1][0]),
+                                "reason":"start_unknown" if reason=="complete" and not t["start_known"] else reason,
+                                "samples":rows})
+            self.revision+=1
+            self.active=None
+
+    def observe(self,frames,now,wall):
+        # Called from passive serial ingestion; only bounded RAM operations.
+        with self.lock:
+            if any(k not in frames for k in self.BANKS):
+                return
+            stamps=tuple(frames[k][0] for k in self.BANKS)
+            if any(not 0<=now-t<=self.GAP for t in stamps):
+                return
+            if self.last is not None and now-self.last[0]<self.PERIOD:
+                return
+            if self.stamps is not None and not all(a>b for a,b in zip(stamps,self.stamps)):
+                return
+            raw=[list(frames[k][1]) for k in self.BANKS]
+            if any(len(v)!=n for v,n in zip(raw,self.BANKS.values())):
+                return
+            row=[round(wall,3)]+raw
+            state=bool(raw[1][0]&0x2000)
+            old=self.last
+            continuous=old is not None and 0<now-old[0]<=self.GAP and abs((wall-old[1])-(now-old[0]))<=5
+            if not continuous:
+                self.finish("gap")
+                self.pre.clear()
+            self.last=(now,wall,state)
+            self.stamps=stamps
+            if self.active is None and state:
+                self.active={"start":row[0],"start_known":bool(continuous and not old[2]),
+                             "samples":[v for t,v in self.pre if now-t<=self.PRE],"post_since":None}
+            if self.active is not None:
+                a=self.active
+                a["samples"].append(row)
+                if state:
+                    a["post_since"]=None
+                elif a["post_since"] is None:
+                    a["post_since"]=now
+                if len(a["samples"])>=self.MAX_SAMPLES:
+                    self.finish("limit")
+                elif a["post_since"] is not None and now-a["post_since"]>=self.POST:
+                    self.finish("complete")
+            self.pre.append((now,row))
+
+    def expire(self,now):
+        with self.lock:
+            if self.last is not None and now-self.last[0]>self.GAP:
+                self.finish("gap")
+                self.last=None
+                self.stamps=None
+                self.pre.clear()
+
+    def summary(self):
+        with self.lock:
+            return {"saved_traces":len(self.traces),"active":self.active is not None,
+                    "unsaved":self.revision!=self.saved_revision,"storage_error":self.error,
+                    "latest":[{k:t[k] for k in ("start","end","reason")} for t in list(self.traces)[-5:]]}
+
+    def save_if_due(self,now):
+        self.expire(now)
+        if self.path is None:
+            return
+        with self.lock:
+            if self.revision==self.saved_revision or (self.last_save is not None and now-self.last_save<self.SAVE_INTERVAL):
+                return
+            self.last_save=now
+            revision=self.revision
+            traces=list(self.traces)
+        # Disk I/O outside the serial-reader lock; completed samples are immutable.
+        tmp=None
+        try:
+            if self.path.is_symlink():
+                raise ValueError("invalid trace path")
+            raw=json.dumps({"schema":1,"traces":traces},separators=(",",":"),allow_nan=False).encode()
+            if len(raw)>self.MAX_BYTES:
+                raise ValueError("trace size limit")
+            fd,tmp=tempfile.mkstemp(prefix=".defrost-trace-",dir=str(self.path.parent))
+            with os.fdopen(fd,"wb") as f:
+                f.write(raw)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp,self.path)
+            tmp=None
+            with self.lock:
+                self.saved_revision=revision
+                self.error=None
+        except (OSError,ValueError,TypeError):
+            with self.lock:
+                self.error="defrost trace save failed"
         finally:
             if tmp is not None:
                 try:
@@ -1541,3 +1785,734 @@ class OperationMonitor:
                     os.unlink(temp)
                 except OSError:
                     pass
+
+
+class PassiveInsights:
+    """Bounded, process-local observations; no control output or file I/O."""
+    WEEK=7*86400
+    GAP=65
+    RESOURCE_PERIOD=900
+    THERMAL_WINDOW=1800
+    SETTLE=600
+
+    def __init__(self):
+        self.resources=deque(maxlen=673)
+        self.thermal=deque(maxlen=336)
+        self.defrosts=deque(maxlen=512)
+        self.last=None
+        self.segment=None
+        self.defrost_start=None
+        self.defrost_heater=None
+        self.recovery=None
+
+    def interrupt(self):
+        self.last=self.segment=self.defrost_start=self.defrost_heater=self.recovery=None
+
+    def prune(self,now):
+        for rows in (self.resources,self.thermal,self.defrosts):
+            while rows and rows[0][0]<now-self.WEEK:
+                rows.popleft()
+
+    def resource_due(self,now):
+        return not self.resources or now-self.resources[-1][0]>=self.RESOURCE_PERIOD
+
+    def resource(self,now,data):
+        if not self.resource_due(now):
+            return
+        keys=("VmRSS_bytes","VmHWM_bytes","write_bytes_bytes","threads","open_fds")
+        values={k:data[k] for k in keys if type(data.get(k)) is int and data[k]>=0}
+        if values:
+            self.resources.append((now,values))
+        self.prune(now)
+
+    def stability(self,now,window):
+        rows=[x for x in self.resources if now-window<=x[0]<=now]
+        out={"samples":len(rows),"span_seconds":0,"max_gap_seconds":None,"complete":False}
+        if len(rows)<2:
+            return out
+        span=rows[-1][0]-rows[0][0]
+        if span<=0:
+            return out
+        gap=max(b[0]-a[0] for a,b in zip(rows,rows[1:]))
+        out.update(span_seconds=round(span),max_gap_seconds=round(gap),
+                   complete=span>=window-2*self.RESOURCE_PERIOD and
+                   gap<=2*self.RESOURCE_PERIOD and now-rows[-1][0]<=2*self.RESOURCE_PERIOD)
+        for key in ("VmRSS_bytes","threads","open_fds"):
+            values=[d[key] for _,d in rows if key in d]
+            if len(values)==len(rows):
+                out[key]={"first":values[0],"last":values[-1],"peak":max(values),
+                          "delta":values[-1]-values[0]}
+        a,b=rows[0][1].get("write_bytes_bytes"),rows[-1][1].get("write_bytes_bytes")
+        if a is not None and b is not None and b>=a and span>=3600:
+            out["write_bytes_per_day"]=round((b-a)*86400/span)
+        return out
+
+    def observe(self,s,co_enabled,indoor=None,outdoor=None,heater=None):
+        now=s.now
+        if not s.fresh or not math.isfinite(now):
+            self.interrupt()
+            return
+        prev=self.last
+        if prev is None or not 0<now-prev[0]<=self.GAP:
+            self.interrupt()
+            prev=None
+        blocked=bool(s.error or s.override or s.dhw)
+        state="blocked" if blocked else "defrost" if s.defrost else "run" if co_enabled and s.hz>0 else "idle" if co_enabled else "other"
+        if prev is not None:
+            old=prev[1]
+            if state=="defrost" and old in ("run","idle"):
+                self.defrost_start=now
+                self.defrost_heater={"seen_on":False,"missing":False,"on_seconds":0.0,"previous":None}
+                self.recovery=None
+            elif old=="defrost" and state!="defrost":
+                if self.defrost_start is not None and state in ("run","idle"):
+                    h=self.defrost_heater
+                    group=("heater_seen" if h and h["seen_on"] else
+                           "heater_not_seen" if h and not h["missing"] else "unknown")
+                    row=[now,now-self.defrost_start,None,group,h["on_seconds"] if h else 0.0]
+                    self.defrosts.append(row)
+                    self.recovery=row
+                self.defrost_start=self.defrost_heater=None
+            if state=="defrost" and self.defrost_heater is not None:
+                h=self.defrost_heater
+                if type(heater) is not bool:
+                    h["missing"]=True
+                else:
+                    h["seen_on"] |= heater
+                    if old=="defrost" and heater and h["previous"] is True:
+                        h["on_seconds"]+=now-prev[0]
+                h["previous"]=heater
+            if self.recovery is not None:
+                ended=self.recovery[0]
+                if state=="run" and now-ended<=1800:
+                    self.recovery[2]=now-ended
+                    self.recovery=None
+                elif state not in ("run","idle") or now-ended>1800:
+                    self.recovery=None
+        self.last=(now,state)
+        good=(state in ("run","idle") and type(indoor) in (float,int) and
+              type(outdoor) in (float,int) and -10<indoor<45 and -50<outdoor<50)
+        if not good:
+            self.segment=None
+        else:
+            seg=self.segment
+            if seg is None or seg["state"]!=state or abs(indoor-seg["last_indoor"])>0.5:
+                self.segment={"state":state,"since":now,"start":None,"last_indoor":indoor}
+            else:
+                seg["last_indoor"]=indoor
+                if now-seg["since"]>=self.SETTLE:
+                    if seg["start"] is None:
+                        seg.update(start=now,indoor=indoor,out_min=outdoor,out_max=outdoor,
+                                   outdoor_sum=outdoor,n=1)
+                    else:
+                        seg["out_min"]=min(seg["out_min"],outdoor)
+                        seg["out_max"]=max(seg["out_max"],outdoor)
+                        seg["outdoor_sum"]+=outdoor
+                        seg["n"]+=1
+                        span=now-seg["start"]
+                        if span>=self.THERMAL_WINDOW:
+                            delta=(indoor+seg["indoor"])/2-seg["outdoor_sum"]/seg["n"]
+                            if seg["out_max"]-seg["out_min"]<=2 and delta>=5:
+                                rate=(indoor-seg["indoor"])*3600/span
+                                self.thermal.append((now,state,span,rate,delta))
+                            seg["start"]=None
+        self.prune(now)
+
+    def summary(self,now):
+        self.prune(now)
+        thermal={}
+        for state in ("run","idle"):
+            rows=[r for r in self.thermal if r[1]==state]
+            thermal[state]={"windows":len(rows),"hours":round(sum(r[2] for r in rows)/3600,2),
+                            "median_k_h":round(median(r[3] for r in rows),3) if len(rows)>=3 else None}
+        # Empirical cooling time scale only, not a measured heat capacity.
+        # Ignore sensor quantization / almost flat or warming idle windows.
+        cooling=[r[4]/(-r[3]) for r in self.thermal if r[1]=="idle" and r[3]<=-0.2]
+        thermal["cooling_windows"]=len(cooling)
+        thermal["cooling_proxy_h"]=round(median(cooling),1) if len(cooling)>=3 else None
+        defrosts=[r for r in self.defrosts if now-86400<=r[0]<=now]
+        recovery=[r[2] for r in defrosts if r[2] is not None]
+        defrost_groups={}
+        for group in ("heater_seen","heater_not_seen","unknown"):
+            rows=[r for r in defrosts if r[3]==group]
+            defrost_groups[group]={"completed":len(rows),
+                "median_seconds":median(r[1] for r in rows) if rows else None,
+                "heater_on_observed_seconds":sum(r[4] for r in rows),
+                "recovery_samples":sum(r[2] is not None for r in rows),
+                "recovery_median_seconds":median(r[2] for r in rows if r[2] is not None) if any(r[2] is not None for r in rows) else None}
+        return {"stability_24h":self.stability(now,86400),
+                "stability_7d":self.stability(now,self.WEEK),
+                "thermal":thermal,
+                "defrost_24h":{"completed":len(defrosts),"by_heater":defrost_groups,
+                    "median_seconds":median(r[1] for r in defrosts) if defrosts else None,
+                    "recovery_samples":len(recovery),
+                    "recovery_median_seconds":median(recovery) if recovery else None},
+                "scope":"RAM only; resets on process restart"}
+
+
+class ExperimentGuard:
+    """Comfort, heating capacity and running stability for the active test."""
+    SETTLE=900
+    MAX_GAP=65
+    CAPACITY_TREND_WINDOW=300
+    FREQUENCY_TOLERANCE=3
+    # Empirical reference ceilings from the installation's Fact/Fset history.
+    # These are diagnostic references, not commands or firmware limits.
+    FREQUENCY_LIMITS={('eco',False):65,('eco',True):40,
+                      ('quiet',False):65,('quiet',True):40,
+                      ('turbo',False):65,('turbo',True):45}
+    LIMIT_TOLERANCE=1
+    DEFAULT={"water_gap":2.0,"water_minutes":30,"room_drop":0.5,
+             "room_minutes":10,"minimum_room":19.0,"retry_warmer":2.0,
+             "recovery_minutes":15}
+
+    @classmethod
+    def validate(cls,value):
+        bounds={"water_gap":(1,5),"water_minutes":(15,90),"room_drop":(.3,1.5),
+                "room_minutes":(5,30),"minimum_room":(10,25),
+                "retry_warmer":(1,5),"recovery_minutes":(10,60)}
+        if not isinstance(value,dict) or set(value)!=set(bounds):
+            raise ValueError("Invalid experiment guard settings")
+        result={}
+        for key,(lo,hi) in bounds.items():
+            n=value[key]
+            if type(n) not in (float,int) or not math.isfinite(n) or not lo<=n<=hi:
+                raise ValueError("Invalid experiment guard setting: "+key)
+            result[key]=float(n)
+        return result
+
+    def __init__(self,settings=None):
+        self.cfg=self.validate(settings if settings is not None else self.DEFAULT)
+        self.reference=None
+        self.reset()
+
+    def reset(self):
+        self.previous=None
+        self.water_since=None
+        self.room_since=None
+        self.recovery_since=None
+        self.room_missing_since=None
+        self.water_seconds=0
+        self.room_seconds=0
+        self.recovery_seconds=0
+        self.running_since=None
+        self.running_seconds=0
+        self.running_target=None
+        self.heating_state="unavailable"
+        self.capacity_state="unavailable"
+        self.capacity_limit=None
+        self.capacity_since=None
+        self.capacity_seconds=0
+        self.running_samples=deque(maxlen=64)
+
+    @staticmethod
+    def valid_room(room):
+        return type(room) in (float,int) and math.isfinite(room) and 5<=room<=40
+
+    def room_low(self,room):
+        return self.valid_room(room) and (room<self.cfg["minimum_room"] or
+                    self.reference is not None and self.reference-room>=self.cfg["room_drop"]-1e-6)
+
+    def running_stable(self,s):
+        recent=[r for r in self.running_samples if s.now-r[0]<=120]
+        requested=[s.requested_hz]+[r[4] for r in recent]
+        return (self.running_seconds>=self.SETTLE and len(recent)>=3
+                and recent[-1][0]-recent[0][0]>=60
+                and max(requested)-min(requested)<=2*self.FREQUENCY_TOLERANCE
+                and all(abs(r[3]-r[4])<=self.FREQUENCY_TOLERANCE for r in recent)
+                and abs(s.hz-s.requested_hz)<=self.FREQUENCY_TOLERANCE)
+
+    def observe_running(self,s,now):
+        running=s.heating and s.hz>0 and s.requested_hz>0
+        if not running:
+            self.running_since=None
+            self.running_seconds=0
+            self.running_samples.clear()
+            self.heating_state="idle" if s.hz==s.requested_hz==0 else "transition"
+            return False
+        if self.running_since is None or abs(s.target-self.running_target)>.25:
+            self.running_since=now
+            self.running_target=s.target
+            self.running_samples.clear()
+            self.water_since=None
+        self.running_seconds=now-self.running_since
+        self.running_samples.append((now,s.return_temp,s.supply_temp,s.hz,s.requested_hz))
+        while now-self.running_samples[0][0]>self.CAPACITY_TREND_WINDOW:
+            self.running_samples.popleft()
+        self.heating_state="running"
+        return True
+
+    def observe_capacity(self,s,stamp,running):
+        limit=self.FREQUENCY_LIMITS.get((s.mode,s.relay))
+        self.capacity_limit=limit
+        if not running:
+            state="idle" if s.hz==s.requested_hz==0 else "transition"
+        elif limit is None:
+            state="unknown_limit"
+        elif abs(s.hz-s.requested_hz)>self.FREQUENCY_TOLERANCE:
+            state="transition"
+        else:
+            saturated=min(s.hz,s.requested_hz)>=limit-self.LIMIT_TOLERANCE
+            deficit=s.target-s.supply_temp>=self.cfg["water_gap"]
+            state=("limited" if saturated else "modulating")+("_shortfall" if deficit else "_sufficient")
+        if state!=self.capacity_state or self.capacity_since is None:
+            self.capacity_since=stamp
+        self.capacity_state=state
+        self.capacity_seconds=max(0,stamp-self.capacity_since)
+
+    def capacity_shortfall(self):
+        rows=list(self.running_samples)
+        if len(rows)<5 or rows[-1][0]-rows[0][0]<self.CAPACITY_TREND_WINDOW-self.MAX_GAP:
+            return False
+        requested=[r[4] for r in rows]
+        actual=[r[3] for r in rows]
+        plateau=all(max(freq)-min(freq)<=self.FREQUENCY_TOLERANCE for freq in (requested,actual))
+        # A low-frequency plateau is not evidence that available power is exhausted.
+        # Require sustained saturation and a supply-water deficit, not cold return alone.
+        return (self.capacity_state=="limited_shortfall"
+                and self.capacity_seconds>=self.CAPACITY_TREND_WINDOW-self.MAX_GAP
+                and self.running_seconds>=self.SETTLE
+                and plateau and self.running_target-median(r[2] for r in rows)>=self.cfg["water_gap"]
+                and trend(rows,1)<=.03 and trend(rows,2)<=.03)
+
+    def observe(self,s,room,eligible,recovering=False,frame_at=None):
+        now=s.now
+        room=room if self.valid_room(room) else None
+        if not eligible or not s.fresh or s.error or s.override or s.defrost or s.dhw:
+            self.reset()
+            return None
+        if self.reference is None and room is not None:
+            self.reference=room
+        previous=self.previous
+        stamp=now if frame_at is None else frame_at
+        if previous is None or not 0<=stamp-previous[0]<=self.MAX_GAP or previous[1:3]!=(s.mode,s.relay) or previous[4]!=recovering:
+            self.reset()
+        elif stamp==previous[0] and abs(previous[3]-s.target)<=.25 and s.heating and s.hz>0 and s.requested_hz>0:
+            return None
+        elif abs(previous[3]-s.target)>.5:
+            # A changed water target starts a new water confirmation, but
+            # does not erase independently measured cooling of the house.
+            self.water_since=None
+            self.water_seconds=0
+            self.recovery_since=None
+            self.recovery_seconds=0
+        self.previous=(stamp,s.mode,s.relay,s.target,recovering)
+        self.room_missing_since=(self.room_missing_since if self.room_missing_since is not None else now) if room is None else None
+        low_room=self.room_low(room)
+        running=self.observe_running(s,stamp)
+        self.observe_capacity(s,stamp,running)
+        water_low=running and s.target-s.supply_temp>=self.cfg["water_gap"]
+        idle=s.hz==0 and s.requested_hz==0
+        if recovering:
+            # At full-capacity preset, wait until measured comfort is back.
+            # Native idle may satisfy the water condition; never force STOP.
+            room_ok=room is not None and room>=self.cfg["minimum_room"] and (self.reference is None or room>=self.reference-.2-1e-6)
+            if self.reference is None and room is None:
+                room_ok=True  # water-only installations
+            water_ok=idle or (running and s.supply_temp>=s.target-1)
+            good=(s.mode,s.relay)==("turbo",False) and room_ok and water_ok
+            self.recovery_since=(self.recovery_since if self.recovery_since is not None else now) if good else None
+            self.recovery_seconds=now-self.recovery_since if self.recovery_since is not None else 0
+            return "recovered" if self.recovery_seconds>=60*self.cfg["recovery_minutes"] else None
+        # A low room is meaningful even if a native idle occurs. The controller
+        # still cannot change demand or force a compressor start.
+        self.water_since=(self.water_since if self.water_since is not None else stamp) if water_low else None
+        self.room_since=(self.room_since if self.room_since is not None else now) if low_room else None
+        self.water_seconds=stamp-self.water_since if self.water_since is not None else 0
+        self.room_seconds=now-self.room_since if self.room_since is not None else 0
+        if running:
+            if water_low:
+                self.heating_state="water_below_target"
+            elif self.running_stable(s) and not low_room:
+                self.heating_state="modulating"
+        if self.room_seconds>=60*self.cfg["room_minutes"]:
+            return "room_shortfall"
+        if self.water_seconds>=60*self.cfg["water_minutes"]:
+            if self.capacity_shortfall():
+                self.heating_state="capacity_shortfall"
+                return "water_shortfall"
+            # When room telemetry is missing, keep the existing water-only fallback.
+            if self.room_missing_since is not None and now-self.room_missing_since>=60*self.cfg["water_minutes"]:
+                return "water_shortfall"
+        return None
+
+    def can_retry(self,record,outdoor):
+        if record is None:
+            return True
+        old=record.get("outdoor")
+        return (type(old) in (int,float) and type(outdoor) in (int,float)
+                and math.isfinite(old) and math.isfinite(outdoor)
+                and outdoor>=old+self.cfg["retry_warmer"])
+
+    def view(self):
+        return {"settings":dict(self.cfg),"reference":self.reference,
+                "water_seconds":self.water_seconds,"room_seconds":self.room_seconds,
+                "running_seconds":self.running_seconds,"heating_state":self.heating_state,
+                "capacity_state":self.capacity_state,"capacity_limit_hz":self.capacity_limit,
+                "capacity_seconds":self.capacity_seconds,
+                "recovery_seconds":self.recovery_seconds}
+
+
+class ContinuousTrial:
+    """Normal-operation observation; no actuator I/O or invented cycle edges."""
+    SETTLE=ExperimentGuard.SETTLE
+    DURATION=10800
+    MAX_GAP=65
+    RESUME_GAP=900
+    MAX_WALL_SPAN=21600
+
+    def __init__(self,duration=None):
+        self.duration=self.DURATION if duration is None else duration
+        self.reset()
+
+    def reset(self,reason=None):
+        self.reason=reason
+        self.context=None
+        self.last=None
+        self.since=None
+        self.window=None
+        self.seconds=0
+        self.stats=None
+        self.run_start=None
+        self.resume_record=None
+        self.interrupted=False
+
+    def checkpoint(self):
+        if self.resume_record is not None:
+            return self.resume_record
+        if self.window is None or self.last is None or not 0<self.seconds<self.duration:
+            return None
+        return {"context":list(self.context),"start":self.window[1],"last":self.last[1],
+                "bounds":list(self.window[2:]),"seconds":self.seconds,
+                "stats":dict(self.stats,capacity=dict(self.stats["capacity"]))}
+
+    def restore(self,record):
+        # Never restore monotonic time or an in-flight cycle edge.
+        self.reset("restart_settling")
+        if record is None:
+            return
+        def num(v,lo,hi):
+            return type(v) in (int,float) and math.isfinite(v) and lo<=v<=hi
+        try:
+            if set(record)!={"context","start","last","bounds","seconds","stats"}:
+                raise ValueError()
+            context=record["context"]
+            if not isinstance(context,list) or len(context)!=2 or context[0] not in PRESETS or type(context[1]) is not bool:
+                raise ValueError()
+            start,last,seconds=(record[k] for k in ("start","last","seconds"))
+            if not num(start,0,9e10) or not num(last,start,start+self.MAX_WALL_SPAN) or not num(seconds,1,self.duration-1e-6) or last-start<seconds-20:
+                raise ValueError()
+            bounds=record["bounds"]
+            if len(bounds)!=6 or not all(num(bounds[i],lo,hi) for i,lo,hi in ((0,5,40),(1,5,40),(2,10,65),(3,10,65),(4,-60,60),(5,-60,60))) or any(not 0<=bounds[i+1]-bounds[i]<=limit+1e-6 for i,limit in ((0,.5),(2,1),(4,2))):
+                raise ValueError()
+            stats=record["stats"]
+            phases=("run_seconds","idle_seconds","defrost_seconds","transition_seconds")
+            counts=("starts","short_cycles","defrosts")
+            if set(stats)!=set(phases+counts+("capacity",)) or any(not num(stats[k],0,seconds) for k in phases+counts) or any(type(stats[k]) is not int for k in counts) or stats["short_cycles"]>stats["starts"] or abs(sum(stats[k] for k in phases)-seconds)>1:
+                raise ValueError()
+            c=stats["capacity"]
+            if set(c)!={"observed_seconds","limited_seconds","limited_deficit_seconds","deficit_k_seconds","fact_hz_seconds","fset_hz_seconds"} or any(not num(v,0,1e9) for v in c.values()) or not c["limited_deficit_seconds"]<=c["limited_seconds"]<=c["observed_seconds"]<=stats["run_seconds"]+1:
+                raise ValueError()
+            self.resume_record={"context":list(context),"start":start,"last":last,"bounds":list(bounds),"seconds":seconds,"stats":dict(stats,capacity=dict(c))}
+        except (ValueError,TypeError,KeyError,AttributeError,IndexError):
+            self.reason="invalid_restart_checkpoint"
+
+    @staticmethod
+    def weather_band(outdoor):
+        return 2*math.floor(outdoor/2)
+
+    def observe(self,s,room,outdoor,reference,minimum_room,eligible,wall):
+        if not (eligible and s.fresh and not (s.error or s.override or s.dhw)
+                and (s.heating or s.defrost or s.hz==0)
+                and ExperimentGuard.valid_room(room) and ExperimentGuard.valid_room(reference)
+                and room>=minimum_room and room>=reference-.5-1e-6
+                and type(outdoor) in (float,int) and math.isfinite(outdoor) and -60<=outdoor<=60):
+            self.reset("comfort_or_telemetry")
+            return None
+        context=(s.mode,s.relay)
+        if (self.context!=context or self.last is None or
+                not 0<s.now-self.last[0]<=self.MAX_GAP or
+                abs((wall-self.last[1])-(s.now-self.last[0]))>5 or
+                abs(s.target-self.last[2])>1.0):
+            saved=self.resume_record if self.last is None else None
+            self.reset("new_context_or_gap")
+            if saved is not None and tuple(saved["context"])==context and 0<=wall-saved["last"]<=self.RESUME_GAP:
+                self.resume_record=saved
+            self.context=context
+            self.since=s.now
+        previous=self.last
+        phase="defrost" if s.defrost else "run" if s.heating and s.hz>0 else "idle" if s.hz==0 and s.requested_hz==0 else "transition"
+        limit=ExperimentGuard.FREQUENCY_LIMITS.get(context)
+        capacity=None
+        if phase=="run" and limit and s.requested_hz>0 and abs(s.hz-s.requested_hz)<=ExperimentGuard.FREQUENCY_TOLERANCE:
+            capacity=(min(s.hz,s.requested_hz)>=limit-ExperimentGuard.LIMIT_TOLERANCE,
+                      max(0,s.target-s.supply_temp),s.hz,s.requested_hz)
+        self.last=(s.now,wall,s.target,phase,capacity)
+        saved=self.resume_record
+        if saved is not None:
+            bounds=saved["bounds"]
+            for i,value,limit in ((0,room,.5),(2,s.target,1),(4,outdoor,2)):
+                if max(bounds[i+1],value)-min(bounds[i],value)>limit+1e-6:
+                    self.resume_record=None
+                    break
+            if wall-saved["start"]>self.MAX_WALL_SPAN-self.duration:
+                self.resume_record=None
+        if s.now-self.since<self.SETTLE:
+            self.reason="settling"
+            return None
+        if self.window is None and self.resume_record is not None:
+            saved=self.resume_record
+            self.window=[s.now,saved["start"]]+list(saved["bounds"])
+            self.stats=saved["stats"]
+            self.seconds=saved["seconds"]
+            self.interrupted=True
+            self.resume_record=None
+        elif self.window is None:
+            self.interrupted=False
+            self.window=[s.now,wall,room,room,s.target,s.target,outdoor,outdoor]
+            self.stats={"run_seconds":0.0,"idle_seconds":0.0,"defrost_seconds":0.0,
+                        "transition_seconds":0.0,"starts":0,"short_cycles":0,"defrosts":0}
+            self.stats["capacity"]={"observed_seconds":0.0,"limited_seconds":0.0,
+                                    "limited_deficit_seconds":0.0,"deficit_k_seconds":0.0,
+                                    "fact_hz_seconds":0.0,"fset_hz_seconds":0.0}
+            self.run_start=None
+        elif previous is not None:
+            dt=s.now-previous[0]
+            key=phase if phase==previous[3] else "transition"
+            self.stats[key+"_seconds"]+=dt
+            before=previous[4]
+            if key=="run" and capacity is not None and before is not None:
+                c=self.stats["capacity"]
+                c["observed_seconds"]+=dt
+                c["limited_seconds"]+=dt if before[0] and capacity[0] else 0
+                c["limited_deficit_seconds"]+=dt if before[0] and capacity[0] and min(before[1],capacity[1])>=2 else 0
+                for field,index in (("deficit_k_seconds",1),("fact_hz_seconds",2),("fset_hz_seconds",3)):
+                    c[field]+=dt*(before[index]+capacity[index])/2
+            if phase=="defrost" and previous[3]!="defrost":
+                self.stats["defrosts"]+=1
+                self.run_start=None
+            if phase=="run" and previous[3]=="idle":
+                self.stats["starts"]+=1
+                self.run_start=s.now
+            if phase=="idle" and self.run_start is not None:
+                if s.now-self.run_start<600:
+                    self.stats["short_cycles"]+=1
+                self.run_start=None
+        w=self.window
+        w[2]=min(w[2],room); w[3]=max(w[3],room)
+        w[4]=min(w[4],s.target); w[5]=max(w[5],s.target)
+        w[6]=min(w[6],outdoor); w[7]=max(w[7],outdoor)
+        if w[3]-w[2]>.5+1e-6 or w[5]-w[4]>1.0+1e-6 or w[7]-w[6]>2.0+1e-6:
+            self.reset("weather_target_or_room_range")
+            return None
+        self.reason=None
+        self.seconds=sum(self.stats[k+"_seconds"] for k in ("run","idle","defrost","transition"))
+        if self.seconds<self.duration:
+            return None
+        result={"start":w[1],"stop":wall,"seconds":self.seconds,
+                "outdoor_min":w[6],"outdoor_max":w[7],
+                "target_min":w[4],"target_max":w[5],
+                "room_min":w[2],"room_max":w[3]}
+        result.update(self.stats)
+        if self.interrupted:
+            result["interrupted"]=True
+        # A window of pure idle is not evidence that a preset can heat.
+        if self.stats["run_seconds"]<300:
+            result=None
+        self.window=None
+        self.stats=None
+        self.run_start=None
+        self.seconds=0
+        self.reason=None if result is not None else "insufficient_heating"
+        return result
+
+
+class CapacityLearning:
+    """Persistent passive capacity evidence; independent of reduction learning.
+    Bins: outdoor 2 K, target 2 K, preset/FLimit. No cross-gap inference.
+    """
+    FIELDS=("seconds","limited_seconds","shortfall_seconds","limited_shortfall_seconds",
+            "fact_hz_seconds","fset_hz_seconds","deficit_k_seconds")
+    MAX_ROWS=2048
+    MAX_BYTES=1024*1024
+    SAVE_INTERVAL=900
+    MAX_GAP=65
+    SETTLE=900
+
+    def __init__(self,path=None):
+        self.path=Path(path) if path is not None else None
+        self.rows={}
+        self.last=None
+        self.since=None
+        self.dirty=False
+        self.saved=None
+        self.error=None
+        self.load()
+
+    @staticmethod
+    def key(s,outdoor,pair):
+        if (type(outdoor) not in (int,float) or not math.isfinite(outdoor)
+                or not -60<=outdoor<=60 or not 10<=s.target<=65 or pair not in LEVELS):
+            return None
+        return "%d:%d:%d"%(math.floor(outdoor/2),math.floor(s.target/2),LEVELS.index(pair))
+
+    def interrupt(self):
+        self.last=None
+        self.since=None
+
+    def observe(self,s,outdoor,eligible,wall):
+        pair=(s.mode,s.relay)
+        key=self.key(s,outdoor,pair)
+        limit=ExperimentGuard.FREQUENCY_LIMITS.get(pair)
+        if not (eligible and key is not None and limit and s.fresh and s.heating
+                and not (s.error or s.override or s.defrost or s.dhw)
+                and all(math.isfinite(x) for x in (s.now,s.hz,s.requested_hz,s.supply_temp,wall))
+                and 0<s.hz<=150 and 0<s.requested_hz<=150
+                and -10<=s.supply_temp<=85
+                and abs(s.hz-s.requested_hz)<=3):
+            self.interrupt()
+            return
+        deficit=max(0,s.target-s.supply_temp)
+        saturated=min(s.hz,s.requested_hz)>=limit-1
+        values=(1,int(saturated),int(deficit>=2),int(saturated and deficit>=2),
+                s.hz,s.requested_hz,deficit)
+        previous=self.last
+        self.last=(s.now,wall,key,s.target,values)
+        if previous is None or previous[2]!=key or abs(previous[3]-s.target)>.25 or not 0<s.now-previous[0]<=self.MAX_GAP or abs((wall-previous[1])-(s.now-previous[0]))>5:
+            self.since=s.now
+            return
+        if self.since is None or previous[0]-self.since<self.SETTLE:
+            return
+        dt=s.now-previous[0]
+        if key not in self.rows and len(self.rows)>=self.MAX_ROWS:
+            del self.rows[min(self.rows,key=lambda k:self.rows[k]["last"])]
+        row=self.rows.setdefault(key,dict.fromkeys(self.FIELDS,0.0))
+        # Exponential decay of effective evidence, half-life 30 days.
+        # Apply lazily before adding new observations; never revive old weight.
+        age=max(0,wall-row.get("last",wall))
+        weight=2**(-age/(30*86400))
+        for k in self.FIELDS:
+            row[k]*=weight
+        for i,k in enumerate(self.FIELDS):
+            row[k]+=dt*(previous[4][i]+values[i])/2
+        row["last"]=wall
+        self.dirty=True
+
+    def startup_choice(self,s,outdoor,wall=None):
+        """Keep the original startup envelope unless recent evidence contradicts it.
+        Select a measured adequate configuration, not a guessed COP winner.
+        """
+        default=("quiet",True)
+        wall=time.time() if wall is None else wall
+        def recent(pair):
+            row=self.rows.get(self.key(s,outdoor,pair),{})
+            age=wall-row.get("last",0)
+            n=row.get("seconds",0)*2**(-max(0,age)/(30*86400))
+            if n<10800 or not 0<=age<=30*86400:
+                return None
+            return row
+        baseline=recent(default)
+        if baseline is None or baseline["limited_shortfall_seconds"]*2**(-max(0,wall-baseline["last"])/(30*86400))<1800 or baseline["limited_shortfall_seconds"]/baseline["seconds"]<.20:
+            return default,"default"
+        candidates=[]
+        for pair in LEVELS:
+            if pair==default:
+                continue
+            row=recent(pair)
+            if row is None:
+                continue
+            n=row["seconds"]
+            if row["shortfall_seconds"]/n>.10 or row["limited_shortfall_seconds"]/n>.05 or row["deficit_k_seconds"]/n>1:
+                continue
+            limit=ExperimentGuard.FREQUENCY_LIMITS[pair]
+            # Prefer the lower observed ceiling; equally capped choices are
+            # distinguished by measured deficit, not presumed efficiency.
+            candidates.append((limit,row["deficit_k_seconds"]/n,-n,LEVELS.index(pair),pair))
+        if not candidates:
+            return default,"no_valid_alternative"
+        return min(candidates)[-1],"learned"
+
+    def avoid_probe(self,s,outdoor,pair):
+        key=self.key(s,outdoor,pair)
+        row=self.rows.get(key,{})
+        seconds=row.get("seconds",0)
+        # Evidence only; no positive recommendation or bypass of protections.
+        age=time.time()-row.get("last",0)
+        weight=2**(-max(0,age)/(30*86400))
+        return (seconds*weight>=10800 and 0<=age<=30*86400
+                and row.get("limited_shortfall_seconds",0)*weight>=1800
+                and row["limited_shortfall_seconds"]/seconds>=.20)
+
+    def load(self):
+        if self.path is None:
+            return
+        try:
+            if self.path.is_symlink() or self.path.stat().st_size>self.MAX_BYTES:
+                raise ValueError("invalid capacity file")
+            data=json.loads(self.path.read_text(encoding="utf-8"))
+            rows=data["rows"]
+            if data["schema"]!=1 or not isinstance(rows,dict) or len(rows)>self.MAX_ROWS:
+                raise ValueError("invalid capacity schema")
+            for key,row in rows.items():
+                a,b,c=map(int,key.split(":"))
+                if not (-30<=a<=30 and 5<=b<=32 and 0<=c<6) or set(row)!=set(self.FIELDS)|{"last"}:
+                    raise ValueError("invalid capacity context")
+                if any(type(v) not in (int,float) or not math.isfinite(v) or v<0 for v in row.values()):
+                    raise ValueError("invalid capacity values")
+                if not (row["limited_shortfall_seconds"]<=min(row["shortfall_seconds"],row["limited_seconds"])<=row["seconds"]
+                        and max(row["shortfall_seconds"],row["limited_seconds"])<=row["seconds"]):
+                    raise ValueError("invalid capacity coverage")
+            self.rows=rows
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError) as exc:
+            self.error=type(exc).__name__
+
+    def save_if_due(self,now):
+        if not self.dirty or self.path is None or (self.saved is not None and now-self.saved<self.SAVE_INTERVAL):
+            return
+        self.saved=now
+        temp=None
+        try:
+            if self.path.is_symlink():
+                raise ValueError("symlink capacity path")
+            raw=json.dumps({"schema":1,"rows":self.rows},allow_nan=False,separators=(",",":")).encode()
+            if len(raw)>self.MAX_BYTES:
+                raise ValueError("capacity storage bound")
+            fd,temp=tempfile.mkstemp(prefix=".capacity-",dir=str(self.path.parent))
+            with os.fdopen(fd,"wb") as f:
+                f.write(raw)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp,self.path)
+            temp=None
+            self.dirty=False
+            self.error=None
+        except (OSError,ValueError,TypeError) as exc:
+            self.error=type(exc).__name__
+        finally:
+            if temp is not None:
+                try:
+                    os.unlink(temp)
+                except OSError:
+                    pass
+
+    def summary(self,include_rows=True):
+        if not include_rows:
+            positive=[r["seconds"] for r in self.rows.values() if r["seconds"]>0]
+            return {"contexts":len(positive),"hours":sum(positive)/3600,
+                    "unsaved":self.dirty,"storage_error":self.error}
+        rows=[]
+        for key,row in sorted(self.rows.items()):
+            a,b,c=map(int,key.split(":"))
+            n=row["seconds"]
+            if n<=0:
+                continue
+            mode,relay=LEVELS[c]
+            rows.append(dict(row,outdoor_band=a*2,target_band=b*2,mode=mode,flimit=relay,
+                             mean_fact=row["fact_hz_seconds"]/n,mean_fset=row["fset_hz_seconds"]/n,
+                             limited_pct=100*row["limited_seconds"]/n,
+                             shortfall_pct=100*row["shortfall_seconds"]/n,
+                             mean_deficit=row["deficit_k_seconds"]/n))
+        return {"contexts":len(rows),"hours":sum(r["seconds"] for r in rows)/3600,
+                "unsaved":self.dirty,"storage_error":self.error,"rows":rows}

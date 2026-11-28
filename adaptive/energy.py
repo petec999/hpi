@@ -1,0 +1,674 @@
+"""Optional energy accounting, with bounded persistent climate aggregates. No actuator calls."""
+import json
+import math
+import os
+import re
+import tempfile
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+from collections import deque
+
+DEFAULT={"enabled":False,"source":"ha","energy":"","energy_unit":"kWh",
+         "power":"","power_unit":"W","flow_source":"none","flow":"",
+         "flow_unit":"m3/h","manual_flow":0.0,"interval":30}
+FIELDS=("energy","power","flow")
+FACTORS={"energy":{"kWh":1,"Wh":.001},"power":{"W":.001,"kW":1},
+         "flow":{"m3/h":1,"l/min":.06,"l/h":.001}}
+MAX_READ_AGE=180
+
+def validate(data):
+    if not isinstance(data,dict) or set(data)!=set(DEFAULT):
+        raise ValueError("Invalid configuration")
+    d=dict(data)
+    if type(d["enabled"]) is not bool or d["source"] not in ("ha","mqtt") or d["flow_source"] not in ("none","manual","ha","mqtt"):
+        raise ValueError("Invalid source")
+    if type(d["interval"]) is not int or d["interval"] not in (30,60):
+        raise ValueError("Invalid interval")
+    for field in FIELDS:
+        unit=d[field+"_unit"]
+        if unit not in FACTORS[field]:
+            raise ValueError("Invalid unit")
+        v=d[field]
+        if not isinstance(v,str) or len(v)>180:
+            raise ValueError("Invalid entity/topic")
+        d[field]=v.strip()
+        source=d["flow_source"] if field=="flow" else d["source"]
+        if d[field] and source=="ha" and not re.fullmatch(r"sensor\.[a-z0-9_]+",d[field]):
+            raise ValueError("Invalid HA entity")
+        if d[field] and source=="mqtt" and (not re.fullmatch(r"[A-Za-z0-9_./:-]+",d[field]) or d[field].startswith("$")):
+            raise ValueError("Invalid MQTT topic")
+    v=d["manual_flow"]
+    if type(v) not in (float,int) or not math.isfinite(v) or not 0<=v<=30:
+        raise ValueError("Invalid manual flow")
+    if d["enabled"] and not d["energy"] and not d["power"]:
+        raise ValueError("Specify energy or power")
+    if d["enabled"] and d["flow_source"]=="manual" and v<=0:
+        raise ValueError("Specify manual flow")
+    if d["enabled"] and d["flow_source"] in ("ha","mqtt") and not d["flow"]:
+        raise ValueError("Specify flow sensor")
+    return d
+
+def convert(field,value,unit):
+    if isinstance(value,bool):
+        raise ValueError("Invalid value")
+    v=float(value)*FACTORS[field][unit]
+    maximum={"energy":1e9,"power":100,"flow":30}[field]
+    if not math.isfinite(v) or not 0<=v<=maximum:
+        raise ValueError("Value out of range")
+    return v
+
+class EnergyMonitor:
+    def __init__(self,g,path=None):
+        self.g=g
+        self.path=Path(path) if path else None
+        self.lock=threading.RLock()
+        self.sync_lock=threading.Lock()
+        self.cfg=dict(DEFAULT)
+        self.generation=0
+        self.busy=False
+        self.last_poll=None
+        self.last=None
+        self.current={}
+        self.current_at=None
+        self.error=None
+        self.mqtt_values={}
+        self.subscribed=set()
+        self.client=None
+        self.rows=deque(maxlen=2881)
+        self.session=None
+        self.experiment={}
+        self.cycle_path=self.path.with_name('.adaptive-energy-cycles-v1.json') if self.path else None
+        self.cycle_session=None
+        self.cycles={}
+        self.cycle_error=None
+        self.climate_path=self.path.with_name(".adaptive-energy-climate-v1.json") if self.path else None
+        self.climate_rows={}
+        self.climate_dirty=False
+        self.climate_saved=None
+        self.climate_error=None
+        try:
+            if self.path and self.path.exists():
+                if self.path.is_symlink() or self.path.stat().st_size>4096:
+                    raise ValueError("Invalid file")
+                self.cfg=validate(json.loads(self.path.read_text()))
+        except (OSError,ValueError,TypeError):
+            self.error="Nie można odczytać ustawień energii"
+        self.load_cycles()
+        self.load_climate()
+
+    def mqtt_topics(self,cfg):
+        return {cfg[k] for k in FIELDS if cfg["enabled"] and cfg[k] and
+                (cfg["flow_source"] if k=="flow" else cfg["source"])=="mqtt"}
+
+    def check_topics(self,cfg):
+        base=str(self.g.get("mqtt_topic","")).strip("/")
+        prefix=str(self.g.get("ha_mqtt_discovery_prefix","homeassistant")).strip("/")
+        for topic in self.mqtt_topics(cfg):
+            t=topic.strip("/")
+            if any(t==p or t.startswith(p+"/") for p in (base,prefix,"hass") if p):
+                raise ValueError("Use external measurement topics, not control topics")
+
+    def settings(self):
+        with self.lock:
+            return dict(self.cfg)
+
+    def save(self,data):
+        d=validate(data)
+        self.check_topics(d)
+        with self.lock:
+            if d==self.cfg:
+                return
+            if self.path:
+                if self.path.is_symlink():
+                    raise ValueError("Invalid config path")
+                fd,tmp=tempfile.mkstemp(prefix=".energy-",dir=self.path.parent)
+                try:
+                    with os.fdopen(fd,"w",encoding="utf-8") as f:
+                        json.dump(d,f,allow_nan=False)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(tmp,self.path)
+                finally:
+                    if os.path.exists(tmp):
+                        os.unlink(tmp)
+            self.cfg=d
+            self.generation+=1
+            self.last_poll=self.last=None
+            self.current={}
+            self.current_at=None
+            self.error=None
+            self.mqtt_values={}
+            self.rows.clear()
+            self.session=None
+            self.experiment={}
+            self.cycle_session=None
+            self.cycles={}
+            self.cycle_error=None
+            self.climate_rows={}
+            self.climate_dirty=True
+            self.climate_saved=None
+            self.save_climate(time.monotonic())
+
+    def mqtt_connect(self,client):
+        with self.lock:
+            self.client=client
+            self.subscribed=set()
+            self.mqtt_values={}
+        self.sync_mqtt()
+
+    def mqtt_disconnect(self,client):
+        with self.lock:
+            if self.client is client:
+                self.client=None
+                self.subscribed=set()
+                self.mqtt_values={}
+
+    def sync_mqtt(self):
+        # Never invoke Paho while holding the measurement lock: callbacks
+        # can run on a different thread with Paho's internal locks held.
+        if not self.sync_lock.acquire(blocking=False):
+            return
+        try:
+            with self.lock:
+                client=self.client
+                wanted=self.mqtt_topics(self.cfg)
+                self.check_topics(self.cfg)
+                subscribed=set(self.subscribed)
+            if client is None or not client.is_connected():
+                return
+            for topic in subscribed-wanted:
+                rc,_=client.unsubscribe(topic)
+                if rc==0:
+                    with self.lock:
+                        if self.client is client:
+                            self.subscribed.discard(topic)
+            for topic in wanted-subscribed:
+                rc,_=client.subscribe(topic,qos=0)
+                if rc==0:
+                    with self.lock:
+                        if self.client is client:
+                            self.subscribed.add(topic)
+        except Exception:
+            pass
+        finally:
+            self.sync_lock.release()
+
+    def mqtt_message(self,client,msg):
+        with self.lock:
+            if client is not self.client or msg.topic not in self.mqtt_topics(self.cfg):
+                return False
+            try:
+                self.check_topics(self.cfg)
+            except ValueError:
+                return False
+            try:
+                if not msg.retain and len(msg.payload)<=64:
+                    self.mqtt_values[msg.topic]=(time.monotonic(),msg.payload.decode("ascii"))
+            except (ValueError,UnicodeError):
+                pass
+            return True
+
+    def read_ha(self,entity,field,unit):
+        from urllib.parse import urlsplit
+        base=str(self.g.get("haaddr","")).rstrip("/")
+        port=str(self.g.get("haport",""))
+        p=urlsplit(base)
+        if p.scheme not in ("http","https") or not p.hostname or p.username or p.password or p.path or p.query or p.fragment:
+            raise ValueError("Invalid HA address")
+        if p.port is None and port:
+            if not port.isdecimal() or not 1<=int(port)<=65535:
+                raise ValueError("Invalid HA port")
+            base+=":"+port
+        headers={"Authorization":"Bearer "+str(self.g.get("hakey","")),"Accept":"application/json"}
+        with self.g["requests"].get(base+"/api/states/"+entity,headers=headers,
+                                    timeout=(2,3),allow_redirects=False,stream=True) as resp:
+            if resp.status_code!=200:
+                raise ValueError("HA request failed")
+            raw=bytearray()
+            deadline=time.monotonic()+5
+            for chunk in resp.iter_content(4096):
+                if time.monotonic()>deadline:
+                    raise ValueError('HA response deadline')
+                raw.extend(chunk)
+                if len(raw)>32768:
+                    raise ValueError("HA response too large")
+            data=json.loads(raw)
+        attrs=data.get("attributes",{})
+        actual=attrs.get("unit_of_measurement")
+        normalized=str(actual).replace("³","3").replace("L/","l/")
+        if normalized!=unit:
+            raise ValueError("Unit mismatch")
+        stamp=data.get("last_reported") or data.get("last_updated")
+        t=datetime.fromisoformat(stamp.replace("Z","+00:00")).timestamp()
+        if not -5<=time.time()-t<=MAX_READ_AGE:
+            raise ValueError("Stale HA value")
+        return convert(field,data["state"],unit)
+
+    def read_values(self,cfg):
+        values={}
+        failures=[]
+        for field in FIELDS:
+            source=cfg["flow_source"] if field=="flow" else cfg["source"]
+            if field=="flow" and source=="manual":
+                values[field]=cfg["manual_flow"]
+                continue
+            if source=="none" or not cfg[field]:
+                continue
+            try:
+                if source=="ha":
+                    values[field]=self.read_ha(cfg[field],field,cfg[field+"_unit"])
+                else:
+                    with self.lock:
+                        row=self.mqtt_values.get(cfg[field])
+                    if not row or not 0<=time.monotonic()-row[0]<=MAX_READ_AGE:
+                        raise ValueError("No fresh MQTT value")
+                    values[field]=convert(field,row[1],cfg[field+"_unit"])
+            except Exception:
+                failures.append(field)
+        return values,failures
+
+    def probe(self,data):
+        cfg=validate(data)
+        self.check_topics(cfg)
+        # MQTT testing uses existing subscriptions; never subscribe to draft topics.
+        with self.lock:
+            if self.busy or (getattr(self,"last_probe",None) is not None and time.monotonic()-self.last_probe<10):
+                raise ValueError("Odczyt zajęty lub test wykonywany zbyt często")
+            self.last_probe=time.monotonic()
+            self.busy=True
+        try:
+            values,failures=self.read_values(cfg)
+            return {"values":values,"missing":failures,"mqtt_requires_saved_settings":bool(self.mqtt_topics(cfg)-self.mqtt_topics(self.settings()))}
+        finally:
+            with self.lock:
+                self.busy=False
+
+    def poll(self,now,state,cycles=(),session=None):
+        self.sync_mqtt()
+        with self.lock:
+            if not self.cfg["enabled"] or self.busy or (self.last_poll is not None and now-self.last_poll<self.cfg["interval"]):
+                return
+            self.busy=True
+            self.last_poll=now
+            cfg=dict(self.cfg)
+            generation=self.generation
+            wall=time.time()
+        def run():
+            try:
+                values,failures=self.read_values(cfg)
+                ended=time.monotonic()
+                with self.lock:
+                    if generation==self.generation:
+                        self.current=values if ended-now<=20 else {}
+                        self.current_at=ended
+                        self.error=("Brak świeżych danych: "+", ".join(failures)) if failures else None
+                        self.accept(now,state,values,wall) if ended-now<=20 else self.accept(now,None,{},wall)
+                        self.record_cycles(session,cycles)
+                        self.save_climate(now)
+            finally:
+                with self.lock:
+                    self.busy=False
+        try:
+            threading.Thread(target=run,name="hpi-energy",daemon=True).start()
+        except BaseException:
+            with self.lock:
+                self.busy=False
+            raise
+
+    def accept(self,now,state,values,wall=None):
+        # Caller holds lock. No interpolation across missing samples or mode transitions.
+        old=self.last
+        self.last=(now,state,dict(values),wall)
+        session=state[3] if state else None
+        if session is not None and session!=self.session:
+            self.session=session
+            self.experiment={}
+        if old is None:
+            return
+        t,prev,a,old_wall=old
+        dt=now-t
+        if not 0<dt<=self.cfg["interval"]+35:
+            return
+        if "energy" in a and "energy" in values:
+            e=values["energy"]-a["energy"]
+            if not 0<=e<=100*dt/3600:
+                return
+        elif not self.cfg["energy"] and "power" in a and "power" in values:
+            e=(a["power"]+values["power"])*dt/7200
+        else:
+            return
+        stable=bool(state and prev and state[:2]==prev[:2] and state[3]==prev[3])
+        group=state[0] if stable else "unassigned"
+        mode=state[1] if stable else None
+        heat=None
+        if stable and group=="co_run" and "flow" in a and "flow" in values:
+            if 0<=prev[2]<=30 and 0<=state[2]<=30:
+                heat=1.163*(a["flow"]*prev[2]+values["flow"]*state[2])*dt/7200
+        end_wall=wall if wall is not None and old_wall is not None and abs((wall-old_wall)-dt)<=5 else None
+        # Separate signed hydronic balance: a confirmed circulating pump
+        # can transfer heat in either direction, including defrost.
+        # Keep legacy running-only COP and completed cycle schema unchanged.
+        net_heat=None
+        band=None
+        if stable and len(state)>=7 and len(prev)>=7 and group in ("co_run","co_idle","defrost"):
+            def climate(v):
+                outdoor,target=v[4:6]
+                if (type(outdoor) in (float,int) and math.isfinite(outdoor) and -60<=outdoor<=60 and
+                    type(target) in (float,int) and math.isfinite(target) and 10<=target<=65):
+                    return (2*math.floor(outdoor/2),2*math.floor(target/2))
+                return None
+            b=climate(state)
+            if b is not None and b==climate(prev):
+                band=b
+            if prev[6] is False and state[6] is False and group=="co_idle":
+                net_heat=0.0
+            elif prev[6] is True and state[6] is True and "flow" in a and "flow" in values:
+                if -30<=prev[2]<=30 and -30<=state[2]<=30:
+                    net_heat=1.163*(a["flow"]*prev[2]+values["flow"]*state[2])*dt/7200
+        row=(now,group,mode,dt,e,heat,end_wall,band,net_heat,session if stable else None)
+        self.rows.append(row)
+        self.record_climate(row)
+        if stable and session is not None and group in ("co_run","co_idle"):
+            self.add(self.experiment,mode,row)
+        while self.rows and self.rows[0][0]<now-86400:
+            self.rows.popleft()
+
+    @staticmethod
+    def add(target,key,row):
+        if key is None:
+            return
+        _,_,_,dt,e,heat=row[:6]
+        b=target.setdefault(key,{"seconds":0,"kwh":0.0,"paired_kwh":0.0,"heat_kwh":0.0,"paired_seconds":0})
+        b["seconds"]+=dt
+        b["kwh"]+=e
+        if heat is not None:
+            b["heat_kwh"]+=heat
+            b["paired_kwh"]+=e
+            b["paired_seconds"]+=dt
+
+
+    def load_cycles(self):
+        if self.cycle_path is None:
+            return
+        try:
+            if self.cycle_path.is_symlink() or self.cycle_path.stat().st_size>16384:
+                raise ValueError("Invalid cycle file")
+            d=json.loads(self.cycle_path.read_text())
+            if d["schema"]!=1 or d["settings"]!=self.cfg:
+                return
+            session=d["session"]
+            if type(session) not in (int,float) or not math.isfinite(session) or session<=0:
+                raise ValueError("Invalid cycle session")
+            if not isinstance(d["cycles"],list) or len(d["cycles"])>18:
+                raise ValueError("Invalid cycles")
+            result={}
+            for row in d["cycles"]:
+                keys={"start","stop","mode","duration_seconds","covered_seconds","paired_seconds","kwh","heat_kwh","paired_kwh","cop_estimate"}
+                if not isinstance(row,dict) or set(row)!=keys or row["mode"] not in tuple(m+f for m in ("eco","quiet","turbo") for f in (" + FLimit"," / FLimit OFF")):
+                    raise ValueError("Invalid cycle")
+                for k,v in row.items():
+                    if k=="mode":
+                        continue
+                    if v is None and k in ("kwh","heat_kwh","paired_kwh","cop_estimate"):
+                        continue
+                    if type(v) not in (int,float) or not math.isfinite(v) or v<0:
+                        raise ValueError("Invalid cycle value")
+                if not session<=row["start"]<row["stop"] or not 0<=row["paired_seconds"]<=row["covered_seconds"]<=row["duration_seconds"]+5:
+                    raise ValueError("Invalid cycle coverage")
+                result[row["start"]]=row
+            self.cycle_session=session
+            self.cycles=result
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError,KeyError):
+            self.cycle_error="Nie można odczytać bilansu cykli"
+
+    def save_cycles(self):
+        if self.cycle_path is None:
+            return
+        temp=None
+        try:
+            if self.cycle_path.is_symlink():
+                raise ValueError("Invalid cycle path")
+            fd,temp=tempfile.mkstemp(prefix=".energy-cycles-",dir=self.cycle_path.parent)
+            with os.fdopen(fd,"w",encoding="utf-8") as f:
+                json.dump({"schema":1,"settings":self.cfg,"session":self.cycle_session,
+                           "cycles":list(self.cycles.values())},f,allow_nan=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp,self.cycle_path)
+            temp=None
+            self.cycle_error=None
+        except (OSError,ValueError):
+            self.cycle_error="Nie można zapisać bilansu cykli"
+        finally:
+            if temp is not None:
+                try: os.unlink(temp)
+                except OSError: pass
+
+    def record_cycles(self,session,cycles):
+        # Only intervals wholly inside a completed cycle, in the same
+        # observed configuration and CO-running state. Never extrapolate.
+        if session is None or self.last is None or self.last[3] is None:
+            return
+        if session!=self.cycle_session:
+            self.cycle_session=session
+            self.cycles={}
+        changed=False
+        for start,stop,mode in cycles:
+            if start in self.cycles or start<session or not start<stop<=self.last[3] or len(self.cycles)>=18:
+                continue
+            rows=[r for r in self.rows if r[6] is not None and r[1]=="co_run" and r[2]==mode
+                  and start<=r[6]-r[3] and r[6]<=stop]
+            bucket={}
+            for r in rows:
+                self.add(bucket,mode,r)
+            b=bucket.get(mode,{"seconds":0,"kwh":0,"paired_seconds":0,"heat_kwh":0,"paired_kwh":0})
+            self.cycles[start]={"start":start,"stop":stop,"mode":mode,"duration_seconds":stop-start,
+                "covered_seconds":b["seconds"],"paired_seconds":b["paired_seconds"],
+                "kwh":b["kwh"] if rows else None,"heat_kwh":b["heat_kwh"] if b["paired_seconds"] else None,
+                "paired_kwh":b["paired_kwh"] if b["paired_seconds"] else None,
+                "cop_estimate":b["heat_kwh"]/b["paired_kwh"] if b["paired_seconds"]>=300 and b["paired_kwh"]>=.05 else None}
+            changed=True
+        if changed:
+            self.save_cycles()
+
+    @staticmethod
+    def net_add(target,key,row):
+        b=target.setdefault(key,{"seconds":0,"kwh":0.0,"paired_seconds":0,"paired_kwh":0.0,
+                                "net_heat_kwh":0.0,"defrost_kwh":0.0,"defrost_heat_kwh":0.0,
+                                "defrost_seconds":0,"defrost_paired_seconds":0})
+        dt,e,q=row[3],row[4],row[8]
+        b["seconds"]+=dt
+        b["kwh"]+=e
+        if row[1]=="defrost":
+            b["defrost_kwh"]+=e
+            b["defrost_seconds"]+=dt
+        if q is not None:
+            b["paired_seconds"]+=dt
+            b["paired_kwh"]+=e
+            b["net_heat_kwh"]+=q
+            if row[1]=="defrost":
+                b["defrost_paired_seconds"]+=dt
+                b["defrost_heat_kwh"]+=q
+
+    CLIMATE_FIELDS={"seconds","kwh","paired_seconds","paired_kwh","net_heat_kwh","defrost_kwh",
+                    "defrost_heat_kwh","defrost_seconds","defrost_paired_seconds"}
+    CLIMATE_MODES=tuple(m+f for m in ("eco","quiet","turbo") for f in (" + FLimit"," / FLimit OFF"))
+    CLIMATE_MAX=2048
+    CLIMATE_MAX_BYTES=1024*1024
+
+    def record_climate(self,row):
+        # Only paired, time-stamped intervals in an unchanged configuration
+        # and temperature band. Keep unpaired electricity for coverage.
+        if (row[6] is None or row[7] is None or row[2] not in self.CLIMATE_MODES
+                or row[1] not in ("co_run","co_idle","defrost")):
+            return
+        key="%s|%d|%d"%(row[2],*row[7])
+        if key not in self.climate_rows and len(self.climate_rows)>=self.CLIMATE_MAX:
+            del self.climate_rows[min(self.climate_rows,key=lambda k:self.climate_rows[k]["last"])]
+        record=self.climate_rows.get(key)
+        if record is None:
+            record={"totals":{},"last":row[6]}
+            self.climate_rows[key]=record
+        # Retain exact observed sums; do not extrapolate across gaps.
+        self.net_add(record["totals"],"net",row)
+        record["last"]=max(record["last"],row[6])
+        self.climate_dirty=True
+
+    def load_climate(self):
+        if self.climate_path is None:
+            return
+        try:
+            if self.climate_path.is_symlink() or self.climate_path.stat().st_size>self.CLIMATE_MAX_BYTES:
+                raise ValueError("invalid climate file")
+            data=json.loads(self.climate_path.read_text(encoding="utf-8"))
+            if data["schema"]!=1 or data["settings"]!=self.cfg:
+                return
+            rows=data["rows"]
+            if not isinstance(rows,dict) or len(rows)>self.CLIMATE_MAX:
+                raise ValueError("invalid climate rows")
+            for key,record in rows.items():
+                mode,a,b=key.split("|")
+                if mode not in self.CLIMATE_MODES or not -60<=int(a)<=60 or not 10<=int(b)<=64 or int(a)%2 or int(b)%2:
+                    raise ValueError("invalid climate context")
+                if set(record)!={"last","totals"} or set(record["totals"])!={"net"}:
+                    raise ValueError("invalid climate record")
+                v=record["totals"]["net"]
+                if set(v)!=self.CLIMATE_FIELDS or any(type(x) not in (int,float) or not math.isfinite(x) for x in list(v.values())+[record["last"]]):
+                    raise ValueError("invalid climate values")
+                if record["last"]<0 or any(x<0 for k,x in v.items() if k not in ("net_heat_kwh","defrost_heat_kwh")):
+                    raise ValueError("negative climate value")
+                if not (0<=v["defrost_paired_seconds"]<=min(v["paired_seconds"],v["defrost_seconds"])<=v["seconds"]
+                        and max(v["paired_seconds"],v["defrost_seconds"])<=v["seconds"]
+                        and max(v["paired_kwh"],v["defrost_kwh"])<=v["kwh"]+1e-8):
+                    raise ValueError("invalid climate coverage")
+            self.climate_rows=rows
+        except FileNotFoundError:
+            pass
+        except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError) as exc:
+            self.climate_error=type(exc).__name__
+
+    def save_climate(self,now):
+        if not self.climate_dirty or self.climate_path is None or (self.climate_saved is not None and now-self.climate_saved<900):
+            return
+        self.climate_saved=now
+        temp=None
+        try:
+            if self.climate_path.is_symlink():
+                raise ValueError("symlink climate path")
+            raw=json.dumps({"schema":1,"settings":self.cfg,"rows":self.climate_rows},allow_nan=False,separators=(",",":")).encode()
+            if len(raw)>self.CLIMATE_MAX_BYTES:
+                raise ValueError("climate storage bound")
+            fd,temp=tempfile.mkstemp(prefix=".energy-climate-",dir=str(self.climate_path.parent))
+            with os.fdopen(fd,"wb") as f:
+                f.write(raw)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp,self.climate_path)
+            temp=None
+            self.climate_dirty=False
+            self.climate_error=None
+        except (OSError,ValueError,TypeError) as exc:
+            self.climate_error=type(exc).__name__
+        finally:
+            if temp is not None:
+                try:
+                    os.unlink(temp)
+                except OSError:
+                    pass
+
+    def climate_history(self):
+        with self.lock:
+            rows=[]
+            for key,record in sorted(self.climate_rows.items()):
+                mode,a,b=key.split("|")
+                rows.append(dict(self.net_result(record["totals"]["net"]),mode=mode,
+                                 outdoor_band=int(a),target_band=int(b),last=record["last"]))
+            return {"rows":rows,"contexts":len(rows),"unsaved":self.climate_dirty,
+                    "storage_error":self.climate_error,"flow_estimated":self.cfg["flow_source"]=="manual",
+                    "electricity_estimated":not bool(self.cfg["energy"])}
+
+    @staticmethod
+    def net_result(b,expected_seconds=None):
+        coverage=b["paired_seconds"]/b["seconds"] if b["seconds"] else 0
+        time_coverage=b["seconds"]/expected_seconds if expected_seconds else None
+        adequate=coverage>=.9 and (time_coverage is None or time_coverage>=.9)
+        defrost_ok=b["defrost_seconds"]==b["defrost_paired_seconds"]
+        return dict(b,paired_fraction=coverage,time_fraction=time_coverage,
+                    cop_net=(b["net_heat_kwh"]/b["paired_kwh"] if adequate and defrost_ok and
+                             b["paired_seconds"]>=300 and b["paired_kwh"]>=.05 else None))
+
+    def window_summary(self,start,stop,mode,session):
+        # Called at the end of a stable trial. Last asynchronous read may
+        # not have arrived yet; missing coverage is never extrapolated.
+        with self.lock:
+            if not self.cfg["enabled"]:
+                return None
+            result={}
+            for row in self.rows:
+                if (row[6] is not None and row[1] in ("co_run","co_idle","defrost") and row[2]==mode and row[9]==session
+                        and start<=row[6]-row[3] and row[6]<=stop):
+                    self.net_add(result,mode,row)
+            if mode not in result:
+                return None
+            return dict(self.net_result(result[mode],stop-start),flow_estimated=self.cfg["flow_source"]=="manual",
+                        electricity_estimated=not bool(self.cfg["energy"]))
+
+    def meter_average_power(self,now):
+        # Average over contiguous, measured counter increments only.
+        # Do not bridge gaps, resets or stale readings.
+        if not self.cfg["enabled"] or not self.cfg["energy"] or not self.rows or self.last is None:
+            return None
+        end=self.rows[-1][0]
+        if self.last[0]!=end or not 0<=now-end<=self.cfg["interval"]+35:
+            return None
+        seconds=0.0
+        kwh=0.0
+        cursor=end
+        for row in reversed(self.rows):
+            if abs(row[0]-cursor)>0.001 or seconds+row[3]>300:
+                break
+            seconds+=row[3]
+            kwh+=row[4]
+            cursor=row[0]-row[3]
+        if seconds<60:
+            return None
+        return {"kw":kwh*3600/seconds,"seconds":seconds}
+
+    def summary(self,now=None):
+        now=time.monotonic() if now is None else now
+        with self.lock:
+            totals={}
+            modes={}
+            climate={}
+            net_groups={}
+            for row in self.rows:
+                if now-86400<=row[0]<=now:
+                    self.add(totals,row[1],row)
+                    if row[1] in ("co_run","co_idle"):
+                        self.add(modes,row[2],row)
+                    if row[1] in ("co_run","co_idle","defrost"):
+                        self.net_add(net_groups,row[1],row)
+                        if row[7] is not None:
+                            key=(row[2],row[7][0],row[7][1])
+                            self.net_add(climate,key,row)
+            # Do not present a cross-weather ranking; these are sampled
+            # same-band aggregates, not controlled equal-load tests.
+            climate_rows=[dict(self.net_result(v),mode=k[0],outdoor_band=k[1],target_band=k[2])
+                          for k,v in sorted(climate.items())]
+            def expose(rows):
+                return {k:dict(v,cop_estimate=(v["heat_kwh"]/v["paired_kwh"]
+                     if v["paired_seconds"]>=300 and v["paired_kwh"]>=.05 else None)) for k,v in rows.items()}
+            return {"settings":dict(self.cfg),"error":self.error,
+                    "current":dict(self.current) if self.current_at is not None and 0<=now-self.current_at<=MAX_READ_AGE else {},
+                    "meter_average_power":self.meter_average_power(now),
+                    "busy":self.busy,"groups_24h":expose(totals),"modes_24h":expose(modes),
+                    "experiment":expose(self.experiment),"session":self.session,
+                    "climate_history":self.climate_history(),"climate_24h":climate_rows,"net_groups_24h":{k:self.net_result(v) for k,v in net_groups.items()},
+                    "cycles":list(self.cycles.values()),"cycle_session":self.cycle_session,"cycle_error":self.cycle_error,
+                    "electricity_estimated":not bool(self.cfg["energy"]),"flow_estimated":self.cfg["flow_source"]=="manual",
+                    "coverage_seconds":sum(v["seconds"] for v in totals.values()),
+                    "scope":"24h RAM and persistent climate aggregates; sampling estimates, not calibrated heat measurement"}

@@ -1,0 +1,23 @@
+name: HaierPi core resource audit
+on:
+  push:
+    branches: [feature/adaptive-storage-audit]
+  pull_request:
+jobs:
+  resource:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        python: ['3.9', '3.11']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: bash -n install-adaptive-preview.sh
+      - run: python -m py_compile tools/patch-core-resources.py tools/patch-serial-charts.py tools/patch-local-auth.py tools/patch-energy.py adaptive/energy.py tools/install-adaptive-preview.py
+      - run: python -m unittest discover -s tests -p test_core_resources.py -v
+      - run: python -m unittest discover -s tests -p test_serial_charts.py -v
+      - run: python -m unittest discover -s tests -p test_local_auth.py -v
+      - run: python -m unittest discover -s tests -p test_energy.py -v
+      - run: python -m unittest discover -s tests -p test_installer_bytes.py -v
