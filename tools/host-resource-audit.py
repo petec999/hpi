@@ -92,6 +92,55 @@ def inventory(root):
             row["truncated"]=True
     return groups
 
+def register_evidence(path):
+    """Summarize only already retained passive candidate changes, not decoding."""
+    masks={144:0xfe00,150:0xff00,151:0xff00,155:0x001f,156:0xffff}
+    try:
+        if path.is_symlink() or path.stat().st_size>512*1024:
+            raise ValueError("invalid register history")
+        with path.open("rb") as f:
+            raw=f.read(512*1024+1)
+        if len(raw)>512*1024:
+            raise ValueError("oversized register history")
+        data=json.loads(raw)
+        events=data["events"]
+        if data["schema"]!=1 or not isinstance(events,list) or len(events)>256:
+            raise ValueError("invalid register history")
+        counts={}
+        pairs=0
+        for e in events:
+            before,after=e["before"],e["after"]
+            if before is None:
+                continue
+            old,new=before["R141"],after["R141"]
+            if len(old)!=16 or len(new)!=16 or any(type(v) is not int or not 0<=v<=65535 for v in old+new):
+                raise ValueError("invalid R141")
+            flags=e["flags"]
+            known=("heater_command","heater_readback","valve_dhw","valve_ch","pdhw",
+                   "dhw_heating","dhw_heater_assist_active","anti_legionella_active","dhw_enabled")
+            if not isinstance(flags,list) or any(x not in known for x in flags):
+                raise ValueError("invalid flags")
+            pairs+=1
+            for reg,mask in masks.items():
+                a,b=old[reg-141],new[reg-141]
+                change=(a^b)&mask
+                for bit in range(16):
+                    if change&(1<<bit):
+                        row=counts.setdefault((reg,bit),{"register":reg,"bit":bit,"rising":0,"falling":0,
+                            "with_known_edge":0,"known_edges":{}})
+                        row["rising" if b&(1<<bit) else "falling"]+=1
+                        if flags:
+                            row["with_known_edge"]+=1
+                        for flag in set(flags):
+                            row["known_edges"][flag]=row["known_edges"].get(flag,0)+1
+        return {"retained_events":len(events),"valid_pairs":pairs,
+                "candidates":sorted(counts.values(),key=lambda x:(-(x["rising"]+x["falling"]),x["register"],x["bit"])),
+                "note":"Selected event pairs only; association is not a decoded signal, causation or duty cycle."}
+    except FileNotFoundError:
+        return {"available":False,"reason":"no saved register history"}
+    except (OSError,ValueError,TypeError,KeyError,AttributeError,IndexError):
+        return {"available":False,"reason":"invalid or unreadable register history"}
+
 def service():
     keys=("MainPID","NRestarts","ActiveState","SubState")
     command=["systemctl","show","haier.service"]+["--property="+k for k in keys]
@@ -121,6 +170,7 @@ def main():
             "host_memory":{k:mem.get(k) for k in ("MemTotal","MemAvailable","SwapTotal","SwapFree")},
             "disk":{"total_bytes":disk.total,"free_bytes":disk.free},
             "files":inventory(args.root),
+            "register_evidence":register_evidence(args.root/".adaptive-register-watch-v1.json"),
             "notes":["CPU percentage is relative to one core, not all cores.",
                      "write_bytes is process-attributed kernel I/O, not measured physical SD wear.",
                      "A short sample does not prove or rule out a memory leak. Compare over time.",
