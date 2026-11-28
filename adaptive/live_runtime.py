@@ -1625,12 +1625,13 @@ class Runtime:
         if not hasattr(self,"building_rates"):
             self.building_rates=[]
             self.building_previous=None
-        if s.dhw or s.defrost or s.override or s.error or self.raw("intemp_status")!="ok":
+        if s.dhw or s.defrost or s.override or s.error or not s.fresh:
             self.building_previous=None
             return
-        indoor=self.number(self.raw("intemp"))
-        outdoor=self.number(self.raw("outtemp"))
-        if self.raw("outtemp_status")!="ok" or not -10<indoor<45 or not -50<outdoor<50:
+        wall=time.time()
+        indoor=self.fresh_room_sensor("intemp",wall)
+        outdoor=self.fresh_room_sensor("outtemp",wall)
+        if indoor is None or outdoor is None or not -10<indoor<45 or not -50<outdoor<50:
             self.building_previous=None
             return
         previous=self.building_previous
@@ -1749,7 +1750,7 @@ class Runtime:
                 blocker="Brak pełnego, świeżego odczytu pompy lub GPIO"
             if self.pending is not None:
                 blocker="Oczekiwanie na potwierdzenie poprzedniego polecenia"
-            return dict(self.status,capacity_live=capacity_live,capacity_learning={k:v for k,v in self.capacity_learning.summary().items() if k!="rows"},storage_diagnostics=self.storage_diagnostics(),control=self.control,mode=actual,relay=relay,
+            return dict(self.status,capacity_live=capacity_live,capacity_learning=self.capacity_learning.summary(include_rows=False),storage_diagnostics=self.storage_diagnostics(),control=self.control,mode=actual,relay=relay,
                         ready=blocker is None,activation_blocker=blocker,curve=curve,zone=zone,pending=self.pending is not None,fault=self.fault,
                         auto_resume_pending=self.resume_requested,owner_storage_error=self.resume_error,threshold_model=model,
                         heater=self.heater_view(),curve_settings=self.curve_settings(),learning=self.learning.summary(),hysteresis=self.observer.summary(),
