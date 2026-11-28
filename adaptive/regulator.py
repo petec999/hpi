@@ -2149,6 +2149,39 @@ class CapacityLearning:
         row["last"]=wall
         self.dirty=True
 
+    def startup_choice(self,s,outdoor,wall=None):
+        """Keep the original startup envelope unless recent evidence contradicts it.
+        Select a measured adequate configuration, not a guessed COP winner.
+        """
+        default=("quiet",True)
+        wall=time.time() if wall is None else wall
+        def recent(pair):
+            row=self.rows.get(self.key(s,outdoor,pair),{})
+            n=row.get("seconds",0)
+            if n<10800 or not 0<=wall-row.get("last",0)<=30*86400:
+                return None
+            return row
+        baseline=recent(default)
+        if baseline is None or baseline["limited_shortfall_seconds"]<1800 or baseline["limited_shortfall_seconds"]/baseline["seconds"]<.20:
+            return default,"default"
+        candidates=[]
+        for pair in LEVELS:
+            if pair==default:
+                continue
+            row=recent(pair)
+            if row is None:
+                continue
+            n=row["seconds"]
+            if row["shortfall_seconds"]/n>.10 or row["limited_shortfall_seconds"]/n>.05 or row["deficit_k_seconds"]/n>1:
+                continue
+            limit=ExperimentGuard.FREQUENCY_LIMITS[pair]
+            # Prefer the lower observed ceiling; equally capped choices are
+            # distinguished by measured deficit, not presumed efficiency.
+            candidates.append((limit,row["deficit_k_seconds"]/n,-n,LEVELS.index(pair),pair))
+        if not candidates:
+            return default,"no_valid_alternative"
+        return min(candidates)[-1],"learned"
+
     def avoid_probe(self,s,outdoor,pair):
         key=self.key(s,outdoor,pair)
         row=self.rows.get(key,{})
