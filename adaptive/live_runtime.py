@@ -7,7 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 from adaptive.energy import EnergyMonitor
-from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch, HeaterCounter, OperationMonitor, PassiveInsights, ExperimentGuard, ContinuousTrial
+from adaptive.regulator import Regulator, Sample, LEVELS, Learning, STOP_HYSTERESIS, HysteresisObserver, AdaptiveReport, NativeThresholds, RegisterWatch, HeaterCounter, OperationMonitor, PassiveInsights, ExperimentGuard, ContinuousTrial, CapacityLearning
 
 class SelectionBlocked(ValueError):
     """Safe, fixed activation reason exposed to authenticated UI."""
@@ -31,6 +31,7 @@ class Runtime:
         self.load_owner()
         self.reg=Regulator()
         self.learning=Learning(learning_path,g.get("logging"))
+        self.capacity_learning=CapacityLearning(Path(learning_path).with_name(".adaptive-capacity-v1.json") if learning_path else None)
         self.learning_before=None
         observer_path=Path(learning_path).with_name(".adaptive-hysteresis-v1.json") if learning_path else None
         self.observer=HysteresisObserver(observer_path,g.get("logging"))
@@ -621,6 +622,7 @@ class Runtime:
             self.control=mode
             self.report_event("owner","selected "+mode)
             self.report.interrupt()
+            self.capacity_learning.interrupt()
             self.thresholds.interrupt()
             self.observer.interrupt("context_changed",time.time())
             self.experiment_idle=None
@@ -763,6 +765,7 @@ class Runtime:
     def report_view(self):
         with self.lock:
             data=self.report.snapshot()
+            data["capacity_learning"]=self.capacity_learning.summary()
             # Do not present an old sampled run as a currently running compressor.
             if self.report.last is None or not 0<=time.monotonic()-self.report.last[0]<=65:
                 data["current_streak"]=None
@@ -891,6 +894,10 @@ class Runtime:
                 outdoor=None
             wall=time.time()
             try:
+                self.capacity_learning.observe(s,self.fresh_room_sensor("outtemp",wall),eligible and self.pending is None,wall)
+            except Exception:
+                self.capacity_learning.interrupt()
+            try:
                 self.insights.observe(s,co_enabled,self.fresh_room_sensor("intemp",wall),self.fresh_room_sensor("outtemp",wall))
             except Exception:
                 self.insights.interrupt()
@@ -914,6 +921,7 @@ class Runtime:
             self.insights.interrupt()
             self.operation.interrupt()
             self.observer.interrupt("telemetry_unavailable",time.time())
+            self.capacity_learning.interrupt()
             self.report.interrupt()
             self.thresholds.interrupt()
         finally:
@@ -1327,6 +1335,7 @@ class Runtime:
             except Exception:
                 pass
             self.learning.save_if_due(now)
+            self.capacity_learning.save_if_due(now)
             if self.control not in ("auto","shadow"):
                 self.idle_frame=None
             if self.control!="auto":
@@ -1448,7 +1457,8 @@ class Runtime:
                 outdoor=self.number(self.raw("outtemp"))
                 self.learning.observe(s,outdoor,stop_offset)
                 self.reg.cfg=self.learning.settings(s,outdoor)
-            d=self.reg.step(s,control=self.control,stop_offset=stop_offset)
+            d=self.reg.step(s,control=self.control,stop_offset=stop_offset,
+                            capacity_model=self.capacity_learning,outdoor=self.fresh_room_sensor("outtemp",time.time()))
             label=lambda i: None if i is None else LEVELS[i][0]+("+FLimit" if LEVELS[i][1] else "")
             self.status={"reason":d.reason,"reason_pl":self.display_reason(s,d.reason),"risk":d.risk,"actual":label(d.current),
                          "proposed":label(d.proposed),"target":s.target,
@@ -1726,7 +1736,7 @@ class Runtime:
                 blocker="Brak pełnego, świeżego odczytu pompy lub GPIO"
             if self.pending is not None:
                 blocker="Oczekiwanie na potwierdzenie poprzedniego polecenia"
-            return dict(self.status,capacity_live=capacity_live,storage_diagnostics=self.storage_diagnostics(),control=self.control,mode=actual,relay=relay,
+            return dict(self.status,capacity_live=capacity_live,capacity_learning={k:v for k,v in self.capacity_learning.summary().items() if k!="rows"},storage_diagnostics=self.storage_diagnostics(),control=self.control,mode=actual,relay=relay,
                         ready=blocker is None,activation_blocker=blocker,curve=curve,zone=zone,pending=self.pending is not None,fault=self.fault,
                         auto_resume_pending=self.resume_requested,owner_storage_error=self.resume_error,threshold_model=model,
                         heater=self.heater_view(),curve_settings=self.curve_settings(),learning=self.learning.summary(),hysteresis=self.observer.summary(),
