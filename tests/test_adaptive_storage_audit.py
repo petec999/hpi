@@ -134,6 +134,27 @@ class ExperimentGuardTests(unittest.TestCase):
             loaded.observe(self.sample(13030,hz=40,requested_hz=40),1,True,wall+13030)
             self.assertEqual(loaded.summary()["hours"],before)
 
+    def test_learned_startup_requires_recent_baseline_and_adequate_alternative(self):
+        from adaptive.regulator import CapacityLearning
+        model=CapacityLearning()
+        sample=self.sample(0)
+        wall=time.time()
+        def add(pair,shortfall,limited,deficit,last=wall):
+            key=model.key(sample,1,pair)
+            model.rows[key]=dict(seconds=14400,limited_seconds=limited,
+                shortfall_seconds=shortfall,limited_shortfall_seconds=min(shortfall,limited),
+                fact_hz_seconds=40*14400,fset_hz_seconds=40*14400,
+                deficit_k_seconds=deficit*14400,last=last)
+        self.assertEqual(model.startup_choice(sample,1,wall),(("quiet",True),"default"))
+        add(("quiet",True),7200,14400,2)
+        self.assertEqual(model.startup_choice(sample,1,wall),(("quiet",True),"no_valid_alternative"))
+        add(("eco",True),0,1000,.2)
+        add(("turbo",True),0,500,.1)
+        self.assertEqual(model.startup_choice(sample,1,wall),(("eco",True),"learned"))
+        self.assertEqual(model.startup_choice(sample,5,wall),(("quiet",True),"default"))
+        self.assertEqual(model.startup_choice(sample,1,wall+31*86400),(("quiet",True),"default"))
+        self.assertEqual(model.startup_choice(sample,None,wall),(("quiet",True),"default"))
+
     def test_capacity_learning_excludes_defrost_and_gap(self):
         from adaptive.regulator import CapacityLearning
         model=CapacityLearning()
